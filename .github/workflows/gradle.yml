@@ -2,10 +2,6 @@ name: Build Project
 
 on:
   workflow_dispatch:
-  push:
-    branches: [ master, project ]
-  pull_request:
-    branches: [ master, project ]
 
 jobs:
   server:
