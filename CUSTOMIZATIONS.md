@@ -27,6 +27,48 @@ device model and API. No Java model field, database migration, or dedicated
 role endpoint is required for this feature. The Tool owns reconciliation of the
 three managed values and preserves unrelated attributes.
 
+## Participant-aware live visibility
+
+The Tool creates an internal device marked with
+`device.attributes.traccarToolGameState = true`, grants each generated game
+account access to it, and publishes the complete current caught-participant
+state through its latest position:
+
+```text
+position.attributes.traccarToolGameState = true
+position.attributes.traccarToolGameStateVersion = 1
+position.attributes.traccarToolCaughtParticipants = "player:1,supporter:2"
+```
+
+Generated player and supporter accounts carry
+`traccarToolParticipantRole` and `traccarToolParticipantNumber` user
+attributes. The web app combines those values with the device role metadata
+and `traccarToolMirror: true` to remove the signed-in participant's outgoing
+mirrors from the main live page while retaining the real device. For every
+non-administrator account, a caught player or supporter and all matching
+mirrors are removed from the live map, sidebar, counts, camera bounds, live
+routes, and selected status card. Administrators bypass participant filtering,
+but the internal state device remains hidden for every account.
+
+Only positions belonging to a device independently marked as an internal
+state device are trusted as state. Missing, malformed, or unsupported state
+fails open so it cannot accidentally hide ordinary participants. Participant
+identity comes exclusively from `traccarToolRoleNumber`; numeric categories
+are not supported.
+
+This filtering is live-page presentation, not an authorization boundary.
+Traccar permissions remain authoritative, and replay, reports, exports, and
+direct API access retain every ordinary device available to the signed-in
+user. No Java endpoint or schema change is required. The contract assumes each
+generated non-administrator account belongs to one game session; supporting a
+single account across multiple simultaneous sessions would require adding a
+session identifier to the state and participant identities.
+
+Live status, group, geofence, and map filters are scoped to the current
+authenticated browser session. They survive navigation but reset on logout,
+account changes, authentication expiry, and full reload. Device sort order
+remains browser-persistent.
+
 ## Multi-participant replay
 
 The replay page accepts individual devices, nested groups, or all devices
