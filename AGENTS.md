@@ -33,6 +33,18 @@ The defaults are local-only credentials. If `TRACCAR_DB_PASSWORD` or
 `TRACCAR_DB_ROOT_PASSWORD` is overridden, set it before the database volume is
 created and keep it stable for the lifetime of that volume.
 
+Run only one Traccar server against the shared development database at a time.
+The different host ports prevent network conflicts, but two server instances
+can still duplicate scheduled processing and notifications or retain stale
+caches. Before starting local Java, stop the Docker server while leaving MySQL
+running:
+
+```shell
+docker compose --profile full stop traccar
+```
+
+The Vite web server may also remain running while switching server modes.
+
 Build and run the server locally against that database:
 
 ```shell
@@ -63,6 +75,9 @@ docker compose down
 ```
 
 ## Full Docker integration loop
+
+Before starting the full Docker profile, stop any locally running Java server
+with `Ctrl+C`. MySQL and the Vite web server may remain running.
 
 Build and start the combined server and web image with the same MySQL settings:
 

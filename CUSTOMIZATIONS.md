@@ -67,6 +67,18 @@ docker compose up -d --wait database
 Optional `TRACCAR_DB_PASSWORD` and `TRACCAR_DB_ROOT_PASSWORD` overrides must be
 set before the named database volume is first created and then kept stable.
 
+Run only one Traccar server against the shared development database at a time.
+The different host ports prevent network conflicts, but two server instances
+can still duplicate scheduled processing and notifications or retain stale
+caches. Before starting local Java, stop the Docker server while leaving MySQL
+running:
+
+```shell
+docker compose --profile full stop traccar
+```
+
+The Vite web server may also remain running while switching server modes.
+
 Build and run Traccar locally so Java debugging and rebuilds stay fast:
 
 ```shell
@@ -91,6 +103,9 @@ Open `http://localhost:3000`. Configure Traccar Tool with server URL
 `http://localhost:8082` and client URL `http://localhost:5055`.
 
 ### Full Docker integration test
+
+Before starting the full Docker profile, stop any locally running Java server
+with `Ctrl+C`. MySQL and the Vite web server may remain running.
 
 Build and run the combined customized server and web app:
 
