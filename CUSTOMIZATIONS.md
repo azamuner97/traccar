@@ -27,12 +27,40 @@ device model and API. No Java model field, database migration, or dedicated
 role endpoint is required for this feature. The Tool owns reconciliation of the
 three managed values and preserves unrelated attributes.
 
+## Multi-participant replay
+
+The replay page accepts individual devices, nested groups, or all devices
+available to the signed-in user. It resolves the selection to at most 50 unique
+devices and requests at most 48 hours of history from Traccar's existing
+`GET /api/reports/route` endpoint using repeated `deviceId` query parameters.
+These limits protect the replay UI; they do not change the standard report API.
+The server continues to enforce device permissions, log report access, and
+apply its configured `report.maxPositions` history limit.
+
+All selected tracks share one time-based playback clock. A device appears when
+its first fix is reached, remains visible for exactly two minutes after its
+latest fix, and reappears at its next fix. Playback supports timeline seeking,
+one- and ten-second steps, speed presets, and any positive finite custom speed.
+Markers are unclustered and retain the participant role badges described above.
+
+Routes are optional and disabled by default. When enabled, the web app renders
+one continuous speed-gradient route per device against a combined speed scale.
+Route points can be enabled separately and seek the shared replay clock when
+selected. KML download remains available when the resolved selection contains
+exactly one device.
+
+Replay is frontend orchestration over existing persisted position history. It
+does not require a Java endpoint, schema migration, or Traccar Tool change. A
+dedicated backend would only be appropriate if replay later requires
+server-managed sessions, authoritative game-state filtering, or paginated
+global result limits.
+
 ## Build contract
 
 The release workflow checks out this repository with submodules and builds
 `traccar-web/` at the commit recorded by the server repository. It must not
-select a separate web revision by a release tag. Project-branch CI runs the web
-role-marker tests, lint, and production build in addition to the server build.
+select a separate web revision by a release tag. Project-branch CI runs all web
+unit tests, lint, and the production build in addition to the server build.
 
 When changing the web app:
 
