@@ -1,6 +1,7 @@
 name: Build Project
 
 on:
+  workflow_dispatch:
   push:
     branches: [ master, project ]
   pull_request:
