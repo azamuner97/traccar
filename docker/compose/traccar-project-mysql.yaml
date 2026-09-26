@@ -1,0 +1,51 @@
+name: traccar-production
+
+services:
+  database:
+    image: mysql:8.4.8@sha256:be18eb9dc45eea9b86cb74f8c68ab92ce8569ecc37ea4e6fade02e37036c5ff4
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${TRACCAR_DB_ROOT_PASSWORD:?TRACCAR_DB_ROOT_PASSWORD is required}
+      MYSQL_DATABASE: ${TRACCAR_DB_NAME:?TRACCAR_DB_NAME is required}
+      MYSQL_USER: ${TRACCAR_DB_USER:?TRACCAR_DB_USER is required}
+      MYSQL_PASSWORD: ${TRACCAR_DB_PASSWORD:?TRACCAR_DB_PASSWORD is required}
+    volumes:
+      - type: bind
+        source: ${TRACCAR_DATA_PATH:?TRACCAR_DATA_PATH is required}
+        target: /var/lib/mysql
+      - type: bind
+        source: ../mysql-conf.d/traccar.cnf
+        target: /etc/mysql/conf.d/traccar.cnf
+        read_only: true
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p\"$${MYSQL_ROOT_PASSWORD}\" --silent"]
+      interval: 5s
+      timeout: 5s
+      start_period: 20s
+      retries: 30
+
+  traccar:
+    image: docker.io/azamuner97/traccar:${TRACCAR_IMAGE_TAG:?TRACCAR_IMAGE_TAG is required}
+    restart: unless-stopped
+    depends_on:
+      database:
+        condition: service_healthy
+    environment:
+      CONFIG_USE_ENVIRONMENT_VARIABLES: "true"
+      DATABASE_DRIVER: com.mysql.cj.jdbc.Driver
+      DATABASE_URL: "jdbc:mysql://database:3306/${TRACCAR_DB_NAME:?TRACCAR_DB_NAME is required}?zeroDateTimeBehavior=round&serverTimezone=UTC&allowPublicKeyRetrieval=true&useSSL=false&allowMultiQueries=true&autoReconnect=true&useUnicode=yes&characterEncoding=UTF-8&sessionVariables=sql_mode=''"
+      DATABASE_USER: ${TRACCAR_DB_USER:?TRACCAR_DB_USER is required}
+      DATABASE_PASSWORD: ${TRACCAR_DB_PASSWORD:?TRACCAR_DB_PASSWORD is required}
+    ports:
+      - "${TRACCAR_BIND_ADDRESS:?TRACCAR_BIND_ADDRESS is required}:${TRACCAR_WEB_PORT:?TRACCAR_WEB_PORT is required}:8082"
+      - "${TRACCAR_BIND_ADDRESS:?TRACCAR_BIND_ADDRESS is required}:${TRACCAR_OSMAND_PORT:?TRACCAR_OSMAND_PORT is required}:5055"
+    volumes:
+      - type: bind
+        source: ${TRACCAR_LOGS_PATH:?TRACCAR_LOGS_PATH is required}
+        target: /opt/traccar/logs
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8082/api/health"]
+      interval: 10s
+      timeout: 5s
+      start_period: 2m
+      retries: 12

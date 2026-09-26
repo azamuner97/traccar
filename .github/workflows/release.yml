@@ -300,27 +300,15 @@ jobs:
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
-      - uses: docker/login-action@v4
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
       - id: meta
         uses: docker/metadata-action@v6
         with:
           flavor: latest=false
-          images: |
-            traccar/traccar
-            ghcr.io/traccar/traccar
+          images: docker.io/azamuner97/traccar
           tags: |
-            type=semver,pattern={{major}}.{{minor}}.{{patch}},suffix=-${{ matrix.os }},value=v${{ github.event.inputs.version }}
-            type=semver,pattern={{major}}.{{minor}},suffix=-${{ matrix.os }},value=v${{ github.event.inputs.version }}
-            type=semver,pattern={{major}},suffix=-${{ matrix.os }},value=v${{ github.event.inputs.version }}
-            type=semver,pattern={{major}}.{{minor}}.{{patch}},value=v${{ github.event.inputs.version }},enable=${{ matrix.os == 'alpine' }}
-            type=semver,pattern={{major}}.{{minor}},value=v${{ github.event.inputs.version }},enable=${{ matrix.os == 'alpine' }}
-            type=semver,pattern={{major}},value=v${{ github.event.inputs.version }},enable=${{ matrix.os == 'alpine' }}
+            type=raw,value=${{ github.event.inputs.version }}-${{ matrix.os }}
+            type=raw,value=${{ github.event.inputs.version }},enable=${{ matrix.os == 'alpine' }}
             type=raw,value=latest,enable=${{ matrix.os == 'alpine' }}
-            type=raw,value=${{ matrix.os }}
           labels: |
             org.opencontainers.image.version=${{ github.event.inputs.version }}
       - uses: docker/build-push-action@v7
