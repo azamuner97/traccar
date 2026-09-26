@@ -2,12 +2,13 @@ name: Build Project
 
 on:
   push:
-    branches: [ master ]
+    branches: [ master, project ]
   pull_request:
-    branches: [ master ]
+    branches: [ master, project ]
 
 jobs:
-  build:
+  server:
+    name: Build server
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v6
@@ -17,3 +18,24 @@ jobs:
         java-version: 21
         cache: gradle
     - run: ./gradlew build --no-daemon --stacktrace
+
+  web:
+    name: Test and build web submodule
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v6
+      with:
+        submodules: recursive
+    - uses: actions/setup-node@v6
+      with:
+        node-version: 22
+        cache: npm
+        cache-dependency-path: traccar-web/package-lock.json
+    - run: npm ci
+      working-directory: traccar-web
+    - run: npm test
+      working-directory: traccar-web
+    - run: npm run lint
+      working-directory: traccar-web
+    - run: npm run build
+      working-directory: traccar-web

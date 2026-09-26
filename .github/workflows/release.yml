@@ -43,19 +43,21 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
-          repository: traccar/traccar-web
-          ref: ${{ github.ref_name }}
+          fetch-depth: 0
+          submodules: recursive
       - uses: actions/setup-node@v6
         with:
           node-version: 22
           cache: npm
+          cache-dependency-path: traccar-web/package-lock.json
       - run: npm ci && npm run build
+        working-directory: traccar-web
       - name: Stage web payload
         shell: bash
         run: |
           mkdir -p out/web out/templates/translations
-          cp -r build/* out/web/
-          cp -r src/resources/l10n/* out/templates/translations/
+          cp -r traccar-web/build/* out/web/
+          cp -r traccar-web/src/resources/l10n/* out/templates/translations/
       - uses: actions/upload-artifact@v7
         with:
           name: staged-web

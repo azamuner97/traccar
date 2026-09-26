@@ -29,6 +29,10 @@ Some of the available features include:
 
 Please read [build from source documentation](https://www.traccar.org/build/) on the official website.
 
+This fork pins its customized web application as the `traccar-web` Git
+submodule. See [CUSTOMIZATIONS.md](CUSTOMIZATIONS.md) for the participant-role
+metadata contract, build behavior, and rollout order.
+
 ## Team
 
 - Anton Tananaev ([anton@traccar.org](mailto:anton@traccar.org))
