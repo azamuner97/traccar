@@ -28,7 +28,9 @@ import org.traccar.database.NotificationManager;
 import org.traccar.model.BaseModel;
 import org.traccar.model.Device;
 import org.traccar.model.Event;
+import org.traccar.model.Geofence;
 import org.traccar.model.LogRecord;
+import org.traccar.model.ObjectOperation;
 import org.traccar.model.Position;
 import org.traccar.model.User;
 import org.traccar.session.cache.CacheManager;
@@ -341,6 +343,20 @@ public class ConnectionManager implements BroadcastInterface {
         }
     }
 
+    private void updateGeofences() {
+        listeners.values().stream()
+                .flatMap(Set::stream)
+                .forEach(UpdateListener::onUpdateGeofences);
+    }
+
+    @Override
+    public synchronized <T extends BaseModel> void invalidateObject(
+            boolean local, Class<T> clazz, long id, ObjectOperation operation) {
+        if (clazz.equals(Geofence.class)) {
+            updateGeofences();
+        }
+    }
+
     @Override
     public synchronized <T1 extends BaseModel, T2 extends BaseModel> void invalidatePermission(
             boolean local, Class<T1> clazz1, long id1, Class<T2> clazz2, long id2, boolean link) {
@@ -355,6 +371,9 @@ public class ConnectionManager implements BroadcastInterface {
                     return userIds.isEmpty() ? null : userIds;
                 });
             }
+        }
+        if (clazz1.equals(Geofence.class) || clazz2.equals(Geofence.class)) {
+            updateGeofences();
         }
     }
 
@@ -386,6 +405,7 @@ public class ConnectionManager implements BroadcastInterface {
         void onUpdatePosition(Position position);
         void onUpdateEvent(Event event);
         void onUpdateLog(LogRecord record);
+        void onUpdateGeofences();
     }
 
     public synchronized void addListener(long userId, UpdateListener listener) throws StorageException {

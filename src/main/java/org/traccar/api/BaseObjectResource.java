@@ -89,6 +89,9 @@ public abstract class BaseObjectResource<T extends BaseModel> extends BaseResour
             actionLogger.link(request, getUserId(), User.class, getUserId(), baseClass, entity.getId());
         }
 
+        cacheManager.invalidateObject(true, entity.getClass(), entity.getId(), ObjectOperation.ADD);
+        connectionManager.invalidateObject(true, entity.getClass(), entity.getId(), ObjectOperation.ADD);
+
         return Response.ok(entity).build();
     }
 
@@ -130,6 +133,7 @@ public abstract class BaseObjectResource<T extends BaseModel> extends BaseResour
             }
         }
         cacheManager.invalidateObject(true, entity.getClass(), entity.getId(), ObjectOperation.UPDATE);
+        connectionManager.invalidateObject(true, entity.getClass(), entity.getId(), ObjectOperation.UPDATE);
         actionLogger.edit(request, getUserId(), entity);
 
         return Response.ok(entity).build();
@@ -143,6 +147,7 @@ public abstract class BaseObjectResource<T extends BaseModel> extends BaseResour
 
         storage.removeObject(baseClass, new Request(new Condition.Equals("id", id)));
         cacheManager.invalidateObject(true, baseClass, id, ObjectOperation.DELETE);
+        connectionManager.invalidateObject(true, baseClass, id, ObjectOperation.DELETE);
 
         actionLogger.remove(request, getUserId(), baseClass, id);
 
