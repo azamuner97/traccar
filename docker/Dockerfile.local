@@ -1,0 +1,43 @@
+FROM eclipse-temurin:21-jdk AS server-build
+
+WORKDIR /source
+COPY gradle gradle
+COPY gradlew build.gradle settings.gradle ./
+COPY src src
+RUN chmod +x gradlew && ./gradlew assemble --no-daemon --stacktrace
+
+FROM node:22-bookworm-slim AS web-build
+
+WORKDIR /source
+COPY traccar-web/.npmrc traccar-web/package.json traccar-web/package-lock.json ./
+RUN npm ci
+COPY traccar-web/ ./
+RUN npm test && npm run lint && npm run build
+
+FROM eclipse-temurin:25-alpine AS jre-build
+
+RUN jlink \
+    --add-modules java.se,jdk.charsets,jdk.crypto.ec,jdk.net,jdk.unsupported \
+    --strip-debug \
+    --no-header-files \
+    --no-man-pages \
+    --compress=2 \
+    --output /jre
+
+FROM alpine
+
+COPY --from=jre-build /jre /opt/traccar/jre
+COPY --from=server-build /source/target/tracker-server.jar /opt/traccar/
+COPY --from=server-build /source/target/lib /opt/traccar/lib
+COPY schema /opt/traccar/schema
+COPY templates /opt/traccar/templates
+COPY setup/traccar.xml /opt/traccar/conf/traccar.xml
+COPY --from=web-build /source/build /opt/traccar/web
+COPY traccar-web/src/resources/l10n /opt/traccar/templates/translations
+
+RUN mkdir -p /opt/traccar/data /opt/traccar/logs
+
+WORKDIR /opt/traccar
+EXPOSE 8082 5055
+ENTRYPOINT ["/opt/traccar/jre/bin/java", "-XX:+ExitOnOutOfMemoryError"]
+CMD ["-jar", "tracker-server.jar", "conf/traccar.xml"]

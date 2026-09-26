@@ -40,6 +40,21 @@ When changing the web app:
 2. Update and commit the `traccar-web` submodule pointer in this repository.
 3. Build the combined server release from that server commit.
 
+For a disposable local source build with Docker Desktop:
+
+```shell
+docker build -f docker/Dockerfile.local -t traccar-project:local .
+docker volume create traccar-project-data
+docker run --name traccar-project-local \
+  -p 8083:8082 -p 5056:5055 \
+  -v traccar-project-data:/opt/traccar/data \
+  traccar-project:local
+```
+
+Open `http://localhost:8083`. Configure the Tool with web URL
+`http://localhost:8083` and client URL `http://localhost:5056`. The named volume
+keeps local test data when the container is replaced.
+
 ## Rollout order
 
 1. Deploy the combined server and web build.
