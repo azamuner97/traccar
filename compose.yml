@@ -1,0 +1,54 @@
+name: traccar-development
+
+services:
+  database:
+    image: mysql:8.4.8@sha256:be18eb9dc45eea9b86cb74f8c68ab92ce8569ecc37ea4e6fade02e37036c5ff4
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${TRACCAR_DB_ROOT_PASSWORD:-traccar-root-dev}
+      MYSQL_DATABASE: traccar
+      MYSQL_USER: traccar
+      MYSQL_PASSWORD: ${TRACCAR_DB_PASSWORD:-traccar-dev}
+    ports:
+      - "127.0.0.1:3307:3306"
+    volumes:
+      - traccar-mysql-data:/var/lib/mysql
+      - ./docker/mysql-conf.d/traccar.cnf:/etc/mysql/conf.d/traccar.cnf:ro
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p\"$${MYSQL_ROOT_PASSWORD}\" --silent"]
+      interval: 5s
+      timeout: 5s
+      start_period: 20s
+      retries: 30
+
+  traccar:
+    profiles: [full]
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.local
+    image: traccar-project:local
+    restart: unless-stopped
+    depends_on:
+      database:
+        condition: service_healthy
+    environment:
+      CONFIG_USE_ENVIRONMENT_VARIABLES: "true"
+      DATABASE_DRIVER: com.mysql.cj.jdbc.Driver
+      DATABASE_URL: "jdbc:mysql://database:3306/traccar?zeroDateTimeBehavior=round&serverTimezone=UTC&allowPublicKeyRetrieval=true&useSSL=false&allowMultiQueries=true&autoReconnect=true&useUnicode=yes&characterEncoding=UTF-8&sessionVariables=sql_mode=''"
+      DATABASE_USER: traccar
+      DATABASE_PASSWORD: ${TRACCAR_DB_PASSWORD:-traccar-dev}
+    ports:
+      - "8083:8082"
+      - "5056:5055"
+    volumes:
+      - traccar-logs:/opt/traccar/logs
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8082/api/health"]
+      interval: 10s
+      timeout: 5s
+      start_period: 2m
+      retries: 12
+
+volumes:
+  traccar-mysql-data:
+  traccar-logs:

@@ -40,3 +40,30 @@ jobs:
       working-directory: traccar-web
     - run: npm run build
       working-directory: traccar-web
+
+  integration:
+    name: MySQL Compose smoke test
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v6
+      with:
+        submodules: recursive
+    - name: Validate Compose configuration
+      run: docker compose config --quiet
+    - name: Build and start full stack
+      run: docker compose --profile full up -d --build --wait --wait-timeout 600
+    - name: Verify Traccar health and web app
+      run: |
+        curl --fail --silent --show-error http://localhost:8083/api/health
+        curl --fail --silent --show-error --output /dev/null http://localhost:8083/
+    - name: Verify deployment-matched MySQL settings
+      run: |
+        actual="$(docker compose exec -T database sh -c 'MYSQL_PWD="$MYSQL_ROOT_PASSWORD" mysql -uroot --batch --skip-column-names -e "SELECT CONCAT_WS(\"|\", VERSION(), @@character_set_server, @@collation_server, @@innodb_buffer_pool_size, @@innodb_redo_log_capacity, @@innodb_flush_method, @@innodb_flush_log_at_trx_commit, @@log_bin);"')"
+        expected="8.4.8|utf8mb4|utf8mb4_0900_ai_ci|2147483648|1073741824|O_DIRECT|2|0"
+        test "$actual" = "$expected"
+    - name: Show service logs after failure
+      if: failure()
+      run: docker compose --profile full logs --no-color database traccar
+    - name: Remove disposable CI stack
+      if: always()
+      run: docker compose --profile full down --volumes --remove-orphans
