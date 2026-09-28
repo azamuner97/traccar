@@ -52,4 +52,20 @@
 
   </changeSet>
 
+  <changeSet author="author" id="changelog-6.16.0-drawing-text-style">
+
+    <addColumn tableName="tc_drawings">
+      <column name="textsize" type="INT" defaultValueNumeric="16">
+        <constraints nullable="false" />
+      </column>
+      <column name="textbold" type="BOOLEAN" defaultValueBoolean="false">
+        <constraints nullable="false" />
+      </column>
+      <column name="textitalic" type="BOOLEAN" defaultValueBoolean="false">
+        <constraints nullable="false" />
+      </column>
+    </addColumn>
+
+  </changeSet>
+
 </databaseChangeLog>

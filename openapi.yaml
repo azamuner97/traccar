@@ -4329,6 +4329,19 @@ components:
           type: [string, 'null']
           maxLength: 200
           description: Multiline label used by text drawings
+        textSize:
+          type: integer
+          enum: [12, 16, 24, 32]
+          default: 16
+          description: Font size in screen pixels for text drawings
+        textBold:
+          type: boolean
+          default: false
+          description: Whether a text drawing uses bold font weight
+        textItalic:
+          type: boolean
+          default: false
+          description: Whether a text drawing uses italic font style
     Geofence:
       type: object
       properties:

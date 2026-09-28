@@ -84,6 +84,36 @@ public class Drawing extends BaseModel {
         this.text = text;
     }
 
+    private int textSize = 16;
+
+    public int getTextSize() {
+        return textSize;
+    }
+
+    public void setTextSize(int textSize) {
+        this.textSize = textSize;
+    }
+
+    private boolean textBold;
+
+    public boolean getTextBold() {
+        return textBold;
+    }
+
+    public void setTextBold(boolean textBold) {
+        this.textBold = textBold;
+    }
+
+    private boolean textItalic;
+
+    public boolean getTextItalic() {
+        return textItalic;
+    }
+
+    public void setTextItalic(boolean textItalic) {
+        this.textItalic = textItalic;
+    }
+
     private String ownerName;
 
     @QueryIgnore

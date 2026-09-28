@@ -30,9 +30,11 @@ public final class DrawingUtil {
 
     public static final int MAX_TEXT_LENGTH = 200;
     public static final int MAX_COORDINATES = 1000;
+    public static final int DEFAULT_TEXT_SIZE = 16;
 
     private static final Set<String> TYPES = Set.of(
             "line", "arrow", "polygon", "rectangle", "circle", "text");
+    private static final Set<Integer> TEXT_SIZES = Set.of(12, 16, 24, 32);
     private static final Pattern COLOR_PATTERN = Pattern.compile("^#[0-9a-fA-F]{6}$");
 
     private DrawingUtil() {
@@ -109,8 +111,14 @@ public final class DrawingUtil {
                     || drawing.getText().length() > MAX_TEXT_LENGTH) {
                 throw new IllegalArgumentException("Invalid drawing text");
             }
+            if (!TEXT_SIZES.contains(drawing.getTextSize())) {
+                throw new IllegalArgumentException("Invalid drawing text size");
+            }
         } else {
             drawing.setText(null);
+            drawing.setTextSize(DEFAULT_TEXT_SIZE);
+            drawing.setTextBold(false);
+            drawing.setTextItalic(false);
         }
         drawing.setColor(drawing.getColor().toUpperCase());
     }

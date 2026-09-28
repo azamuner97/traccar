@@ -23,6 +23,7 @@ import org.traccar.model.User;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -50,7 +51,14 @@ public class DrawingUtilTest {
         }
         Drawing text = drawing("text", "{\"type\":\"Point\",\"coordinates\":[7,46]}");
         text.setText("Line one\nLine two");
-        assertDoesNotThrow(() -> DrawingUtil.validate(text));
+        for (int textSize : new int[] {12, 16, 24, 32}) {
+            text.setTextSize(textSize);
+            text.setTextBold(textSize == 24);
+            text.setTextItalic(textSize == 32);
+            assertDoesNotThrow(() -> DrawingUtil.validate(text));
+            assertEquals(textSize == 24, text.getTextBold());
+            assertEquals(textSize == 32, text.getTextItalic());
+        }
         assertEquals("#12ABEF", text.getColor());
     }
 
@@ -68,6 +76,26 @@ public class DrawingUtilTest {
         Drawing longText = drawing("text", "{\"type\":\"Point\",\"coordinates\":[7,46]}");
         longText.setText("x".repeat(DrawingUtil.MAX_TEXT_LENGTH + 1));
         assertThrows(IllegalArgumentException.class, () -> DrawingUtil.validate(longText));
+        Drawing invalidTextSize = drawing("text", "{\"type\":\"Point\",\"coordinates\":[7,46]}");
+        invalidTextSize.setText("Label");
+        invalidTextSize.setTextSize(14);
+        assertThrows(IllegalArgumentException.class, () -> DrawingUtil.validate(invalidTextSize));
+    }
+
+    @Test
+    public void testNonTextFormattingIsNormalized() throws Exception {
+        Drawing line = drawing("line", "{\"type\":\"LineString\",\"coordinates\":[[7,46],[8,47]]}");
+        line.setText("not applicable");
+        line.setTextSize(32);
+        line.setTextBold(true);
+        line.setTextItalic(true);
+
+        DrawingUtil.validate(line);
+
+        assertNull(line.getText());
+        assertEquals(DrawingUtil.DEFAULT_TEXT_SIZE, line.getTextSize());
+        assertFalse(line.getTextBold());
+        assertFalse(line.getTextItalic());
     }
 
     private User user(long id, String role, Long sessionDeviceId, boolean enabled) {
