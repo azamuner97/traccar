@@ -222,6 +222,16 @@ public class User extends ExtendedModel implements UserRestrictions, Disableable
         this.disableReports = disableReports;
     }
 
+    private boolean disableDrawings = true;
+
+    public boolean getDisableDrawings() {
+        return disableDrawings;
+    }
+
+    public void setDisableDrawings(boolean disableDrawings) {
+        this.disableDrawings = disableDrawings;
+    }
+
     private boolean fixedEmail;
 
     @Override

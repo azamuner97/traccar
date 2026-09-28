@@ -48,6 +48,8 @@ public class AsyncSocket implements Session.Listener.AutoDemanding, ConnectionMa
     private static final String KEY_INVALIDATE = "invalidate";
 
     private static final String RESOURCE_GEOFENCES = "geofences";
+    private static final String RESOURCE_DRAWINGS = "drawings";
+    private static final String RESOURCE_USER = "user";
 
     private final ObjectMapper objectMapper;
     private final ConnectionManager connectionManager;
@@ -133,6 +135,16 @@ public class AsyncSocket implements Session.Listener.AutoDemanding, ConnectionMa
     @Override
     public void onUpdateGeofences() {
         sendData(Map.of(KEY_INVALIDATE, List.of(RESOURCE_GEOFENCES)));
+    }
+
+    @Override
+    public void onUpdateDrawings() {
+        sendData(Map.of(KEY_INVALIDATE, List.of(RESOURCE_DRAWINGS)));
+    }
+
+    @Override
+    public void onUpdateUser() {
+        sendData(Map.of(KEY_INVALIDATE, List.of(RESOURCE_USER)));
     }
 
     private void sendData(Map<String, Collection<?>> data) {

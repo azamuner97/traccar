@@ -15,6 +15,7 @@ import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class QueryBuilderTest {
@@ -32,6 +33,7 @@ public class QueryBuilderTest {
         private String name;
         private Date fixTime;
         private byte[] data;
+        private Long optionalId;
 
         public long getId() { return id; }
         public void setId(long id) { this.id = id; }
@@ -49,6 +51,8 @@ public class QueryBuilderTest {
         public void setFixTime(Date fixTime) { this.fixTime = fixTime; }
         public byte[] getData() { return data; }
         public void setData(byte[] data) { this.data = data; }
+        public Long getOptionalId() { return optionalId; }
+        public void setOptionalId(Long optionalId) { this.optionalId = optionalId; }
     }
 
     @BeforeEach
@@ -71,7 +75,8 @@ public class QueryBuilderTest {
                             + "speed DOUBLE,"
                             + "name VARCHAR(255),"
                             + "fixTime TIMESTAMP,"
-                            + "data VARBINARY(255))");
+                            + "data VARBINARY(255),"
+                            + "optionalId BIGINT)");
         }
     }
 
@@ -122,10 +127,11 @@ public class QueryBuilderTest {
         entity.setFixTime(now);
         entity.setData(new byte[] {9, 8, 7});
 
-        List<String> columns = List.of("active", "count", "deviceId", "speed", "name", "fixTime", "data");
+        List<String> columns = List.of(
+                "active", "count", "deviceId", "speed", "name", "fixTime", "data", "optionalId");
         try (QueryBuilder insert = QueryBuilder.create(config, dataSource, objectMapper,
-                "INSERT INTO test_entity(active, count, deviceId, speed, name, fixTime, data) "
-                        + "VALUES (?, ?, ?, ?, ?, ?, ?)", true)) {
+                "INSERT INTO test_entity(active, count, deviceId, speed, name, fixTime, data, optionalId) "
+                        + "VALUES (?, ?, ?, ?, ?, ?, ?, ?)", true)) {
             insert.setObject(entity, columns);
             insert.executeUpdate();
         }
@@ -143,6 +149,7 @@ public class QueryBuilderTest {
             assertEquals("world", loaded.getName());
             assertEquals(now, loaded.getFixTime());
             assertArrayEquals(new byte[] {9, 8, 7}, loaded.getData());
+            assertNull(loaded.getOptionalId());
         }
     }
 

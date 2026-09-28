@@ -27,6 +27,7 @@ import org.traccar.database.DeviceLookupService;
 import org.traccar.database.NotificationManager;
 import org.traccar.model.BaseModel;
 import org.traccar.model.Device;
+import org.traccar.model.Drawing;
 import org.traccar.model.Event;
 import org.traccar.model.Geofence;
 import org.traccar.model.LogRecord;
@@ -349,11 +350,25 @@ public class ConnectionManager implements BroadcastInterface {
                 .forEach(UpdateListener::onUpdateGeofences);
     }
 
+    private void updateDrawings() {
+        listeners.values().stream()
+                .flatMap(Set::stream)
+                .forEach(UpdateListener::onUpdateDrawings);
+    }
+
+    private void updateUser(long userId) {
+        listeners.getOrDefault(userId, Set.of()).forEach(UpdateListener::onUpdateUser);
+    }
+
     @Override
     public synchronized <T extends BaseModel> void invalidateObject(
             boolean local, Class<T> clazz, long id, ObjectOperation operation) {
         if (clazz.equals(Geofence.class)) {
             updateGeofences();
+        } else if (clazz.equals(Drawing.class)) {
+            updateDrawings();
+        } else if (clazz.equals(User.class)) {
+            updateUser(id);
         }
     }
 
@@ -406,6 +421,8 @@ public class ConnectionManager implements BroadcastInterface {
         void onUpdateEvent(Event event);
         void onUpdateLog(LogRecord record);
         void onUpdateGeofences();
+        void onUpdateDrawings();
+        void onUpdateUser();
     }
 
     public synchronized void addListener(long userId, UpdateListener listener) throws StorageException {

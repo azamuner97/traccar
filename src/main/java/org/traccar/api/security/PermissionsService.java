@@ -16,6 +16,7 @@
 package org.traccar.api.security;
 
 import com.google.inject.servlet.RequestScoped;
+import org.traccar.helper.model.DrawingUtil;
 import org.traccar.model.BaseModel;
 import org.traccar.model.Calendar;
 import org.traccar.model.Command;
@@ -76,7 +77,8 @@ public class PermissionsService {
     }
 
     public void checkAdmin(long userId) throws StorageException, SecurityException {
-        if (!getUser(userId).getAdministrator()) {
+        User user = getUser(userId);
+        if (user == null || !user.getAdministrator()) {
             throw new SecurityException("Administrator access required");
         }
     }
@@ -178,6 +180,17 @@ public class PermissionsService {
     }
 
     public void checkUserUpdate(long userId, User before, User after) throws StorageException, SecurityException {
+        if (!Objects.equals(
+                before.getAttributes().get(DrawingUtil.ATTRIBUTE_USER_ROLE),
+                after.getAttributes().get(DrawingUtil.ATTRIBUTE_USER_ROLE))
+                || !Objects.equals(
+                before.getAttributes().get(DrawingUtil.ATTRIBUTE_SESSION_DEVICE_ID),
+                after.getAttributes().get(DrawingUtil.ATTRIBUTE_SESSION_DEVICE_ID))) {
+            checkAdmin(userId);
+        }
+        if (before.getDisableDrawings() != after.getDisableDrawings()) {
+            checkAdmin(userId);
+        }
         if (before.getAdministrator() != after.getAdministrator()
                 || before.getDeviceLimit() != after.getDeviceLimit()
                 || before.getUserLimit() != after.getUserLimit()) {

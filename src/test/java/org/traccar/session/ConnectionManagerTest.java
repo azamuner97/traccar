@@ -7,10 +7,12 @@ import org.traccar.config.Config;
 import org.traccar.database.DeviceLookupService;
 import org.traccar.database.NotificationManager;
 import org.traccar.model.Device;
+import org.traccar.model.Drawing;
 import org.traccar.model.Geofence;
 import org.traccar.model.Group;
 import org.traccar.model.Notification;
 import org.traccar.model.ObjectOperation;
+import org.traccar.model.User;
 import org.traccar.session.cache.CacheManager;
 import org.traccar.storage.Storage;
 import org.traccar.storage.query.Request;
@@ -72,6 +74,20 @@ public class ConnectionManagerTest {
         reset(listener);
         connectionManager.invalidatePermission(true, Group.class, 1, Notification.class, 2, true);
         verify(listener, never()).onUpdateGeofences();
+    }
+
+    @Test
+    public void testDrawingAndUserInvalidation() {
+        connectionManager.invalidateObject(true, Drawing.class, 1, ObjectOperation.ADD);
+        verify(listener).onUpdateDrawings();
+
+        reset(listener);
+        connectionManager.invalidateObject(true, User.class, 1, ObjectOperation.UPDATE);
+        verify(listener).onUpdateUser();
+
+        reset(listener);
+        connectionManager.invalidateObject(true, User.class, 2, ObjectOperation.UPDATE);
+        verify(listener, never()).onUpdateUser();
     }
 
 }

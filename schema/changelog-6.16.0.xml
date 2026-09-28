@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<databaseChangeLog
+  xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+  xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog
+                      http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-3.4.xsd"
+  logicalFilePath="changelog-6.16.0">
+
+  <changeSet author="author" id="changelog-6.16.0-drawings">
+
+    <addColumn tableName="tc_users">
+      <column name="disabledrawings" type="BOOLEAN" defaultValueBoolean="true">
+        <constraints nullable="false" />
+      </column>
+    </addColumn>
+
+    <createTable tableName="tc_drawings">
+      <column autoIncrement="true" name="id" type="INT">
+        <constraints primaryKey="true" />
+      </column>
+      <column name="ownerid" type="INT">
+        <constraints nullable="false" />
+      </column>
+      <column name="sessiondeviceid" type="INT" />
+      <column name="type" type="VARCHAR(16)">
+        <constraints nullable="false" />
+      </column>
+      <column name="geometry" type="TEXT">
+        <constraints nullable="false" />
+      </column>
+      <column name="color" type="VARCHAR(7)">
+        <constraints nullable="false" />
+      </column>
+      <column name="text" type="VARCHAR(200)" />
+    </createTable>
+
+    <addForeignKeyConstraint
+      baseTableName="tc_drawings" baseColumnNames="ownerid"
+      constraintName="fk_drawings_ownerid" referencedTableName="tc_users"
+      referencedColumnNames="id" onDelete="CASCADE" />
+    <addForeignKeyConstraint
+      baseTableName="tc_drawings" baseColumnNames="sessiondeviceid"
+      constraintName="fk_drawings_sessiondeviceid" referencedTableName="tc_devices"
+      referencedColumnNames="id" onDelete="SET NULL" />
+
+    <createIndex tableName="tc_drawings" indexName="idx_drawings_ownerid">
+      <column name="ownerid" />
+    </createIndex>
+    <createIndex tableName="tc_drawings" indexName="idx_drawings_sessiondeviceid">
+      <column name="sessiondeviceid" />
+    </createIndex>
+
+  </changeSet>
+
+</databaseChangeLog>

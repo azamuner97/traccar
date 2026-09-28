@@ -159,7 +159,9 @@ public final class QueryBuilder implements AutoCloseable {
                 var property = ReflectionCache.getProperties(object.getClass(), "get").get(column);
                 Class<?> returnType = property.type();
                 Object value = property.handle().invokeExact(object);
-                if (returnType.equals(boolean.class)) {
+                if (value == null) {
+                    statement.setNull(index + 1, Types.NULL);
+                } else if (returnType.equals(boolean.class)) {
                     setBoolean(index, (Boolean) value);
                 } else if (returnType.equals(int.class)) {
                     setInteger(index, (Integer) value);
