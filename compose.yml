@@ -37,6 +37,9 @@ services:
       DATABASE_URL: "jdbc:mysql://database:3306/traccar?zeroDateTimeBehavior=round&serverTimezone=UTC&allowPublicKeyRetrieval=true&useSSL=false&allowMultiQueries=true&autoReconnect=true&useUnicode=yes&characterEncoding=UTF-8&sessionVariables=sql_mode=''"
       DATABASE_USER: traccar
       DATABASE_PASSWORD: ${TRACCAR_DB_PASSWORD:-traccar-dev}
+      # Append traccar and supply the key externally to test Manager push alerts.
+      NOTIFICATOR_TYPES: ${TRACCAR_NOTIFICATOR_TYPES:-web,mail,command}
+      NOTIFICATOR_TRACCAR_KEY: ${TRACCAR_NOTIFICATOR_TRACCAR_KEY:-}
     ports:
       - "8083:8082"
       - "5056:5055"

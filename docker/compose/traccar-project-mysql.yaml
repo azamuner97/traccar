@@ -36,6 +36,8 @@ services:
       DATABASE_URL: "jdbc:mysql://database:3306/${TRACCAR_DB_NAME:?TRACCAR_DB_NAME is required}?zeroDateTimeBehavior=round&serverTimezone=UTC&allowPublicKeyRetrieval=true&useSSL=false&allowMultiQueries=true&autoReconnect=true&useUnicode=yes&characterEncoding=UTF-8&sessionVariables=sql_mode=''"
       DATABASE_USER: ${TRACCAR_DB_USER:?TRACCAR_DB_USER is required}
       DATABASE_PASSWORD: ${TRACCAR_DB_PASSWORD:?TRACCAR_DB_PASSWORD is required}
+      NOTIFICATOR_TYPES: ${TRACCAR_NOTIFICATOR_TYPES:-web,mail,command,traccar}
+      NOTIFICATOR_TRACCAR_KEY: ${TRACCAR_NOTIFICATOR_TRACCAR_KEY:?TRACCAR_NOTIFICATOR_TRACCAR_KEY is required}
     ports:
       - "${TRACCAR_BIND_ADDRESS:?TRACCAR_BIND_ADDRESS is required}:${TRACCAR_WEB_PORT:?TRACCAR_WEB_PORT is required}:8082"
       - "${TRACCAR_BIND_ADDRESS:?TRACCAR_BIND_ADDRESS is required}:${TRACCAR_OSMAND_PORT:?TRACCAR_OSMAND_PORT is required}:5055"

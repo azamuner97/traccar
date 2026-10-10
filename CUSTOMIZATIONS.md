@@ -64,6 +64,39 @@ generated non-administrator account belongs to one game session; supporting a
 single account across multiple simultaneous sessions would require adding a
 session identifier to the state and participant identities.
 
+## Speedhunt and player-caught alerts
+
+The same internal game-state position can carry a versioned batch of transient
+alerts:
+
+```text
+position.attributes.traccarToolAlertsVersion = 1
+position.attributes.traccarToolAlerts = JSON array
+```
+
+Each array entry contains a unique ID, `speedhunt` or `playerCaught` type,
+`participants` or `session` audience, UTC occurrence time, and final display
+message. The web app reads these attributes directly from raw position socket
+messages, filters them using the generated-user role and session-device
+attributes, and shows a ten-second top-center banner without adding a map
+marker. IDs are deduplicated per server origin and signed-in user.
+
+Traccar Tool sends the matching native notification through Traccar's standard
+announcement endpoint after publishing the map state. Production enables the
+official relay with container environment variables:
+
+```text
+NOTIFICATOR_TYPES=web,mail,command,traccar
+NOTIFICATOR_TRACCAR_KEY=<deployment secret>
+```
+
+Supply the key only through deployment secrets. If a deployment already uses
+additional notificators, keep the complete existing list and append `traccar`.
+The production Compose template reads these values from
+`TRACCAR_NOTIFICATOR_TYPES` and `TRACCAR_NOTIFICATOR_TRACCAR_KEY`; the latter is
+required and is never stored in this repository. Local Compose leaves the
+relay disabled unless both values are supplied explicitly.
+
 Live status, group, geofence, and map filters are scoped to the current
 authenticated browser session. They survive navigation but reset on logout,
 account changes, authentication expiry, and full reload. Device sort order
@@ -197,10 +230,13 @@ repository-safety contract.
 
 ## Rollout order
 
-1. Deploy the combined server and web build.
-2. Release the matching Traccar Tool.
-3. Run Device Setup once for every existing session.
-4. Confirm managed devices have category `person`, integer
+1. Configure and deploy the server notification relay secret and append the
+   `traccar` notificator.
+2. Deploy the combined server and web build.
+3. Release the matching Traccar Tool so alert emission begins only after web
+   parsing and native push delivery are available.
+4. Run Device Setup once for every existing session.
+5. Confirm managed devices have category `person`, integer
    `traccarToolRoleNumber`, and the expected `traccarToolRole` while retaining
    unrelated attributes.
 
