@@ -64,7 +64,7 @@ generated non-administrator account belongs to one game session; supporting a
 single account across multiple simultaneous sessions would require adding a
 session identifier to the state and participant identities.
 
-## Speedhunt and player-caught alerts
+## Speedhunt, player-caught and test alerts
 
 The same internal game-state position can carry a versioned batch of transient
 alerts:
@@ -74,8 +74,8 @@ position.attributes.traccarToolAlertsVersion = 1
 position.attributes.traccarToolAlerts = JSON array
 ```
 
-Each array entry contains a unique ID, `speedhunt` or `playerCaught` type,
-`participants` or `session` audience, UTC occurrence time, optional game timezone,
+Each array entry contains a unique ID, `speedhunt`, `playerCaught` or
+`notificationTest` type, `session` audience, UTC occurrence time, optional game timezone,
 and final timestamped display message. The web app reads these attributes directly
 from raw position socket messages, filters them using the generated-user role and
 session-device attributes, and shows a dismissible 60-second top-center banner
@@ -83,6 +83,20 @@ without adding a map marker. A new notification immediately replaces the previou
 its alarm while visible. All accepted records remain in local “Ereignis” history;
 superseded banners do not reappear. IDs are deduplicated per server origin and
 signed-in user.
+
+All new game and test alerts target the generated players, supporters, hunters,
+and spectator in that session, excluding administrator and unrelated accounts.
+Legacy `speedhunt` records with `participants` audience remain readable only to
+their original player/supporter audience. The Tool's Simulation settings tab
+has a right-aligned **Test notifications** button in the Start simulation row.
+It sends `[HH:mm:ss] Test notification: check that your phone plays a sound.`
+through the same map/alarm/history and native relay paths without starting a
+simulation, saving settings, counting a ping, or catching a player. It requires
+Device setup and generated session accounts. Test delivery uses the shared
+ordered background worker, reports warnings, and does not retry automatically.
+Phone users should test with Manager visible and then separately with the app
+backgrounded/display off; successful server requests do not prove phone delivery
+or audible sound under denied permissions, silent mode or Do Not Disturb.
 
 Local Compose sets `WEB_CACHE_CONTROL=no-cache` so Manager's persistent HTTP
 cache revalidates web files on reopening instead of keeping an obsolete bundle
