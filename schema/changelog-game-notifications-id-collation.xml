@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<databaseChangeLog xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+  xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-3.4.xsd">
+  <changeSet author="traccar-tool" id="game-notifications-id-collation-1" dbms="mysql,mariadb">
+    <!-- Alert IDs are opaque, case-sensitive ASCII tokens, not display text. -->
+    <sql>ALTER TABLE tc_game_notifications MODIFY alertid VARCHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL</sql>
+  </changeSet>
+</databaseChangeLog>

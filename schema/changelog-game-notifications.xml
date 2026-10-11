@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<databaseChangeLog xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+  xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-3.4.xsd">
+  <changeSet author="traccar-tool" id="game-notifications-1">
+    <createTable tableName="tc_game_notifications">
+      <column name="id" type="BIGINT" autoIncrement="true"><constraints primaryKey="true" nullable="false" /></column>
+      <column name="alertid" type="VARCHAR(64)"><constraints nullable="false" /></column>
+      <column name="sessiondeviceid" type="INT"><constraints nullable="false" /></column>
+      <column name="generation" type="VARCHAR(36)"><constraints nullable="false" /></column>
+      <column name="type" type="VARCHAR(32)"><constraints nullable="false" /></column>
+      <column name="audience" type="VARCHAR(16)"><constraints nullable="false" /></column>
+      <column name="occurredat" type="TIMESTAMP(3)"><constraints nullable="false" /></column>
+      <column name="timezone" type="VARCHAR(64)"><constraints nullable="false" /></column>
+      <column name="message" type="TEXT"><constraints nullable="false" /></column>
+      <column name="createdat" type="TIMESTAMP(3)"><constraints nullable="false" /></column>
+    </createTable>
+    <addUniqueConstraint tableName="tc_game_notifications" columnNames="sessiondeviceid,alertid" constraintName="uq_game_notifications_alert" />
+    <addForeignKeyConstraint baseTableName="tc_game_notifications" baseColumnNames="sessiondeviceid"
+      referencedTableName="tc_devices" referencedColumnNames="id" constraintName="fk_game_notifications_session" onDelete="CASCADE" />
+    <createIndex tableName="tc_game_notifications" indexName="idx_game_notifications_session">
+      <column name="sessiondeviceid" /><column name="generation" /><column name="id" />
+    </createIndex>
+  </changeSet>
+</databaseChangeLog>

@@ -19,12 +19,14 @@ import jakarta.servlet.http.HttpServletRequest;
 import jakarta.ws.rs.core.Context;
 import org.traccar.api.BaseObjectResource;
 import org.traccar.database.MediaManager;
+import org.traccar.database.GameNotificationService;
 import org.traccar.helper.LogAction;
 import org.traccar.model.Device;
 import org.traccar.model.DeviceAccumulators;
 import org.traccar.model.LinkedDevice;
 import org.traccar.model.Position;
 import org.traccar.model.User;
+import org.traccar.model.ObjectOperation;
 import org.traccar.session.ConnectionManager;
 import org.traccar.session.cache.CacheManager;
 import org.traccar.storage.StorageException;
@@ -72,6 +74,9 @@ public class DeviceResource extends BaseObjectResource<Device> {
     private MediaManager mediaManager;
 
     @Inject
+    private GameNotificationService gameNotifications;
+
+    @Inject
     private LogAction actionLogger;
 
     @Context
@@ -79,6 +84,27 @@ public class DeviceResource extends BaseObjectResource<Device> {
 
     public DeviceResource() {
         super(Device.class);
+    }
+
+    @Override
+    @POST
+    public Response add(Device device) throws Exception {
+        device.getAttributes().remove(GameNotificationService.GENERATION_ATTRIBUTE);
+        device.getAttributes().remove(GameNotificationService.RESET_ATTRIBUTE);
+        return super.add(device);
+    }
+
+    @Override
+    @Path("{id}")
+    @PUT
+    public Response update(Device device) throws Exception {
+        permissionsService.checkPermission(Device.class, getUserId(), device.getId());
+        permissionsService.checkEdit(getUserId(), device, false, false);
+        gameNotifications.updateDevice(device);
+        cacheManager.invalidateObject(true, Device.class, device.getId(), ObjectOperation.UPDATE);
+        connectionManager.invalidateObject(true, Device.class, device.getId(), ObjectOperation.UPDATE);
+        actionLogger.edit(request, getUserId(), device);
+        return Response.ok(device).build();
     }
 
     @GET

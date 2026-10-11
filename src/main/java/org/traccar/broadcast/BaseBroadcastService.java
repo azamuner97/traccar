@@ -27,6 +27,13 @@ import org.traccar.model.Position;
 
 public abstract class BaseBroadcastService implements BroadcastService {
 
+    @Override
+    public void updateGameNotifications(boolean local, long deviceId) {
+        var message = new BroadcastMessage();
+        message.setGameNotificationsDeviceId(deviceId);
+        sendMessage(message);
+    }
+
     private final Set<BroadcastInterface> listeners = new HashSet<>();
 
     @Override
@@ -97,7 +104,10 @@ public abstract class BaseBroadcastService implements BroadcastService {
     protected abstract void sendMessage(BroadcastMessage message);
 
     protected void handleMessage(BroadcastMessage message) throws Exception {
-        if (message.getDevice() != null) {
+        if (message.getGameNotificationsDeviceId() != null) {
+            listeners.forEach(listener -> listener.updateGameNotifications(
+                    false, message.getGameNotificationsDeviceId()));
+        } else if (message.getDevice() != null) {
             listeners.forEach(listener -> listener.updateDevice(false, message.getDevice()));
         } else if (message.getPosition() != null) {
             listeners.forEach(listener -> listener.updatePosition(false, message.getPosition()));

@@ -66,37 +66,85 @@ session identifier to the state and participant identities.
 
 ## Speedhunt, player-caught and test alerts
 
-The same internal game-state position can carry a versioned batch of transient
-alerts:
+The `tc_game_notifications` journal and authenticated `/api/game-notifications`
+API are the single source for live alerts and full-session history. Each immutable
+row contains a stable alert ID, session-device ID, generation, type, `session`
+audience, UTC occurrence, IANA timezone, final timestamped message and server
+creation time. A database sequence supplies stable cursors; a unique
+session-device/alert-ID constraint prevents duplicate records. Alert IDs are
+case-sensitive, including on MySQL's normally case-insensitive text collation.
+The additive collation migration preserves existing rows. The new Liquibase
+migration leaves previous migrations unchanged. Device deletion cascades to its
+journal.
 
-```text
-position.attributes.traccarToolAlertsVersion = 1
-position.attributes.traccarToolAlerts = JSON array
-```
+The hidden device's protected attributes `traccarToolNotificationGeneration` and
+`traccarToolNotificationResetAt` track active history. Device-row locks serialize
+initialization, insertion and reset. Generic device updates preserve these
+attributes and commit their ordinary fields atomically. Writes require manager/admin authority and device access. Generated
+users read only their eligible own session with a device permission. Administrators
+may inspect history explicitly but never receive automatic game alerts.
 
-Each array entry contains a unique ID, `speedhunt`, `playerCaught` or
-`notificationTest` type, `session` audience, UTC occurrence time, optional game timezone,
-and final timestamped display message. The web app reads these attributes directly
-from raw position socket messages, filters them using the generated-user role and
-session-device attributes, and shows a dismissible 60-second top-center banner
-without adding a map marker. A new notification immediately replaces the previous banner and starts
-its alarm while visible. All accepted records remain in local “Ereignis” history;
-superseded banners do not reappear. IDs are deduplicated per server origin and
-signed-in user.
+API contract:
 
-All new game and test alerts target the generated players, supporters, hunters,
-and spectator in that session, excluding administrator and unrelated accounts.
-Legacy `speedhunt` records with `participants` audience remain readable only to
-their original player/supporter audience. The Tool's Simulation settings tab
-has a right-aligned **Test notifications** button in the Start simulation row.
-It sends `[HH:mm:ss] Test notification: check that your phone plays a sound.`
-through the same map/alarm/history and native relay paths without starting a
-simulation, saving settings, counting a ping, or catching a player. It requires
-Device setup and generated session accounts. Test delivery uses the shared
-ordered background worker, reports warnings, and does not retry automatically.
-Phone users should test with Manager visible and then separately with the app
-backgrounded/display off; successful server requests do not prove phone delivery
-or audible sound under denied permissions, silent mode or Do Not Disturb.
+- `POST /api/game-notifications/session/{id}`: idempotent initialization.
+- `POST /api/game-notifications`: `{sessionDeviceId,generation,alert}`. Identical
+  reuse returns the existing record; conflicting IDs or stale generations return 409.
+- `GET /api/game-notifications?sessionDeviceId=...&generation=...&after=...&limit=100`:
+  version, active generation, reset timestamp, records, next cursor and has-more.
+  The maximum page size is 500; cursor IDs are decimal strings.
+- `POST /api/game-notifications/session/{id}/reset`:
+  `{expectedGeneration,replacementGeneration}`. Retrying the same reset is safe.
+
+These endpoints never send pushes. Successful inserts and resets emit an authorized
+session-scoped websocket `game-notifications` invalidation. The web app fetches
+records on invalidation, login, reconnect, foreground return and drawer opening.
+Uploaded position content cannot create trusted notifications. No legacy position
+payload parsing, recovery, historical import or local-cache migration remains.
+
+All three types—`speedhunt`, `playerCaught`, `notificationTest`—target generated
+players, supporters, hunters and spectator; administrators and unrelated accounts
+are excluded. The `playerCaught` type covers newly caught players and supporters,
+using `<display name> was caught` for either role; unchanged saves and releases
+do not alert, while re-catching a released participant does. The Tool captures
+`[HH:mm:ss]` in the game timezone once before
+enqueueing; archive and push receive identical final text. The ordered background
+worker binds jobs to their generation, publishes caught visibility first, archives
+each record, then makes the existing native relay request once per recipient.
+Independent failures warn without gameplay rollback; explicit stale jobs do not
+push. Identical already-archived submissions skip duplicate pushes while the
+remaining batch continues. Ambiguous relay requests are not retried. No durable
+push outbox is added, so an archive row is not proof that its push was attempted.
+
+IndexedDB persists the full generation per origin, account and hidden session
+device, including local read flags, handled IDs, deletion tombstones and clear
+cutoffs. There is no 100-record or 24-hour retention limit. Storage denial falls
+back to memory. Failed loading preserves valid cache. History hydration never
+replays alarms; each complete sync can present only the newest previously unseen
+record younger than 15 minutes. All older records are unread history only.
+
+The 60-second dismissible top-center banner and immediate newest-alert replacement
+remain. The existing “Ereignis” drawer merges game records and native events newest
+first, rendering pages of 100 and reopening at the newest page; game records have
+no server-event navigation. Its
+bell is red for unread game alerts, including when native events are disabled.
+A visible drawer marks game entries read; banner dismissal does not.
+
+The Simulation tab's right-aligned **Test notifications** button sends
+`[HH:mm:ss] Test notification: check that your phone plays a sound.` through the
+same archive/banner/alarm/native paths without changing gameplay. Test Manager
+both visible and separately backgrounded/display off. Request success does not
+prove phone delivery or sound.
+
+**Delete game status** rotates generation and clears the server journal; clients
+discard old-generation history and presentation. **Delete all position data**
+preserves notifications. **Delete whole session** removes the journal through
+hidden-device deletion. Pause the Tool for cutover; deploy server migration/API,
+then web, then Tool; reload Manager before testing.
+
+`scripts/game_notification_integration.py` audits the local MySQL/HTTP API using
+isolated fixture accounts/devices only. Run with Python and `websocket-client`
+after the Docker build. It verifies pagination, transactional reset races,
+authorization, websocket invalidation and cascade cleanup without sending pushes.
 
 Local Compose sets `WEB_CACHE_CONTROL=no-cache` so Manager's persistent HTTP
 cache revalidates web files on reopening instead of keeping an obsolete bundle

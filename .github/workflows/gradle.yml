@@ -52,6 +52,13 @@ jobs:
       run: |
         curl --fail --silent --show-error http://localhost:8083/api/health
         curl --fail --silent --show-error --output /dev/null http://localhost:8083/
+    - uses: actions/setup-python@v6
+      with:
+        python-version: '3.13'
+    - name: Audit database-backed session notifications
+      run: |
+        python -m pip install websocket-client==1.8.0
+        python scripts/game_notification_integration.py
     - name: Verify deployment-matched MySQL settings
       run: |
         actual="$(docker compose exec -T database sh -c 'MYSQL_PWD="$MYSQL_ROOT_PASSWORD" mysql -uroot --batch --skip-column-names -e "SELECT CONCAT_WS(\"|\", VERSION(), @@character_set_server, @@collation_server, @@innodb_buffer_pool_size, @@innodb_redo_log_capacity, @@innodb_flush_method, @@innodb_flush_log_at_trx_commit, @@log_bin);"')"

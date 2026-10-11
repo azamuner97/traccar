@@ -25,6 +25,7 @@ import org.traccar.config.Config;
 import org.traccar.config.Keys;
 import org.traccar.database.DeviceLookupService;
 import org.traccar.database.NotificationManager;
+import org.traccar.database.GameNotificationService;
 import org.traccar.model.BaseModel;
 import org.traccar.model.Device;
 import org.traccar.model.Drawing;
@@ -361,6 +362,24 @@ public class ConnectionManager implements BroadcastInterface {
     }
 
     @Override
+    public synchronized void updateGameNotifications(boolean local, long deviceId) {
+        if (local) {
+            broadcastService.updateGameNotifications(true, deviceId);
+        }
+        for (long userId : deviceUsers.getOrDefault(deviceId, Set.of())) {
+            try {
+                User user = storage.getObject(User.class, new Request(
+                        new Columns.All(), new Condition.Equals("id", userId)));
+                if (GameNotificationService.canReceive(user, deviceId)) {
+                    listeners.getOrDefault(userId, Set.of()).forEach(UpdateListener::onUpdateGameNotifications);
+                }
+            } catch (StorageException error) {
+                LOGGER.warn("Notification invalidation failed", error);
+            }
+        }
+    }
+
+    @Override
     public synchronized <T extends BaseModel> void invalidateObject(
             boolean local, Class<T> clazz, long id, ObjectOperation operation) {
         if (clazz.equals(Geofence.class)) {
@@ -422,6 +441,7 @@ public class ConnectionManager implements BroadcastInterface {
         void onUpdateLog(LogRecord record);
         void onUpdateGeofences();
         void onUpdateDrawings();
+        default void onUpdateGameNotifications() { }
         void onUpdateUser();
     }
 
