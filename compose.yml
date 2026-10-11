@@ -37,6 +37,10 @@ services:
       DATABASE_URL: "jdbc:mysql://database:3306/traccar?zeroDateTimeBehavior=round&serverTimezone=UTC&allowPublicKeyRetrieval=true&useSSL=false&allowMultiQueries=true&autoReconnect=true&useUnicode=yes&characterEncoding=UTF-8&sessionVariables=sql_mode=''"
       DATABASE_USER: traccar
       DATABASE_PASSWORD: ${TRACCAR_DB_PASSWORD:-traccar-dev}
+      # Manager keeps its HTTP cache across app/phone restarts. Revalidate the
+      # web shell on reopening so it cannot keep an older notification bundle.
+      # Unchanged assets can still use conditional requests / HTTP 304.
+      WEB_CACHE_CONTROL: "no-cache"
       # Append traccar and supply the key externally to test Manager push alerts.
       NOTIFICATOR_TYPES: ${TRACCAR_NOTIFICATOR_TYPES:-web,mail,command}
       NOTIFICATOR_TRACCAR_KEY: ${TRACCAR_NOTIFICATOR_TRACCAR_KEY:-}

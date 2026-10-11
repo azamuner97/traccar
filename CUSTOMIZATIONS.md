@@ -75,11 +75,24 @@ position.attributes.traccarToolAlerts = JSON array
 ```
 
 Each array entry contains a unique ID, `speedhunt` or `playerCaught` type,
-`participants` or `session` audience, UTC occurrence time, and final display
-message. The web app reads these attributes directly from raw position socket
-messages, filters them using the generated-user role and session-device
-attributes, and shows a ten-second top-center banner without adding a map
-marker. IDs are deduplicated per server origin and signed-in user.
+`participants` or `session` audience, UTC occurrence time, optional game timezone,
+and final timestamped display message. The web app reads these attributes directly
+from raw position socket messages, filters them using the generated-user role and
+session-device attributes, and shows a dismissible 60-second top-center banner
+without adding a map marker. A new notification immediately replaces the previous banner and starts
+its alarm while visible. All accepted records remain in local “Ereignis” history;
+superseded banners do not reappear. IDs are deduplicated per server origin and
+signed-in user.
+
+Local Compose sets `WEB_CACHE_CONTROL=no-cache` so Manager's persistent HTTP
+cache revalidates web files on reopening instead of keeping an obsolete bundle
+for the default hour. Unchanged files can still use conditional requests and
+HTTP 304 responses. A restart or logout does not clear Manager's cache. Already
+cached responses cannot be invalidated remotely by changing this header; after
+their old cache lifetime expires, the new policy applies. On HTTPS installations
+with an active service worker, also accept the web app's update-available prompt
+to activate a waiting version. This does not change native Manager or its separate
+bottom Snackbar, and does not delete local notification history.
 
 Traccar Tool sends the matching native notification through Traccar's standard
 announcement endpoint after publishing the map state. Production enables the
