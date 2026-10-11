@@ -31,7 +31,7 @@ public interface BroadcastInterface {
 
     default void updateCommand(boolean local, long deviceId) {}
 
-    default void updateGameNotifications(boolean local, long deviceId) {}
+    default void updateGameNotifications(boolean local, long deviceId, Long recipientUserId) {}
 
     default <T extends BaseModel> void invalidateObject(
             boolean local, Class<T> clazz, long id, ObjectOperation operation) throws Exception {}

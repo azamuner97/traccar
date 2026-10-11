@@ -6,6 +6,7 @@
  */
 package org.traccar.database;
 
+import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.inject.Inject;
@@ -13,9 +14,10 @@ import jakarta.inject.Singleton;
 import jakarta.ws.rs.BadRequestException;
 import jakarta.ws.rs.NotFoundException;
 import jakarta.ws.rs.WebApplicationException;
-import org.traccar.model.User;
-import org.traccar.model.Device;
 import org.traccar.helper.ReflectionCache;
+import org.traccar.helper.model.DrawingUtil;
+import org.traccar.model.Device;
+import org.traccar.model.User;
 import org.traccar.storage.query.Columns;
 
 import javax.sql.DataSource;
@@ -43,12 +45,17 @@ public class GameNotificationService {
 
     public static final String GENERATION_ATTRIBUTE = "traccarToolNotificationGeneration";
     public static final String RESET_ATTRIBUTE = "traccarToolNotificationResetAt";
+    public static final String ASSIGNED_DEVICE_ATTRIBUTE = DrawingUtil.ATTRIBUTE_ASSIGNED_DEVICE_ID;
     private static final Set<String> ROLES = Set.of("player", "supporter", "hunter", "spectator");
-    private static final Set<String> TYPES = Set.of("speedhunt", "playerCaught", "notificationTest");
+    private static final Set<String> SESSION_TYPES = Set.of("speedhunt", "playerCaught", "notificationTest");
 
-    public record Alert(String id, String type, String audience, String occurredAt, String timeZone, String message) { }
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record Alert(String id, String type, String audience, String occurredAt, String timeZone, String message,
+                        Long recipientUserId, Long sourceDeviceId) { }
+    @JsonInclude(JsonInclude.Include.NON_NULL)
     public record Entry(String id, String type, String audience, String occurredAt, String timeZone,
-                        String message, long gameStateDeviceId, String generation, String createdAt) { }
+                        String message, Long recipientUserId, Long sourceDeviceId,
+                        long gameStateDeviceId, String generation, String createdAt) { }
     public record State(int version, long sessionDeviceId, String generation, String resetAt) { }
     public record Page(int version, long sessionDeviceId, String generation, String resetAt,
                        List<Entry> items, String nextCursor, boolean hasMore) { }
@@ -92,7 +99,7 @@ public class GameNotificationService {
 
     public static Alert validate(Alert alert) {
         if (alert == null || alert.id() == null || !alert.id().matches("[A-Za-z0-9_-]{1,64}")
-                || alert.type() == null || !TYPES.contains(alert.type()) || !"session".equals(alert.audience())
+                || alert.type() == null
                 || alert.message() == null || alert.message().isBlank() || alert.message().length() > 8192
                 || alert.timeZone() == null || alert.timeZone().length() > 64
                 || !ZoneId.getAvailableZoneIds().contains(alert.timeZone())
@@ -100,6 +107,14 @@ public class GameNotificationService {
                 || alert.occurredAt() == null
                 || !alert.occurredAt().matches("\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d{1,9})?Z")) {
             throw new BadRequestException("Invalid game notification");
+        }
+        boolean session = "session".equals(alert.audience()) && SESSION_TYPES.contains(alert.type())
+                && alert.recipientUserId() == null && alert.sourceDeviceId() == null;
+        boolean targeted = "user".equals(alert.audience()) && "geofenceExit".equals(alert.type())
+                && alert.recipientUserId() != null && alert.recipientUserId() > 0
+                && alert.sourceDeviceId() != null && alert.sourceDeviceId() > 0;
+        if (!session && !targeted) {
+            throw new BadRequestException("Invalid notification audience or targets");
         }
         try {
             ZoneId.of(alert.timeZone());
@@ -110,7 +125,7 @@ public class GameNotificationService {
                 throw new IllegalArgumentException("Notification time is outside the supported database range");
             }
             return new Alert(alert.id(), alert.type(), alert.audience(), occurred.toString(),
-                    alert.timeZone(), alert.message());
+                    alert.timeZone(), alert.message(), alert.recipientUserId(), alert.sourceDeviceId());
         } catch (IllegalArgumentException | java.time.DateTimeException error) {
             throw new BadRequestException("Invalid notification timestamp or timezone", error);
         }
@@ -133,7 +148,7 @@ public class GameNotificationService {
     }
 
     private State state(long deviceId, Map<String, Object> attributes) {
-        return new State(1, deviceId, (String) attributes.get(GENERATION_ATTRIBUTE),
+        return new State(2, deviceId, (String) attributes.get(GENERATION_ATTRIBUTE),
                 (String) attributes.get(RESET_ATTRIBUTE));
     }
 
@@ -270,9 +285,14 @@ public class GameNotificationService {
 
     private Entry entry(ResultSet rows) throws Exception {
         Calendar calendar = utc();
+        long recipient = rows.getLong("recipientuserid");
+        Long recipientUserId = rows.wasNull() ? null : recipient;
+        long source = rows.getLong("sourcedeviceid");
+        Long sourceDeviceId = rows.wasNull() ? null : source;
         return new Entry(rows.getString("alertid"), rows.getString("type"), rows.getString("audience"),
                 rows.getTimestamp("occurredat", calendar).toInstant().toString(), rows.getString("timezone"),
-                rows.getString("message"), rows.getLong("sessiondeviceid"), rows.getString("generation"),
+                rows.getString("message"), recipientUserId, sourceDeviceId,
+                rows.getLong("sessiondeviceid"), rows.getString("generation"),
                 rows.getTimestamp("createdat", calendar).toInstant().toString());
     }
 
@@ -294,19 +314,21 @@ public class GameNotificationService {
                         if (rows.next()) {
                             Entry existing = entry(rows);
                             Alert stored = new Alert(existing.id(), existing.type(), existing.audience(),
-                                    existing.occurredAt(), existing.timeZone(), existing.message());
+                                    existing.occurredAt(), existing.timeZone(), existing.message(),
+                                    existing.recipientUserId(), existing.sourceDeviceId());
                             if (!stored.equals(alert)) {
                                 throw new WebApplicationException("Conflicting notification ID", 409);
                             }
                             connection.commit();
-                            return new Creation(1, expected, existing, false);
+                            return new Creation(2, expected, existing, false);
                         }
                     }
                 }
                 Instant created = Instant.now().truncatedTo(ChronoUnit.MILLIS);
                 try (var query = connection.prepareStatement("INSERT INTO tc_game_notifications "
-                        + "(alertid,sessiondeviceid,generation,type,audience,occurredat,timezone,message,createdat) "
-                        + "VALUES (?,?,?,?,?,?,?,?,?)", Statement.RETURN_GENERATED_KEYS)) {
+                        + "(alertid,sessiondeviceid,generation,type,audience,occurredat,timezone,message,"
+                        + "recipientuserid,sourcedeviceid,createdat) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                        Statement.RETURN_GENERATED_KEYS)) {
                     query.setString(1, alert.id());
                     query.setLong(2, deviceId);
                     query.setString(3, expected);
@@ -315,12 +337,23 @@ public class GameNotificationService {
                     query.setTimestamp(6, Timestamp.from(Instant.parse(alert.occurredAt())), utc());
                     query.setString(7, alert.timeZone());
                     query.setString(8, alert.message());
-                    query.setTimestamp(9, Timestamp.from(created), utc());
+                    if (alert.recipientUserId() == null) {
+                        query.setNull(9, Types.INTEGER);
+                    } else {
+                        query.setLong(9, alert.recipientUserId());
+                    }
+                    if (alert.sourceDeviceId() == null) {
+                        query.setNull(10, Types.INTEGER);
+                    } else {
+                        query.setLong(10, alert.sourceDeviceId());
+                    }
+                    query.setTimestamp(11, Timestamp.from(created), utc());
                     query.executeUpdate();
                 }
                 connection.commit();
-                return new Creation(1, expected, new Entry(alert.id(), alert.type(), alert.audience(),
+                return new Creation(2, expected, new Entry(alert.id(), alert.type(), alert.audience(),
                         alert.occurredAt(), alert.timeZone(), alert.message(),
+                        alert.recipientUserId(), alert.sourceDeviceId(),
                         deviceId, expected, created.toString()), true);
             } catch (Exception error) {
                 connection.rollback();
@@ -329,7 +362,8 @@ public class GameNotificationService {
         }
     }
 
-    public Page list(long deviceId, String expected, String cursor, int requestedLimit) throws Exception {
+    public Page list(long deviceId, String expected, String cursor, int requestedLimit, Long recipientUserId)
+            throws Exception {
         if (expected != null) {
             generation(expected);
         }
@@ -355,11 +389,18 @@ public class GameNotificationService {
                 List<Entry> items = new ArrayList<>();
                 boolean more = false;
                 String next = Long.toString(after);
+                String recipientFilter = recipientUserId == null
+                        ? ""
+                        : " AND (audience = 'session' OR recipientuserid = ?)";
                 try (var query = connection.prepareStatement("SELECT * FROM tc_game_notifications "
-                        + "WHERE sessiondeviceid = ? AND generation = ? AND id > ? ORDER BY id ASC")) {
+                        + "WHERE sessiondeviceid = ? AND generation = ? AND id > ?"
+                        + recipientFilter + " ORDER BY id ASC")) {
                     query.setLong(1, deviceId);
                     query.setString(2, state.generation());
                     query.setLong(3, after);
+                    if (recipientUserId != null) {
+                        query.setLong(4, recipientUserId);
+                    }
                     query.setMaxRows(limit + 1);
                     try (var rows = query.executeQuery()) {
                         while (rows.next()) {
@@ -373,7 +414,7 @@ public class GameNotificationService {
                     }
                 }
                 connection.commit();
-                return new Page(1, deviceId, state.generation(), state.resetAt(), items, next, more);
+                return new Page(2, deviceId, state.generation(), state.resetAt(), items, next, more);
             } catch (Exception error) {
                 connection.rollback();
                 throw error;

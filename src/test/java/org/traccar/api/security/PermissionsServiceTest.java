@@ -66,6 +66,12 @@ public class PermissionsServiceTest {
 
         currentUser.setAdministrator(true);
         assertDoesNotThrow(() -> service(currentUser).checkUserUpdate(1, before, after));
+
+        currentUser.setAdministrator(false);
+        before.getAttributes().put("traccarToolUserRole", "hunter");
+        before.getAttributes().put("traccarToolSessionDeviceId", 7);
+        after.getAttributes().put("traccarToolAssignedDeviceId", 31);
+        assertThrows(SecurityException.class, () -> service(currentUser).checkUserUpdate(1, before, after));
     }
 
 }

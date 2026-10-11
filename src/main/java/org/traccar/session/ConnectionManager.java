@@ -362,11 +362,13 @@ public class ConnectionManager implements BroadcastInterface {
     }
 
     @Override
-    public synchronized void updateGameNotifications(boolean local, long deviceId) {
+    public synchronized void updateGameNotifications(boolean local, long deviceId, Long recipientUserId) {
         if (local) {
-            broadcastService.updateGameNotifications(true, deviceId);
+            broadcastService.updateGameNotifications(true, deviceId, recipientUserId);
         }
-        for (long userId : deviceUsers.getOrDefault(deviceId, Set.of())) {
+        Set<Long> recipients = recipientUserId == null
+                ? deviceUsers.getOrDefault(deviceId, Set.of()) : Set.of(recipientUserId);
+        for (long userId : recipients) {
             try {
                 User user = storage.getObject(User.class, new Request(
                         new Columns.All(), new Condition.Equals("id", userId)));

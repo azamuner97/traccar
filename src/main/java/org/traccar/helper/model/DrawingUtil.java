@@ -26,6 +26,7 @@ public final class DrawingUtil {
 
     public static final String ATTRIBUTE_USER_ROLE = "traccarToolUserRole";
     public static final String ATTRIBUTE_SESSION_DEVICE_ID = "traccarToolSessionDeviceId";
+    public static final String ATTRIBUTE_ASSIGNED_DEVICE_ID = "traccarToolAssignedDeviceId";
     public static final String ROLE_SPECTATOR = "spectator";
 
     public static final int MAX_TEXT_LENGTH = 200;

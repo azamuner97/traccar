@@ -41,5 +41,6 @@
 
   <include file="changelog-game-notifications.xml" relativeToChangelogFile="true" />
   <include file="changelog-game-notifications-id-collation.xml" relativeToChangelogFile="true" />
+  <include file="changelog-game-notifications-targeting.xml" relativeToChangelogFile="true" />
 
 </databaseChangeLog>

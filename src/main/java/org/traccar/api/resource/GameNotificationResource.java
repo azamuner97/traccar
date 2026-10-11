@@ -19,8 +19,12 @@ import jakarta.ws.rs.core.MediaType;
 import org.traccar.api.BaseResource;
 import org.traccar.database.GameNotificationService;
 import org.traccar.model.Device;
+import org.traccar.model.User;
 import org.traccar.model.UserRestrictions;
 import org.traccar.session.ConnectionManager;
+import org.traccar.storage.query.Columns;
+import org.traccar.storage.query.Condition;
+import org.traccar.storage.query.Request;
 
 @Path("game-notifications")
 @Produces(MediaType.APPLICATION_JSON)
@@ -45,12 +49,39 @@ public class GameNotificationResource extends BaseResource {
         }
     }
 
+    private void checkTarget(GameNotificationService.Alert alert, long sessionDeviceId) throws Exception {
+        try {
+            User recipient = storage.getObject(User.class, new Request(
+                    new Columns.All(), new Condition.Equals("id", alert.recipientUserId())));
+            String role = recipient == null ? null : String.valueOf(
+                    recipient.getAttributes().get("traccarToolUserRole"));
+            if (recipient == null || recipient.getAdministrator()
+                    || !("player".equals(role) || "supporter".equals(role) || "hunter".equals(role))
+                    || !GameNotificationService.canReceive(recipient, sessionDeviceId)
+                    || !Long.toString(alert.sourceDeviceId()).equals(String.valueOf(
+                            recipient.getAttributes().get(GameNotificationService.ASSIGNED_DEVICE_ATTRIBUTE)))) {
+                throw new SecurityException("Notification recipient does not match the source device");
+            }
+            Device permittedSource = storage.getObject(Device.class, new Request(
+                    new Columns.Include("id"),
+                    new Condition.And(
+                            new Condition.Equals("id", alert.sourceDeviceId()),
+                            new Condition.Permission(User.class, recipient.getId(), Device.class))));
+            if (permittedSource == null) {
+                throw new SecurityException("Notification recipient cannot access the source device");
+            }
+        } catch (SecurityException error) {
+            throw new ForbiddenException(error.getMessage());
+        }
+    }
+
     @GET
     public GameNotificationService.Page list(
             @QueryParam("sessionDeviceId") long deviceId, @QueryParam("generation") String generation,
             @QueryParam("after") String after, @QueryParam("limit") int limit) throws Exception {
+        User user;
         try {
-            var user = permissionsService.getUser(getUserId());
+            user = permissionsService.getUser(getUserId());
             permissionsService.checkPermission(Device.class, getUserId(), deviceId);
             if (!user.getAdministrator() && !GameNotificationService.canReceive(user, deviceId)) {
                 throw new SecurityException("Notification session access denied");
@@ -58,7 +89,7 @@ public class GameNotificationResource extends BaseResource {
         } catch (SecurityException error) {
             throw new ForbiddenException(error.getMessage());
         }
-        return service.list(deviceId, generation, after, limit);
+        return service.list(deviceId, generation, after, limit, user.getAdministrator() ? null : user.getId());
     }
 
     @POST
@@ -67,9 +98,13 @@ public class GameNotificationResource extends BaseResource {
             throw new jakarta.ws.rs.BadRequestException("Notification required");
         }
         checkWrite(request.sessionDeviceId());
-        var result = service.create(request.sessionDeviceId(), request.generation(), request.alert());
+        var alert = GameNotificationService.validate(request.alert());
+        if ("user".equals(alert.audience())) {
+            checkTarget(alert, request.sessionDeviceId());
+        }
+        var result = service.create(request.sessionDeviceId(), request.generation(), alert);
         if (result.created()) {
-            connectionManager.updateGameNotifications(true, request.sessionDeviceId());
+            connectionManager.updateGameNotifications(true, request.sessionDeviceId(), alert.recipientUserId());
         }
         return result;
     }
@@ -89,7 +124,7 @@ public class GameNotificationResource extends BaseResource {
         }
         checkWrite(deviceId);
         var result = service.reset(deviceId, request.expectedGeneration(), request.replacementGeneration());
-        connectionManager.updateGameNotifications(true, deviceId);
+        connectionManager.updateGameNotifications(true, deviceId, null);
         return result;
     }
 }

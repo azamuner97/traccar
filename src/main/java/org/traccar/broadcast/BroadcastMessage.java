@@ -23,6 +23,7 @@ import org.traccar.model.Position;
 public class BroadcastMessage {
 
     private Long gameNotificationsDeviceId;
+    private Long gameNotificationsRecipientUserId;
 
     public Long getGameNotificationsDeviceId() {
         return gameNotificationsDeviceId;
@@ -30,6 +31,14 @@ public class BroadcastMessage {
 
     public void setGameNotificationsDeviceId(Long gameNotificationsDeviceId) {
         this.gameNotificationsDeviceId = gameNotificationsDeviceId;
+    }
+
+    public Long getGameNotificationsRecipientUserId() {
+        return gameNotificationsRecipientUserId;
+    }
+
+    public void setGameNotificationsRecipientUserId(Long gameNotificationsRecipientUserId) {
+        this.gameNotificationsRecipientUserId = gameNotificationsRecipientUserId;
     }
 
     private Device device;

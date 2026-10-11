@@ -76,7 +76,7 @@ def wait_for_server():
 
 
 def main():
-    device_ids, user_ids, sockets = [], [], []
+    device_ids, group_ids, user_ids, sockets = [], [], [], []
     salt = secrets.token_bytes(24)
     digest = hashlib.pbkdf2_hmac("sha256", PASSWORD.encode(), salt, 200000, 24).hex().upper()
     password_hash = "PBKDF2WithHmacSHA256$200000$" + digest
@@ -93,18 +93,47 @@ def main():
                 "attributes": {"traccarToolGameState": True}})
             device_ids.append(device["id"])
         session_id = device_ids[0]
+        hunter_group = request("POST", "/groups", {"name": PREFIX + "-hunters"})
+        group_ids.append(hunter_group["id"])
+        source_ids = {}
+        for key, group_id in (
+                ("player", 0), ("supporter", 0),
+                ("hunter1", hunter_group["id"]), ("hunter2", hunter_group["id"])):
+            source = request("POST", "/devices", {
+                "name": PREFIX + "-" + key,
+                "uniqueId": PREFIX + "-" + key,
+                "groupId": group_id,
+            })
+            source_ids[key] = source["id"]
+            device_ids.append(source["id"])
         endpoint = "/game-notifications/session/" + str(session_id)
         initial = request("POST", endpoint, {})
         assert request("POST", endpoint, {}) == initial
+        assert initial["version"] == 2
         generation = initial["generation"]
-        generated = []
-        for role in ("player", "supporter", "hunter", "spectator", "unrelated"):
-            email = PREFIX + "-" + role + "@example.invalid"
-            user = request("POST", "/users", {"name": PREFIX + role, "email": email, "password": PASSWORD,
-                "readonly": True, "attributes": {"traccarToolUserRole": role,
-                    "traccarToolSessionDeviceId": session_id}})
+        generated, generated_users, socket_by_key = {}, {}, {}
+        for key, role, source_id in (
+                ("player", "player", source_ids["player"]),
+                ("supporter", "supporter", source_ids["supporter"]),
+                ("hunter1", "hunter", source_ids["hunter1"]),
+                ("hunter2", "hunter", source_ids["hunter2"]),
+                ("spectator", "spectator", None),
+                ("unrelated", "unrelated", None)):
+            email = PREFIX + "-" + key + "@example.invalid"
+            attributes = {"traccarToolUserRole": role, "traccarToolSessionDeviceId": session_id}
+            if source_id is not None:
+                attributes["traccarToolAssignedDeviceId"] = source_id
+            user = request("POST", "/users", {"name": PREFIX + key, "email": email, "password": PASSWORD,
+                "readonly": True, "attributes": attributes})
             user_ids.append(user["id"])
+            generated_users[key] = user
             request("POST", "/permissions", {"userId": user["id"], "deviceId": session_id}, expected=204)
+            if key in ("hunter1", "hunter2"):
+                request("POST", "/permissions", {
+                    "userId": user["id"], "groupId": hunter_group["id"]}, expected=204)
+            elif source_id is not None:
+                request("POST", "/permissions", {
+                    "userId": user["id"], "deviceId": source_id}, expected=204)
             credentials = (email, PASSWORD)
             request("GET", "/game-notifications?sessionDeviceId=" + str(session_id),
                 credentials=credentials, expected=403 if role == "unrelated" else 200)
@@ -112,7 +141,7 @@ def main():
                 credentials=credentials, expected=403)
             request("POST", endpoint, {}, credentials=credentials, expected=403)
             if role != "unrelated":
-                generated.append(credentials)
+                generated[key] = credentials
                 cookies = http.cookiejar.CookieJar()
                 opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cookies))
                 request("POST", "/session", urllib.parse.urlencode({"email": email, "password": PASSWORD}).encode(),
@@ -120,6 +149,11 @@ def main():
                 socket = websocket.create_connection("ws://localhost:8083/api/socket", timeout=10,
                     origin=BASE, cookie="; ".join(cookie.name + "=" + cookie.value for cookie in cookies))
                 sockets.append(socket)
+                socket_by_key[key] = socket
+        for hunter_key in ("hunter1", "hunter2"):
+            visible = request("GET", "/devices", credentials=generated[hunter_key])
+            visible_ids = {device["id"] for device in visible}
+            assert {source_ids["hunter1"], source_ids["hunter2"]} <= visible_ids
         alert = {"id": "live", "type": "notificationTest", "audience": "session",
             "occurredAt": datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
             "timeZone": "UTC", "message": "[12:00:00] Test notification: check that your phone plays a sound."}
@@ -131,6 +165,52 @@ def main():
                 pass
         assert not request("POST", "/game-notifications", payload)["created"]
         request("POST", "/game-notifications", {**payload, "alert": {**alert, "message": "conflict"}}, expected=409)
+        targeted_ids = {}
+        for key in ("player", "supporter", "hunter1"):
+            target_id = "exit-" + key
+            targeted_ids[key] = target_id
+            targeted = {
+                "id": target_id,
+                "type": "geofenceExit",
+                "audience": "user",
+                "occurredAt": datetime.now(timezone.utc).isoformat(
+                    timespec="milliseconds").replace("+00:00", "Z"),
+                "timeZone": "UTC",
+                "message": "[12:00:00] " + key + " left geofence Audit.",
+                "recipientUserId": generated_users[key]["id"],
+                "sourceDeviceId": source_ids[key],
+            }
+            created = request("POST", "/game-notifications", {**payload, "alert": targeted})
+            assert created["created"] and created["item"]["recipientUserId"] == generated_users[key]["id"]
+            while "game-notifications" not in json.loads(socket_by_key[key].recv()).get("invalidate", []):
+                pass
+            for other_key, socket in socket_by_key.items():
+                if other_key == key:
+                    continue
+                socket.settimeout(0.2)
+                try:
+                    message = json.loads(socket.recv())
+                    assert "game-notifications" not in message.get("invalidate", [])
+                except websocket.WebSocketTimeoutException:
+                    pass
+                finally:
+                    socket.settimeout(10)
+        for key in ("player", "supporter", "hunter1", "hunter2", "spectator"):
+            private_page = request("GET", "/game-notifications?" + urllib.parse.urlencode({
+                "sessionDeviceId": session_id, "generation": generation, "limit": 100,
+            }), credentials=generated[key])
+            private_ids = {record["id"] for record in private_page["items"]}
+            expected_private = {targeted_ids[key]} if key in targeted_ids else set()
+            assert private_ids.intersection(targeted_ids.values()) == expected_private
+        for invalid_type in ("geofenceEnter", "deviceOverspeed"):
+            request("POST", "/game-notifications", {**payload, "alert": {
+                **alert,
+                "id": "invalid-" + invalid_type,
+                "type": invalid_type,
+                "audience": "user",
+                "recipientUserId": generated_users["player"]["id"],
+                "sourceDeviceId": source_ids["player"],
+            }}, expected=400)
         # MySQL's default text collation must not merge opaque, case-only IDs.
         for alert_id in ("CaseId", "caseid"):
             case_payload = {**payload, "alert": {**alert, "id": alert_id}}
@@ -152,10 +232,10 @@ def main():
             cursor = page["nextCursor"]
             if not page["hasMore"]:
                 break
-        assert len(ids) == len(set(ids)) == 208
+        assert len(ids) == len(set(ids)) == 211
         request("DELETE", "/positions?" + urllib.parse.urlencode({"deviceId": session_id,
             "from": "2020-01-01T00:00:00Z", "to": "2030-01-01T00:00:00Z"}), expected=204)
-        assert sql("SELECT COUNT(*) FROM tc_game_notifications WHERE sessiondeviceid=" + str(session_id)) == "208"
+        assert sql("SELECT COUNT(*) FROM tc_game_notifications WHERE sessiondeviceid=" + str(session_id)) == "211"
         for socket in sockets:
             socket.close()
         sockets.clear()
@@ -163,8 +243,16 @@ def main():
             check=True, capture_output=True)
         wait_for_server()
         recovered = request("GET", "/game-notifications?" + urllib.parse.urlencode({
-            "sessionDeviceId": session_id, "generation": generation, "limit": 500}), credentials=generated[0])
-        assert recovered["generation"] == generation and len(recovered["items"]) == 208
+            "sessionDeviceId": session_id, "generation": generation, "limit": 500}), credentials=generated["player"])
+        assert recovered["generation"] == generation and len(recovered["items"]) == 209
+        supporter_id = generated_users["supporter"]["id"]
+        request("DELETE", "/users/" + str(supporter_id), expected=204)
+        user_ids.remove(supporter_id)
+        assert sql("SELECT COUNT(*) FROM tc_game_notifications WHERE sessiondeviceid=" + str(session_id)) == "210"
+        after_recipient_delete = request("GET", "/game-notifications?" + urllib.parse.urlencode({
+            "sessionDeviceId": session_id, "generation": generation, "limit": 500}))
+        assert "exit-supporter" not in {record["id"] for record in after_recipient_delete["items"]}
+        assert "live" in {record["id"] for record in after_recipient_delete["items"]}
         request("GET", "/game-notifications?sessionDeviceId=" + str(session_id) + "&limit=501", expected=400)
         # A stale ordinary Device PUT must preserve the protected metadata.
         device = request("GET", "/devices?id=" + str(session_id))[0]
@@ -195,14 +283,17 @@ def main():
         request("DELETE", "/devices/" + str(session_id), expected=204)
         device_ids.remove(session_id)
         assert sql("SELECT COUNT(*) FROM tc_game_notifications WHERE sessiondeviceid=" + str(session_id)) == "0"
-        print("MySQL/HTTP notification audit passed: existing-data migration, authorization, four role sockets, "
-              "timestamps, case-sensitive IDs, 208-row pagination, GPS cleanup, server restart, idempotency, atomic device saves, reset races and deletion cascade.")
+        print("MySQL/HTTP notification audit passed: targeting authorization, private role sockets, hunter-group "
+              "visibility, timestamps, case-sensitive IDs, 211-row pagination, GPS cleanup, server restart, "
+              "idempotency, recipient/session deletion cascades, atomic device saves and reset races.")
     finally:
         for socket in sockets:
             socket.close()
         wait_for_server()
         for device_id in device_ids:
             request("DELETE", "/devices/" + str(device_id), expected=204)
+        for group_id in group_ids:
+            request("DELETE", "/groups/" + str(group_id), expected=204)
         for user_id in user_ids[1:]:
             request("DELETE", "/users/" + str(user_id), expected=204)
         # Exact test admin ID/email, never a broad production/user cleanup.

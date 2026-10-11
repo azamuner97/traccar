@@ -26,29 +26,36 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.reset;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 public class ConnectionManagerTest {
 
     private ConnectionManager connectionManager;
     private ConnectionManager.UpdateListener listener;
+    private ConnectionManager.UpdateListener secondListener;
+    private Storage storage;
+    private BroadcastService broadcastService;
 
     @BeforeEach
     public void setUp() throws Exception {
-        Storage storage = mock(Storage.class);
+        storage = mock(Storage.class);
         when(storage.getObjects(eq(Device.class), any(Request.class))).thenReturn(List.of());
+        broadcastService = mock(BroadcastService.class);
 
         connectionManager = new ConnectionManager(
                 new Config(),
                 mock(CacheManager.class),
                 storage,
                 mock(NotificationManager.class),
-                mock(BroadcastService.class),
+                broadcastService,
                 mock(DeviceLookupService.class));
 
         listener = mock(ConnectionManager.UpdateListener.class);
+        secondListener = mock(ConnectionManager.UpdateListener.class);
         connectionManager.addListener(1, listener);
-        reset(listener);
+        connectionManager.addListener(2, secondListener);
+        reset(listener, secondListener, broadcastService);
     }
 
     @Test
@@ -88,6 +95,26 @@ public class ConnectionManagerTest {
         reset(listener);
         connectionManager.invalidateObject(true, User.class, 2, ObjectOperation.UPDATE);
         verify(listener, never()).onUpdateUser();
+    }
+
+    @Test
+    public void testTargetedGameNotificationInvalidationStaysPrivateAcrossBroadcast() throws Exception {
+        User recipient = new User();
+        recipient.setId(1);
+        recipient.getAttributes().put("traccarToolUserRole", "hunter");
+        recipient.getAttributes().put("traccarToolSessionDeviceId", 900);
+        when(storage.getObject(eq(User.class), any(Request.class))).thenReturn(recipient);
+
+        connectionManager.updateGameNotifications(true, 900, 1L);
+        verify(broadcastService).updateGameNotifications(true, 900, 1L);
+        verify(listener).onUpdateGameNotifications();
+        verify(secondListener, never()).onUpdateGameNotifications();
+
+        reset(listener, secondListener, broadcastService);
+        connectionManager.updateGameNotifications(false, 900, 1L);
+        verifyNoInteractions(broadcastService);
+        verify(listener).onUpdateGameNotifications();
+        verify(secondListener, never()).onUpdateGameNotifications();
     }
 
 }
