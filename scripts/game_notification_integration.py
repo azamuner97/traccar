@@ -2,17 +2,21 @@
 
 Run after the full Docker build, using Python with websocket-client installed.
 Never calls the push endpoint, reads existing accounts, or resets volumes.
+Pass --tool-source /path/to/Traccar-Tool/src to also verify actual Tool monitoring.
 """
 
+import argparse
 import base64
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import hashlib
 import http.client
 import http.cookiejar
 import json
 import secrets
 import subprocess
+import sys
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -43,7 +47,7 @@ def sql(statement):
 
 
 def request(method, path, body=None, *, credentials=(EMAIL, PASSWORD), expected=200, opener=None):
-    headers = {}
+    headers = {"Accept": "application/json"} if path.startswith("/reports/") else {}
     if credentials:
         headers["Authorization"] = "Basic " + base64.b64encode(":".join(credentials).encode()).decode()
     if isinstance(body, dict):
@@ -75,8 +79,169 @@ def wait_for_server():
             time.sleep(1)
 
 
-def main():
-    device_ids, group_ids, user_ids, sockets = [], [], [], []
+def audit_geofence_monitoring(session_id, source_ids, generated_users, sockets, geofence_ids, tool_source):
+    """Generate real events without native subscriptions, optionally poll with the Tool."""
+    geofence = request("POST", "/geofences", {
+        "name": PREFIX + "-monitoring",
+        "area": "POLYGON ((47.4 8.4, 47.4 8.6, 47.6 8.6, 47.6 8.4, 47.4 8.4))",
+    })
+    geofence_ids.append(geofence["id"])
+    for device_id in source_ids.values():
+        request("POST", "/permissions", {
+            "deviceId": device_id, "geofenceId": geofence["id"]}, expected=204)
+    for user in generated_users.values():
+        request("POST", "/permissions", {
+            "userId": user["id"], "geofenceId": geofence["id"]}, expected=204)
+    assert sql("SELECT COUNT(*) FROM tc_device_notification WHERE deviceid IN ("
+               + ",".join(map(str, source_ids.values())) + ")") == "0"
+    assert sql("SELECT COUNT(*) FROM tc_user_notification WHERE userid IN ("
+               + ",".join(str(user["id"]) for user in generated_users.values()) + ")") == "0"
+    # MySQL's native eventTime column can round to seconds. Include that second
+    # rather than excluding the first upload behind a microsecond query cutoff.
+    started = datetime.now(timezone.utc) - timedelta(seconds=1)
+
+    def native_events():
+        parameters = urllib.parse.urlencode({
+            "deviceId": list(source_ids.values()),
+            "type": ["geofenceEnter", "geofenceExit"],
+            "from": started.isoformat(),
+            "to": datetime.now(timezone.utc).isoformat(),
+        }, doseq=True)
+        return request("GET", "/reports/events?" + parameters)
+
+    def upload(latitude):
+        for key in source_ids:
+            parameters = urllib.parse.urlencode({
+                "id": PREFIX + "-" + key,
+                "lat": latitude, "lon": 8.5, "speed": 0,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            })
+            with urllib.request.urlopen("http://localhost:5056/?" + parameters, timeout=15) as response:
+                assert response.status == 200
+
+    for latitude, event_type in ((47.5, "geofenceEnter"), (48.5, "geofenceExit")):
+        upload(latitude)
+        deadline = time.monotonic() + 15
+        while True:
+            events = native_events()
+            detected = {event["deviceId"] for event in events
+                        if event["type"] == event_type and event["geofenceId"] == geofence["id"]}
+            if detected == set(source_ids.values()):
+                break
+            assert time.monotonic() < deadline, f"Missing {event_type} reports without native links: {detected}"
+            time.sleep(0.1)
+    assert len(events) == 8 and all(event["id"] > 0 for event in events)
+    # The hunter socket still receives positions, but no native events.
+    deadline = time.monotonic() + 15
+    while True:
+        message = json.loads(sockets["hunter1"].recv())
+        assert not message.get("events"), "Unexpected native geofence alert without subscription"
+        if any(position["deviceId"] == source_ids["hunter1"] and position["latitude"] == 48.5
+               for position in message.get("positions", [])):
+            break
+        assert time.monotonic() < deadline, "Hunter position websocket did not receive the exit position"
+
+    if tool_source:
+        sys.path.insert(0, tool_source)
+        import requests
+        from traccar_game_manager.application.monitoring.service import MonitoringService
+        from traccar_game_manager.infrastructure.platform.runtime import SystemClock
+        from traccar_game_manager.infrastructure.traccar.client import TraccarClient
+
+        class Scheduler:
+            def call_later(self, delay_ms, callback):
+                return object()
+
+            def cancel(self, handle):
+                pass
+
+        received = []
+        with requests.Session() as transport:
+            client = TraccarClient(BASE, "http://localhost:5056", EMAIL, PASSWORD, transport=transport)
+            service = MonitoringService(
+                client, SystemClock(), Scheduler(), stream_enabled=False,
+                thread_factory=threading.Thread,
+                event_sink=lambda kind, payload: received.append((kind, payload)),
+                persist=lambda snapshot: None,
+            )
+            service.configure(
+                participant_ids=(source_ids["player"], source_ids["supporter"]),
+                hunter_ids=(source_ids["hunter1"], source_ids["hunter2"]),
+                roles={device_id: generated_users[key]["attributes"]["traccarToolUserRole"]
+                       for key, device_id in source_ids.items()},
+                geofences=({**geofence, "linked_device_ids": list(source_ids.values())},),
+            )
+            service.running = service.connected = True
+            service.last_event_poll_utc = started
+            service.last_pong_utc = datetime.now(timezone.utc)
+            service.apply_payload(message)
+            admin_socket = None
+            try:
+                assert service.poll_rest(), "Healthy websocket must not suppress REST event polling"
+                service._rest_thread.join(timeout=15)
+                service.drain_queue()
+                normalized = [payload for kind, payload in received if kind == "geofence_event"]
+                assert {event["event_id"] for event in normalized} == {event["id"] for event in events}
+                assert sum(event["event_type"] == "geofenceExit" for event in normalized) == 4
+                service.apply_payload({"events": events})
+                assert service.poll_rest()
+                service._rest_thread.join(timeout=15)
+                service.drain_queue()
+                assert sum(kind == "geofence_event" for kind, payload in received) == 8
+                subscription_ids = client.ensure_monitoring_notifications(
+                    session_id, source_ids.values(), lambda message: None)
+                assert len(subscription_ids) == 3
+                assert client.ensure_monitoring_notifications(
+                    session_id, source_ids.values(), lambda message: None) == subscription_ids
+                admin = request("POST", "/session", urllib.parse.urlencode({
+                    "email": EMAIL, "password": PASSWORD}).encode(), credentials=None)
+                for notification_id in subscription_ids:
+                    native = request("GET", "/notifications/" + str(notification_id))
+                    assert native["notificators"] == "web" and not native["always"]
+                    permissions = request("GET", "/permissions?userId=0&notificationId=" + str(notification_id))
+                    assert [{key.casefold(): value for key, value in link.items()} for link in permissions] == [
+                        {"userid": admin["id"], "notificationid": notification_id}]
+                admin_socket = websocket.create_connection(
+                    "ws://localhost:8083/api/socket", timeout=10, origin=BASE,
+                    cookie=client.get_websocket_cookie_header())
+                native_ids = set()
+                for latitude, event_type in ((47.5, "geofenceEnter"), (48.5, "geofenceExit")):
+                    upload(latitude)
+                    detected = set()
+                    deadline = time.monotonic() + 20
+                    while detected != set(source_ids.values()):
+                        message = json.loads(admin_socket.recv())
+                        for event in message.get("events", []):
+                            assert event["type"] == event_type
+                            assert event["deviceId"] in source_ids.values()
+                            native_ids.add(event["id"])
+                            detected.add(event["deviceId"])
+                        service.apply_payload(message)
+                        assert time.monotonic() < deadline, "Admin websocket events were not delivered"
+                assert len(native_ids) == 8
+                assert sum(kind == "geofence_event" for kind, payload in received) == 16
+                assert service.poll_rest()
+                service._rest_thread.join(timeout=15)
+                service.drain_queue()
+                assert sum(kind == "geofence_event" for kind, payload in received) == 16
+                for socket in sockets.values():
+                    socket.settimeout(0.2)
+                    try:
+                        while True:
+                            assert not json.loads(socket.recv()).get("events"), "Native monitoring leaked to a player"
+                    except websocket.WebSocketTimeoutException:
+                        pass
+                    finally:
+                        socket.settimeout(10)
+            finally:
+                service.stop()
+                if admin_socket is not None:
+                    admin_socket.close()
+                client.delete_monitoring_notifications(session_id, lambda message: None)
+
+
+def main(tool_source=None):
+    device_ids, group_ids, user_ids, sockets, geofence_ids = [], [], [], [], []
     salt = secrets.token_bytes(24)
     digest = hashlib.pbkdf2_hmac("sha256", PASSWORD.encode(), salt, 200000, 24).hex().upper()
     password_hash = "PBKDF2WithHmacSHA256$200000$" + digest
@@ -154,6 +319,8 @@ def main():
             visible = request("GET", "/devices", credentials=generated[hunter_key])
             visible_ids = {device["id"] for device in visible}
             assert {source_ids["hunter1"], source_ids["hunter2"]} <= visible_ids
+        audit_geofence_monitoring(
+            session_id, source_ids, generated_users, socket_by_key, geofence_ids, tool_source)
         alert = {"id": "live", "type": "notificationTest", "audience": "session",
             "occurredAt": datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
             "timeZone": "UTC", "message": "[12:00:00] Test notification: check that your phone plays a sound."}
@@ -284,14 +451,21 @@ def main():
         device_ids.remove(session_id)
         assert sql("SELECT COUNT(*) FROM tc_game_notifications WHERE sessiondeviceid=" + str(session_id)) == "0"
         print("MySQL/HTTP notification audit passed: targeting authorization, private role sockets, hunter-group "
-              "visibility, timestamps, case-sensitive IDs, 211-row pagination, GPS cleanup, server restart, "
+              "visibility, real geofence events without native links, timestamps, case-sensitive IDs, "
+              "211-row pagination, GPS cleanup, server restart, "
               "idempotency, recipient/session deletion cascades, atomic device saves and reset races.")
+        if tool_source:
+            print("Tool monitoring audit passed: healthy position websocket, enter/exit polling for player, "
+                  "supporter and two hunters, admin-only web subscriptions, no generated-user native events, "
+                  "original event IDs, and report/websocket deduplication.")
     finally:
         for socket in sockets:
             socket.close()
         wait_for_server()
         for device_id in device_ids:
             request("DELETE", "/devices/" + str(device_id), expected=204)
+        for geofence_id in geofence_ids:
+            request("DELETE", "/geofences/" + str(geofence_id), expected=204)
         for group_id in group_ids:
             request("DELETE", "/groups/" + str(group_id), expected=204)
         for user_id in user_ids[1:]:
@@ -304,4 +478,6 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--tool-source", help="Traccar Tool src directory for the real monitoring audit")
+    main(parser.parse_args().tool_source)
