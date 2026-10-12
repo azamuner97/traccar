@@ -27,6 +27,7 @@ public final class DrawingUtil {
     public static final String ATTRIBUTE_USER_ROLE = "traccarToolUserRole";
     public static final String ATTRIBUTE_SESSION_DEVICE_ID = "traccarToolSessionDeviceId";
     public static final String ATTRIBUTE_ASSIGNED_DEVICE_ID = "traccarToolAssignedDeviceId";
+    public static final String ATTRIBUTE_SHARE_GROUP_DRAWINGS = "traccarToolShareGroupDrawings";
     public static final String ROLE_SPECTATOR = "spectator";
 
     public static final int MAX_TEXT_LENGTH = 200;
@@ -35,6 +36,7 @@ public final class DrawingUtil {
 
     private static final Set<String> TYPES = Set.of(
             "line", "arrow", "polygon", "rectangle", "circle", "text");
+    private static final Set<String> GROUP_ROLES = Set.of("player", "supporter", "hunter");
     private static final Set<Integer> TEXT_SIZES = Set.of(12, 16, 24, 32);
     private static final Pattern COLOR_PATTERN = Pattern.compile("^#[0-9a-fA-F]{6}$");
 
@@ -49,7 +51,8 @@ public final class DrawingUtil {
     public static Long getSessionDeviceId(User user) {
         Object value = user.getAttributes().get(ATTRIBUTE_SESSION_DEVICE_ID);
         if (value instanceof Number number) {
-            return number.longValue() > 0 ? number.longValue() : null;
+            long parsed = number.longValue();
+            return parsed > 0 && number.doubleValue() == parsed ? parsed : null;
         }
         if (value != null) {
             try {
@@ -71,20 +74,48 @@ public final class DrawingUtil {
     }
 
     public static boolean canView(User user, Drawing drawing) {
+        return canView(user, drawing, null);
+    }
+
+    public static boolean hasGroupSharing(User user) {
+        String role = getRole(user);
+        return !user.getAdministrator() && !user.getDisableDrawings()
+                && role != null && GROUP_ROLES.contains(role) && getSessionDeviceId(user) != null
+                && Boolean.TRUE.equals(user.getAttributes().get(ATTRIBUTE_SHARE_GROUP_DRAWINGS));
+    }
+
+    private static boolean shared(User user, Drawing drawing, User owner) {
+        return owner != null && owner.getId() == drawing.getOwnerId()
+                && hasGroupSharing(user) && hasGroupSharing(owner)
+                && getRole(user).equals(getRole(owner))
+                && getSessionDeviceId(user).equals(getSessionDeviceId(owner))
+                && getSessionDeviceId(user).equals(drawing.getSessionDeviceId());
+    }
+
+    public static boolean canView(User user, Drawing drawing, User owner) {
         if (user.getAdministrator() || drawing.getOwnerId() == user.getId()) {
             return true;
         }
         Long sessionDeviceId = getSessionDeviceId(user);
         return isSpectator(user) && sessionDeviceId != null
-                && sessionDeviceId.equals(drawing.getSessionDeviceId());
+                && sessionDeviceId.equals(drawing.getSessionDeviceId()) || shared(user, drawing, owner);
     }
 
     public static boolean canEdit(User user, Drawing drawing) {
-        return canCreateOrEdit(user) && drawing.getOwnerId() == user.getId();
+        return canEdit(user, drawing, null);
+    }
+
+    public static boolean canEdit(User user, Drawing drawing, User owner) {
+        return canCreateOrEdit(user)
+                && (drawing.getOwnerId() == user.getId() || shared(user, drawing, owner));
     }
 
     public static boolean canDelete(User user, Drawing drawing) {
-        return user.getAdministrator() || canEdit(user, drawing);
+        return canDelete(user, drawing, null);
+    }
+
+    public static boolean canDelete(User user, Drawing drawing, User owner) {
+        return user.getAdministrator() || canEdit(user, drawing, owner);
     }
 
     public static void validate(Drawing drawing) {

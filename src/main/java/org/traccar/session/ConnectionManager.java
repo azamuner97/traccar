@@ -390,6 +390,8 @@ public class ConnectionManager implements BroadcastInterface {
             updateDrawings();
         } else if (clazz.equals(User.class)) {
             updateUser(id);
+            // Owner identity and sharing changes affect every viewer's drawing capabilities.
+            updateDrawings();
         }
     }
 

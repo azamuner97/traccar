@@ -29,6 +29,26 @@ import static org.mockito.Mockito.when;
 
 public class PermissionsServiceTest {
 
+    @Test
+    public void testSharingMarkerCannotBeAddedChangedOrRemovedByOrdinaryUsers() throws Exception {
+        User actor = new User();
+        actor.setId(1);
+        User before = new User();
+        before.setId(1);
+        User after = new User();
+        after.setId(1);
+        String marker = "traccarToolShareGroupDrawings";
+        after.getAttributes().put(marker, true);
+        assertThrows(SecurityException.class, () -> service(actor).checkUserUpdate(1, before, after));
+        before.getAttributes().put(marker, true);
+        after.getAttributes().put(marker, false);
+        assertThrows(SecurityException.class, () -> service(actor).checkUserUpdate(1, before, after));
+        after.getAttributes().remove(marker);
+        assertThrows(SecurityException.class, () -> service(actor).checkUserUpdate(1, before, after));
+        actor.setAdministrator(true);
+        assertDoesNotThrow(() -> service(actor).checkUserUpdate(1, before, after));
+    }
+
     private PermissionsService service(User currentUser) throws Exception {
         Storage storage = mock(Storage.class);
         when(storage.getObject(eq(User.class), any(Request.class))).thenReturn(currentUser);

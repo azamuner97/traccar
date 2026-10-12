@@ -70,6 +70,10 @@ public class DrawingResource extends BaseResource {
             Long scope = DrawingUtil.getSessionDeviceId(user);
             return new Condition.Equals("sessionDeviceId", scope != null ? scope : 0);
         }
+        if (DrawingUtil.hasGroupSharing(user)) {
+            return new Condition.Or(new Condition.Equals("ownerId", user.getId()),
+                    new Condition.Equals("sessionDeviceId", DrawingUtil.getSessionDeviceId(user)));
+        }
         return new Condition.Equals("ownerId", user.getId());
     }
 
@@ -84,21 +88,25 @@ public class DrawingResource extends BaseResource {
                 new Columns.All(), new Condition.Equals("id", id)));
     }
 
-    private boolean visible(User user, Drawing drawing) {
-        return DrawingUtil.canView(user, drawing);
+    private User getOwner(Drawing drawing) throws StorageException {
+        return storage.getObject(User.class, new Request(
+                new Columns.All(), new Condition.Equals("id", drawing.getOwnerId())));
     }
 
-    private void populateOwnerNames(List<Drawing> drawings) throws StorageException {
-        Map<Long, String> names = new HashMap<>();
+    private Map<Long, User> getOwners(List<Drawing> drawings) throws StorageException {
+        Map<Long, User> owners = new HashMap<>();
         for (Drawing drawing : drawings) {
-            if (!names.containsKey(drawing.getOwnerId())) {
-                User owner = storage.getObject(User.class, new Request(
-                        new Columns.Include("name"),
-                        new Condition.Equals("id", drawing.getOwnerId())));
-                names.put(drawing.getOwnerId(), owner != null ? owner.getName() : "");
+            if (!owners.containsKey(drawing.getOwnerId())) {
+                owners.put(drawing.getOwnerId(), getOwner(drawing));
             }
-            drawing.setOwnerName(names.get(drawing.getOwnerId()));
         }
+        return owners;
+    }
+
+    private void populateCapabilities(User user, Drawing drawing, User owner) {
+        drawing.setOwnerName(owner != null ? owner.getName() : "");
+        drawing.setCanEdit(DrawingUtil.canEdit(user, drawing, owner));
+        drawing.setCanDelete(DrawingUtil.canDelete(user, drawing, owner));
     }
 
     private void invalidate(long id, ObjectOperation operation) throws Exception {
@@ -111,7 +119,11 @@ public class DrawingResource extends BaseResource {
         User user = permissionsService.getUser(getUserId());
         List<Drawing> drawings = storage.getObjects(Drawing.class, new Request(
                 new Columns.All(), visibilityCondition(user)));
-        populateOwnerNames(drawings);
+        Map<Long, User> owners = getOwners(drawings);
+        drawings = drawings.stream()
+                .filter(drawing -> DrawingUtil.canView(user, drawing, owners.get(drawing.getOwnerId())))
+                .toList();
+        drawings.forEach(drawing -> populateCapabilities(user, drawing, owners.get(drawing.getOwnerId())));
         return drawings;
     }
 
@@ -123,10 +135,11 @@ public class DrawingResource extends BaseResource {
         if (drawing == null) {
             return Response.status(Response.Status.NOT_FOUND).build();
         }
-        if (!visible(user, drawing)) {
+        User owner = getOwner(drawing);
+        if (!DrawingUtil.canView(user, drawing, owner)) {
             throw new SecurityException("Drawing access denied");
         }
-        populateOwnerNames(List.of(drawing));
+        populateCapabilities(user, drawing, owner);
         return Response.ok(drawing).build();
     }
 
@@ -138,7 +151,7 @@ public class DrawingResource extends BaseResource {
         drawing.setOwnerId(user.getId());
         drawing.setSessionDeviceId(DrawingUtil.getSessionDeviceId(user));
         drawing.setId(storage.addObject(drawing, new Request(new Columns.Exclude("id", "ownerName"))));
-        drawing.setOwnerName(user.getName());
+        populateCapabilities(user, drawing, user);
         actionLogger.create(request, getUserId(), drawing);
         invalidate(drawing.getId(), ObjectOperation.ADD);
         return Response.ok(drawing).build();
@@ -153,8 +166,9 @@ public class DrawingResource extends BaseResource {
         if (before == null) {
             return Response.status(Response.Status.NOT_FOUND).build();
         }
-        if (!DrawingUtil.canEdit(user, before)) {
-            throw new SecurityException("Only the drawing owner can edit it");
+        User owner = getOwner(before);
+        if (!DrawingUtil.canEdit(user, before, owner)) {
+            throw new SecurityException("Drawing edit access denied");
         }
         DrawingUtil.validate(drawing);
         drawing.setId(id);
@@ -162,7 +176,7 @@ public class DrawingResource extends BaseResource {
         drawing.setSessionDeviceId(before.getSessionDeviceId());
         storage.updateObject(drawing, new Request(
                 new Columns.Exclude("id", "ownerName"), new Condition.Equals("id", id)));
-        drawing.setOwnerName(user.getName());
+        populateCapabilities(user, drawing, owner);
         actionLogger.edit(request, getUserId(), drawing);
         invalidate(id, ObjectOperation.UPDATE);
         return Response.ok(drawing).build();
@@ -176,8 +190,8 @@ public class DrawingResource extends BaseResource {
         if (drawing == null) {
             return Response.status(Response.Status.NOT_FOUND).build();
         }
-        if (!DrawingUtil.canDelete(user, drawing)) {
-            throw new SecurityException("Only the drawing owner can delete it");
+        if (!DrawingUtil.canDelete(user, drawing, getOwner(drawing))) {
+            throw new SecurityException("Drawing delete access denied");
         }
         storage.removeObject(Drawing.class, new Request(new Condition.Equals("id", id)));
         actionLogger.remove(request, getUserId(), Drawing.class, id);

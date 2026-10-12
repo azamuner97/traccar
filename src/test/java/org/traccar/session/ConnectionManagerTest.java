@@ -91,10 +91,20 @@ public class ConnectionManagerTest {
         reset(listener);
         connectionManager.invalidateObject(true, User.class, 1, ObjectOperation.UPDATE);
         verify(listener).onUpdateUser();
+        verify(listener).onUpdateDrawings();
+        verify(secondListener, times(2)).onUpdateDrawings();
 
         reset(listener);
         connectionManager.invalidateObject(true, User.class, 2, ObjectOperation.UPDATE);
         verify(listener, never()).onUpdateUser();
+    }
+
+    @Test
+    public void testRemoteAccountChangesInvalidateDrawingPermissionsForAllViewers() {
+        connectionManager.invalidateObject(false, User.class, 1, ObjectOperation.UPDATE);
+        connectionManager.invalidateObject(false, User.class, 1, ObjectOperation.DELETE);
+        verify(listener, times(2)).onUpdateDrawings();
+        verify(secondListener, times(2)).onUpdateDrawings();
     }
 
     @Test

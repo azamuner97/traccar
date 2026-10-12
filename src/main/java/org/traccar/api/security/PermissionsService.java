@@ -188,7 +188,10 @@ public class PermissionsService {
                 after.getAttributes().get(DrawingUtil.ATTRIBUTE_SESSION_DEVICE_ID))
                 || !Objects.equals(
                 before.getAttributes().get(DrawingUtil.ATTRIBUTE_ASSIGNED_DEVICE_ID),
-                after.getAttributes().get(DrawingUtil.ATTRIBUTE_ASSIGNED_DEVICE_ID))) {
+                after.getAttributes().get(DrawingUtil.ATTRIBUTE_ASSIGNED_DEVICE_ID))
+                || !Objects.equals(
+                before.getAttributes().get(DrawingUtil.ATTRIBUTE_SHARE_GROUP_DRAWINGS),
+                after.getAttributes().get(DrawingUtil.ATTRIBUTE_SHARE_GROUP_DRAWINGS))) {
             checkAdmin(userId);
         }
         if (before.getDisableDrawings() != after.getDisableDrawings()) {

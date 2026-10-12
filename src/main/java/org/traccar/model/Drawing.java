@@ -16,12 +16,38 @@
 package org.traccar.model;
 
 import com.fasterxml.jackson.annotation.JsonIgnore;
+import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.databind.JsonNode;
 import org.traccar.storage.QueryIgnore;
 import org.traccar.storage.StorageName;
 
 @StorageName("tc_drawings")
 public class Drawing extends BaseModel {
+
+    private boolean canEdit;
+    private boolean canDelete;
+
+    @QueryIgnore
+    @JsonProperty(access = JsonProperty.Access.READ_ONLY)
+    public boolean getCanEdit() {
+        return canEdit;
+    }
+
+    @QueryIgnore
+    public void setCanEdit(boolean canEdit) {
+        this.canEdit = canEdit;
+    }
+
+    @QueryIgnore
+    @JsonProperty(access = JsonProperty.Access.READ_ONLY)
+    public boolean getCanDelete() {
+        return canDelete;
+    }
+
+    @QueryIgnore
+    public void setCanDelete(boolean canDelete) {
+        this.canDelete = canDelete;
+    }
 
     private long ownerId;
 
