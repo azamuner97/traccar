@@ -228,6 +228,7 @@ public class GameNotificationServiceTest {
         for (long sourceId : List.of(100L, 101L)) {
             var page = service.list(900, state.generation(), null, 1,
                     new GameNotificationService.ReadAccess(10, sourceId, "player"));
+            assertEquals(sourceId, page.personalSourceDeviceId());
             assertEquals("session", page.items().getFirst().id());
             assertTrue(page.hasMore());
             var next = service.list(900, state.generation(), page.nextCursor(), 100,
@@ -238,6 +239,9 @@ public class GameNotificationServiceTest {
         assertEquals(List.of("session"), service.list(900, null, null, 100,
                 new GameNotificationService.ReadAccess(10, null, "player")).items().stream().map(
                         GameNotificationService.Entry::id).toList());
+        assertNull(service.list(900, null, null, 100,
+                new GameNotificationService.ReadAccess(10, null, "player")).personalSourceDeviceId());
+        assertNull(service.list(900, null, null, 100, null).personalSourceDeviceId());
         User user = new User();
         user.getAttributes().put("traccarToolUserRole", "player");
         user.getAttributes().put(GameNotificationService.ASSIGNED_DEVICE_ATTRIBUTE, "100");

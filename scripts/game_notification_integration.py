@@ -372,6 +372,7 @@ def main(tool_source=None):
             private_ids = {record["id"] for record in private_page["items"]}
             expected_private = {targeted_ids[key]} if key in targeted_ids else set()
             assert private_ids.intersection(targeted_ids.values()) == expected_private
+            assert private_page["personalSourceDeviceId"] == (source_ids[key] if key in targeted_ids else None)
         # Reassignment, role changes and revoked tracker permission must never
         # return records the web client's current personal policy would reject.
         player = generated_users["player"]
@@ -387,9 +388,11 @@ def main(tool_source=None):
         request("DELETE", "/permissions", permission, expected=204)
         page = request("GET", query, credentials=generated["player"])
         assert all(record["audience"] == "session" for record in page["items"])
+        assert page["personalSourceDeviceId"] is None
         request("POST", "/permissions", permission, expected=204)
         page = request("GET", query, credentials=generated["player"])
         assert targeted_ids["player"] in {record["id"] for record in page["items"]}
+        assert page["personalSourceDeviceId"] == source_ids["player"]
         for audience in ("nonHunters", "hunters"):
             role_alert = {**alert, "id": "speedhunt-" + audience, "type": "speedhunt", "audience": audience,
                 "message": "[12:00:00] Speedhunt: Ping 2 out of 4 sent."

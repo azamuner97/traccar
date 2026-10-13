@@ -137,6 +137,12 @@ role, matching assigned tracker and access to that tracker. Reassignment or revo
 tracker access cannot expose old private records through the API; session records
 remain available. Browser role/assignment changes cancel obsolete requests and
 re-read authorized history without replaying handled alerts.
+Notification pages also include the server-authorized `personalSourceDeviceId`
+(null when tracker access is absent). Browser synchronization uses it to remove
+unauthorized personal cache entries and banners even when account markers remain
+unchanged. Device/group permission changes invalidate the affected user's stream;
+restoring access does not replay handled alarms. Receiving-group history does not
+require this personal tracker grant.
 The Tool's optional editable Reason dropdown includes `Usage of public transport.`;
 reasons accompany that run's personal messages. Destination names come from the
 configured real groups, not role labels or internal mirror groups. Geofence
@@ -164,6 +170,9 @@ Spectators get one run start/stop and one summary per confirmed destination chan
 Refreshes and temporary rebuilds stay silent. Names, optional reason, geofence
 context and stop causes are frozen for identical archive/push text. Native
 recipient accounts are revalidated before delivery; failures do not stop tracking.
+Explicit notification API authorization/validation rejections suppress native
+push fallback. Network failures and server outages still allow independent push
+delivery, while other eligible alerts in a rejected batch continue.
 
 IndexedDB persists the full generation per origin, account and hidden session
 device, including local read flags, handled IDs, deletion tombstones and clear

@@ -74,7 +74,7 @@ public class GameNotificationService {
                         long gameStateDeviceId, String generation, String createdAt) { }
     public record State(int version, long sessionDeviceId, String generation, String resetAt) { }
     public record Page(int version, long sessionDeviceId, String generation, String resetAt,
-                       List<Entry> items, String nextCursor, boolean hasMore) { }
+                       Long personalSourceDeviceId, List<Entry> items, String nextCursor, boolean hasMore) { }
     public record Creation(int version, String generation, Entry item, boolean created) { }
     public record ReadAccess(long userId, Long sourceDeviceId, String role) { }
 
@@ -467,7 +467,8 @@ public class GameNotificationService {
                     }
                 }
                 connection.commit();
-                return new Page(2, deviceId, state.generation(), state.resetAt(), items, next, more);
+                return new Page(2, deviceId, state.generation(), state.resetAt(),
+                        access == null ? null : access.sourceDeviceId(), items, next, more);
             } catch (Exception error) {
                 connection.rollback();
                 throw error;

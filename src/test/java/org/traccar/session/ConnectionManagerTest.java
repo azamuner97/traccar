@@ -108,6 +108,15 @@ public class ConnectionManagerTest {
     }
 
     @Test
+    public void testDeviceAndGroupPermissionChangesRevalidateOnlyAffectedNotificationHistory() {
+        connectionManager.invalidatePermission(true, User.class, 1, Device.class, 100, false);
+        connectionManager.invalidatePermission(false, User.class, 1, Group.class, 200, false);
+        connectionManager.invalidatePermission(true, User.class, 1, Device.class, 100, true);
+        verify(listener, times(3)).onUpdateGameNotifications();
+        verify(secondListener, never()).onUpdateGameNotifications();
+    }
+
+    @Test
     public void testTargetedGameNotificationInvalidationStaysPrivateAcrossBroadcast() throws Exception {
         User recipient = new User();
         recipient.setId(1);

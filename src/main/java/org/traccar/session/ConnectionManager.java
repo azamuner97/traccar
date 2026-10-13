@@ -31,6 +31,7 @@ import org.traccar.model.Device;
 import org.traccar.model.Drawing;
 import org.traccar.model.Event;
 import org.traccar.model.Geofence;
+import org.traccar.model.Group;
 import org.traccar.model.LogRecord;
 import org.traccar.model.ObjectOperation;
 import org.traccar.model.Position;
@@ -409,6 +410,11 @@ public class ConnectionManager implements BroadcastInterface {
                     return userIds.isEmpty() ? null : userIds;
                 });
             }
+        }
+        if (clazz1.equals(User.class) && (clazz2.equals(Device.class) || clazz2.equals(Group.class))) {
+            // A tracker/session grant can change without changing the account's
+            // assigned-device marker. Revalidate the private browser archive.
+            listeners.getOrDefault(id1, Set.of()).forEach(UpdateListener::onUpdateGameNotifications);
         }
         if (clazz1.equals(Geofence.class) || clazz2.equals(Geofence.class)) {
             updateGeofences();
