@@ -241,6 +241,7 @@ def audit_geofence_monitoring(session_id, source_ids, generated_users, sockets, 
 
 
 def main(tool_source=None):
+    wait_for_server()
     device_ids, group_ids, user_ids, sockets, geofence_ids = [], [], [], [], []
     salt = secrets.token_bytes(24)
     digest = hashlib.pbkdf2_hmac("sha256", PASSWORD.encode(), salt, 200000, 24).hex().upper()
@@ -371,6 +372,74 @@ def main(tool_source=None):
             private_ids = {record["id"] for record in private_page["items"]}
             expected_private = {targeted_ids[key]} if key in targeted_ids else set()
             assert private_ids.intersection(targeted_ids.values()) == expected_private
+        # Reassignment, role changes and revoked tracker permission must never
+        # return records the web client's current personal policy would reject.
+        player = generated_users["player"]
+        query = "/game-notifications?sessionDeviceId=" + str(session_id)
+        for attributes in (
+                {**player["attributes"], "traccarToolAssignedDeviceId": source_ids["supporter"]},
+                {**player["attributes"], "traccarToolUserRole": "spectator"}):
+            request("PUT", "/users/" + str(player["id"]), {**player, "attributes": attributes})
+            page = request("GET", query, credentials=generated["player"])
+            assert all(record["audience"] == "session" for record in page["items"])
+        request("PUT", "/users/" + str(player["id"]), player)
+        permission = {"userId": player["id"], "deviceId": source_ids["player"]}
+        request("DELETE", "/permissions", permission, expected=204)
+        page = request("GET", query, credentials=generated["player"])
+        assert all(record["audience"] == "session" for record in page["items"])
+        request("POST", "/permissions", permission, expected=204)
+        page = request("GET", query, credentials=generated["player"])
+        assert targeted_ids["player"] in {record["id"] for record in page["items"]}
+        for audience in ("nonHunters", "hunters"):
+            role_alert = {**alert, "id": "speedhunt-" + audience, "type": "speedhunt", "audience": audience,
+                "message": "[12:00:00] Speedhunt: Ping 2 out of 4 sent."
+                    + (" Participant: Älice speedhunt identity." if audience == "hunters" else "")}
+            assert request("POST", "/game-notifications", {**payload, "alert": role_alert})["created"]
+            assert not request("POST", "/game-notifications", {**payload, "alert": role_alert})["created"]
+        for key in ("player", "supporter", "hunter1", "hunter2", "spectator"):
+            page = request("GET", query, credentials=generated[key])
+            role_records = [record for record in page["items"] if record["id"].startswith("speedhunt-")]
+            assert len(role_records) == 1
+            named = key.startswith("hunter") or key == "spectator"
+            assert role_records[0]["audience"] == ("hunters" if named else "nonHunters")
+            assert ("Älice speedhunt identity" in json.dumps(page, ensure_ascii=False)) == named
+        received_ids = {}
+        for key, audience, source_key in (
+                ("player", "livePlayer", "supporter"), ("supporter", "liveSupporter", "player"),
+                ("hunter1", "liveHunter", "player"), ("hunter2", "liveHunter", "supporter"),
+                ("spectator", "liveSpectator", "player")):
+            received_ids[key] = set()
+            types = ("livePingReceived", "livePingEnded", "livePingTargetsChanged") if key == "spectator" else (
+                "livePingReceived", "livePingEnded")
+            for alert_type in types:
+                received = {**alert, "id": "received-" + key + "-" + alert_type, "type": alert_type,
+                    "audience": audience, "recipientUserId": generated_users[key]["id"],
+                    "sourceDeviceId": source_ids[source_key],
+                    "message": "[12:00:00] Live ping from Älice. Reason: Public transport."}
+                received_ids[key].add(received["id"])
+                assert request("POST", "/game-notifications", {**payload, "alert": received})["created"]
+                assert not request("POST", "/game-notifications", {**payload, "alert": received})["created"]
+                request("POST", "/game-notifications", {**payload, "alert": {
+                    **received, "id": "received-invalid", "audience": "user"}}, expected=400)
+            request("POST", "/game-notifications", {**payload, "alert": {
+                **received, "id": "received-invalid-role", "audience": "livePlayer" if key != "player" else "liveHunter",
+                "type": "livePingReceived"}}, expected=403)
+            request("POST", "/game-notifications", {**payload, "alert": {
+                **received, "id": "received-invalid-source", "sourceDeviceId": source_ids["hunter1"],
+                "type": "livePingReceived"}}, expected=403)
+        all_received_ids = set().union(*received_ids.values())
+        for key in received_ids:
+            private_page = request("GET", query, credentials=generated[key])
+            assert {record["id"] for record in private_page["items"]}.intersection(all_received_ids) == received_ids[key]
+        # Addressed destination history survives tracker reassignment but not a role change.
+        player = generated_users["player"]
+        request("PUT", "/users/" + str(player["id"]), {**player, "attributes": {
+            **player["attributes"], "traccarToolAssignedDeviceId": source_ids["supporter"]}})
+        assert received_ids["player"] <= {record["id"] for record in request("GET", query, credentials=generated["player"])["items"]}
+        request("PUT", "/users/" + str(player["id"]), {**player, "attributes": {
+            **player["attributes"], "traccarToolUserRole": "hunter"}})
+        assert not received_ids["player"].intersection(record["id"] for record in request("GET", query, credentials=generated["player"])["items"])
+        request("PUT", "/users/" + str(player["id"]), player)
         for invalid_type in ("geofenceEnter", "deviceOverspeed"):
             request("POST", "/game-notifications", {**payload, "alert": {
                 **alert,
@@ -401,10 +470,10 @@ def main(tool_source=None):
             cursor = page["nextCursor"]
             if not page["hasMore"]:
                 break
-        assert len(ids) == len(set(ids)) == 212
+        assert len(ids) == len(set(ids)) == 225
         request("DELETE", "/positions?" + urllib.parse.urlencode({"deviceId": session_id,
             "from": "2020-01-01T00:00:00Z", "to": "2030-01-01T00:00:00Z"}), expected=204)
-        assert sql("SELECT COUNT(*) FROM tc_game_notifications WHERE sessiondeviceid=" + str(session_id)) == "212"
+        assert sql("SELECT COUNT(*) FROM tc_game_notifications WHERE sessiondeviceid=" + str(session_id)) == "225"
         for socket in sockets:
             socket.close()
         sockets.clear()
@@ -413,11 +482,11 @@ def main(tool_source=None):
         wait_for_server()
         recovered = request("GET", "/game-notifications?" + urllib.parse.urlencode({
             "sessionDeviceId": session_id, "generation": generation, "limit": 500}), credentials=generated["player"])
-        assert recovered["generation"] == generation and len(recovered["items"]) == 209
+        assert recovered["generation"] == generation and len(recovered["items"]) == 212
         supporter_id = generated_users["supporter"]["id"]
         request("DELETE", "/users/" + str(supporter_id), expected=204)
         user_ids.remove(supporter_id)
-        assert sql("SELECT COUNT(*) FROM tc_game_notifications WHERE sessiondeviceid=" + str(session_id)) == "211"
+        assert sql("SELECT COUNT(*) FROM tc_game_notifications WHERE sessiondeviceid=" + str(session_id)) == "222"
         after_recipient_delete = request("GET", "/game-notifications?" + urllib.parse.urlencode({
             "sessionDeviceId": session_id, "generation": generation, "limit": 500}))
         assert "exit-supporter" not in {record["id"] for record in after_recipient_delete["items"]}
@@ -454,7 +523,7 @@ def main(tool_source=None):
         assert sql("SELECT COUNT(*) FROM tc_game_notifications WHERE sessiondeviceid=" + str(session_id)) == "0"
         print("MySQL/HTTP notification audit passed: targeting authorization, private role sockets, hunter-group "
               "visibility, real geofence events without native links, timestamps, case-sensitive IDs, "
-              "212-row pagination, GPS cleanup, server restart, "
+              "hunter/spectator Speedhunt names, live recipients, 225-row pagination, GPS cleanup, server restart, "
               "idempotency, recipient/session deletion cascades, atomic device saves and reset races.")
         if tool_source:
             print("Tool monitoring audit passed: healthy position websocket, enter/exit polling for player, "

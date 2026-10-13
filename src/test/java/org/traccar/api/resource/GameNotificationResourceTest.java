@@ -156,11 +156,90 @@ public class GameNotificationResourceTest {
     @Test
     void historyUsesPrivateRecipientFilterExceptForAdministrators() throws Exception {
         resource(user("player", 900), true).list(900, null, null, 100);
-        verify(journal).list(900, null, null, 100, 1L);
+        verify(journal).list(900, null, null, 100, new GameNotificationService.ReadAccess(1, null, "player"));
 
         User admin = user("operator", 900);
         admin.setAdministrator(true);
         resource(admin, false).list(900, null, null, 100);
         verify(journal).list(900, null, null, 100, null);
+    }
+
+    @Test
+    void personalHistoryRequiresCurrentRoleAssignmentAndSourcePermission() throws Exception {
+        User player = user("player", 900);
+        player.getAttributes().put(GameNotificationService.ASSIGNED_DEVICE_ATTRIBUTE, 31);
+        resource(player, true).list(900, null, null, 100);
+        verify(journal).list(900, null, null, 100, new GameNotificationService.ReadAccess(1, 31L, "player"));
+        reset(journal);
+        player.getAttributes().put("traccarToolUserRole", "spectator");
+        resource(player, true).list(900, null, null, 100);
+        verify(journal).list(900, null, null, 100, new GameNotificationService.ReadAccess(1, null, "spectator"));
+        reset(journal);
+        player.getAttributes().put("traccarToolUserRole", "player");
+        var resource = resource(player, true);
+        var field = BaseResource.class.getDeclaredField("storage");
+        field.setAccessible(true);
+        Storage storage = (Storage) field.get(resource);
+        when(storage.getObject(eq(Device.class), any(Request.class))).thenReturn(new Device(), (Device) null);
+        resource.list(900, null, null, 100);
+        verify(journal).list(900, null, null, 100, new GameNotificationService.ReadAccess(1, null, "player"));
+    }
+
+    private GameNotificationResource liveResource(User target, List<User> owners) throws Exception {
+        User admin = user("operator", 900);
+        admin.setAdministrator(true);
+        var resource = resource(admin, true, target);
+        var field = BaseResource.class.getDeclaredField("storage");
+        field.setAccessible(true);
+        Storage storage = (Storage) field.get(resource);
+        when(storage.getObjects(eq(User.class), any(Request.class))).thenReturn(owners);
+        return resource;
+    }
+
+    @Test
+    void liveRecipientsRequireTheirRoleAndSessionAndAUniqueParticipantSource() throws Exception {
+        User owner = recipient("player", 900, 31);
+        owner.setId(20);
+        for (String role : List.of("hunter", "player", "supporter", "spectator")) {
+            User target = recipient(role, 900, 100);
+            var alert = new GameNotificationService.Alert("live-" + role, "livePingReceived",
+                    GameNotificationService.liveRecipientAudience(role), "2026-01-01T12:00:00Z",
+                    "UTC", "Alice live ping", 10L, 31L);
+            var request = new GameNotificationResource.CreateRequest(900, "generation", alert);
+            when(journal.create(900, "generation", alert))
+                    .thenReturn(new GameNotificationService.Creation(2, "generation", null, true));
+            assertDoesNotThrow(() -> liveResource(target, List.of(owner)).create(request));
+            assertThrows(ForbiddenException.class, () -> liveResource(target, List.of()).create(request));
+            assertThrows(ForbiddenException.class, () -> liveResource(target, List.of(owner, owner)).create(request));
+            assertThrows(ForbiddenException.class, () -> liveResource(recipient(role, 901, 100), List.of(owner))
+                    .create(request));
+            if (!"spectator".equals(role)) {
+                assertThrows(ForbiddenException.class, () -> liveResource(recipient(role, 900, 31), List.of(owner))
+                        .create(request));
+            }
+            target.setAdministrator(true);
+            assertThrows(ForbiddenException.class, () -> liveResource(target, List.of(owner)).create(request));
+        }
+        verify(sockets, times(4)).updateGameNotifications(true, 900, 10L);
+        var alert = new GameNotificationService.Alert("live-denied", "livePingReceived", "liveHunter",
+                "2026-01-01T12:00:00Z", "UTC", "Alice live ping", 10L, 31L);
+        var request = new GameNotificationResource.CreateRequest(900, "generation", alert);
+        User target = recipient("hunter", 900, 100);
+        assertThrows(ForbiddenException.class, () -> liveResource(recipient("player", 900, 100), List.of(owner))
+                .create(request));
+        assertThrows(ForbiddenException.class, () -> liveResource(target, List.of(recipient("hunter", 900, 31)))
+                .create(request));
+        assertThrows(ForbiddenException.class, () -> liveResource(target, List.of(recipient("player", 901, 31)))
+                .create(request));
+        var resource = liveResource(target, List.of(owner));
+        var field = BaseResource.class.getDeclaredField("storage");
+        field.setAccessible(true);
+        Storage storage = (Storage) field.get(resource);
+        var mirror = new Device();
+        mirror.getAttributes().put("traccarToolMirror", true);
+        when(storage.getObject(eq(Device.class), any(Request.class))).thenReturn(mirror);
+        assertThrows(ForbiddenException.class, () -> resource.create(request));
+        when(storage.getObject(eq(Device.class), any(Request.class))).thenReturn(new Device(), (Device) null);
+        assertThrows(ForbiddenException.class, () -> resource.create(request));
     }
 }

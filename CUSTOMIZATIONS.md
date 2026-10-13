@@ -115,6 +115,16 @@ push. Identical already-archived submissions skip duplicate pushes while the
 remaining batch continues. Ambiguous relay requests are not retried. No durable
 push outbox is added, so an archive row is not proof that its push was attempted.
 
+New Speedhunt pings archive two role variants at the same occurrence time:
+`hunters` adds `Participant: <display name>.` to the timestamped message for hunters
+and spectator; `nonHunters` preserves the anonymous message for players and supporters.
+The wire audience identifiers remain stable.
+Only Speedhunt supports these audiences. API pagination authorizes the viewer's
+current role before returning either variant, and the web applies the same policy
+to cached history/banners. Native relay recipients are checked against current
+server roles and session markers; a name-bearing message is never broadcast as a
+session alert. Each account receives one notification, with no new migration.
+
 Version-2 personal types `geofenceExit`, `liveTrackingStarted`,
 `liveTrackingStopped`, and `liveTrackingTargetsChanged` use `user` audience,
 `recipientUserId`, and `sourceDeviceId`. Creation verifies the assigned generated
@@ -122,6 +132,11 @@ account, session, role, and tracker access. API history and socket invalidation
 are private to that account. The live types extend existing validation without a
 new migration. Live starts require the first positive successful upload count;
 real stops are reported once, while temporary rebuilds stay silent.
+Personal history additionally requires the account's current participant/hunter
+role, matching assigned tracker and access to that tracker. Reassignment or revoked
+tracker access cannot expose old private records through the API; session records
+remain available. Browser role/assignment changes cancel obsolete requests and
+re-read authorized history without replaying handled alerts.
 The Tool's optional editable Reason dropdown includes `Usage of public transport.`;
 reasons accompany that run's personal messages. Destination names come from the
 configured real groups, not role labels or internal mirror groups. Geofence
@@ -129,6 +144,26 @@ automation changes the running service's actual routes and informs the affected
 account on addition/removal without stopping manual tracking on re-entry.
 Normal Tool exit drains pending delivery for at most 30 seconds with an Exit now
 option; forced exit and native push delivery remain best-effort.
+Queued personal alerts retain their original server connection. Partial location
+batches preserve confirmed upload counts without retrying successful prefixes,
+and resumed tracking synchronizes its effective routes and notification messages.
+Warning/closing-widget failures cannot block tracking or final application exit.
+
+Manual/geofence live pings also archive `livePingReceived`, `livePingEnded`, and
+spectator-only `livePingTargetsChanged` records. `liveHunter`, `livePlayer`,
+`liveSupporter`, and `liveSpectator` audiences bind existing recipient/source
+fields to one receiving account's current role and session; no migration is
+needed. Creation verifies a unique real player/supporter source owner, while
+existing personal authorization is unchanged. The tracked account receives only
+its existing personal alerts; administrators and unrelated accounts never receive
+automatic recipient alerts.
+The integer upload count now includes confirmed destination keys, including
+partial successes. Starts wait for each destination's first success, removals and
+real termination send stops, and re-added destinations begin a fresh episode.
+Spectators get one run start/stop and one summary per confirmed destination change.
+Refreshes and temporary rebuilds stay silent. Names, optional reason, geofence
+context and stop causes are frozen for identical archive/push text. Native
+recipient accounts are revalidated before delivery; failures do not stop tracking.
 
 IndexedDB persists the full generation per origin, account and hidden session
 device, including local read flags, handled IDs, deletion tombstones and clear

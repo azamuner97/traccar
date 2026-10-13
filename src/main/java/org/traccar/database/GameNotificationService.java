@@ -50,6 +50,20 @@ public class GameNotificationService {
     private static final Set<String> SESSION_TYPES = Set.of("speedhunt", "playerCaught", "notificationTest");
     private static final Set<String> TARGETED_TYPES = Set.of(
             "geofenceExit", "liveTrackingStarted", "liveTrackingStopped", "liveTrackingTargetsChanged");
+    private static final Set<String> LIVE_RECIPIENT_TYPES = Set.of(
+            "livePingReceived", "livePingEnded", "livePingTargetsChanged");
+    private static final Map<String, String> LIVE_AUDIENCES = Map.of(
+            "hunter", "liveHunter", "player", "livePlayer",
+            "supporter", "liveSupporter", "spectator", "liveSpectator");
+
+    public static String liveRecipientAudience(String role) {
+        return LIVE_AUDIENCES.getOrDefault(String.valueOf(role), "");
+    }
+
+    public static boolean isLiveRecipientAlert(Alert alert) {
+        return alert != null && alert.type() != null && alert.audience() != null
+                && LIVE_RECIPIENT_TYPES.contains(alert.type()) && LIVE_AUDIENCES.containsValue(alert.audience());
+    }
 
     @JsonInclude(JsonInclude.Include.NON_NULL)
     public record Alert(String id, String type, String audience, String occurredAt, String timeZone, String message,
@@ -62,6 +76,7 @@ public class GameNotificationService {
     public record Page(int version, long sessionDeviceId, String generation, String resetAt,
                        List<Entry> items, String nextCursor, boolean hasMore) { }
     public record Creation(int version, String generation, Entry item, boolean created) { }
+    public record ReadAccess(long userId, Long sourceDeviceId, String role) { }
 
     private final DataSource dataSource;
     private final ObjectMapper objectMapper;
@@ -92,6 +107,22 @@ public class GameNotificationService {
                 && value.toString().equals(Long.toString(deviceId));
     }
 
+    public static Long assignedDeviceId(User user) {
+        if (user == null || user.getAdministrator() || !Set.of("player", "supporter", "hunter").contains(
+                String.valueOf(user.getAttributes().get("traccarToolUserRole")))) {
+            return null;
+        }
+        Object value = user.getAttributes().get(ASSIGNED_DEVICE_ATTRIBUTE);
+        if (value == null || !value.toString().matches("[1-9][0-9]*")) {
+            return null;
+        }
+        try {
+            return Long.parseLong(value.toString());
+        } catch (NumberFormatException error) {
+            return null;
+        }
+    }
+
     public static String generation(String value) {
         if (value == null || !value.matches("[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}")) {
             throw new BadRequestException("Invalid notification generation");
@@ -115,7 +146,14 @@ public class GameNotificationService {
         boolean targeted = "user".equals(alert.audience()) && TARGETED_TYPES.contains(alert.type())
                 && alert.recipientUserId() != null && alert.recipientUserId() > 0
                 && alert.sourceDeviceId() != null && alert.sourceDeviceId() > 0;
-        if (!session && !targeted) {
+        boolean role = "speedhunt".equals(alert.type())
+                && ("hunters".equals(alert.audience()) || "nonHunters".equals(alert.audience()))
+                && alert.recipientUserId() == null && alert.sourceDeviceId() == null;
+        boolean liveRecipient = isLiveRecipientAlert(alert)
+                && alert.recipientUserId() != null && alert.recipientUserId() > 0
+                && alert.sourceDeviceId() != null && alert.sourceDeviceId() > 0
+                && (!"livePingTargetsChanged".equals(alert.type()) || "liveSpectator".equals(alert.audience()));
+        if (!session && !targeted && !role && !liveRecipient) {
             throw new BadRequestException("Invalid notification audience or targets");
         }
         try {
@@ -364,7 +402,7 @@ public class GameNotificationService {
         }
     }
 
-    public Page list(long deviceId, String expected, String cursor, int requestedLimit, Long recipientUserId)
+    public Page list(long deviceId, String expected, String cursor, int requestedLimit, ReadAccess access)
             throws Exception {
         if (expected != null) {
             generation(expected);
@@ -391,17 +429,30 @@ public class GameNotificationService {
                 List<Entry> items = new ArrayList<>();
                 boolean more = false;
                 String next = Long.toString(after);
-                String recipientFilter = recipientUserId == null
+                String recipientFilter = access == null
                         ? ""
-                        : " AND (audience = 'session' OR recipientuserid = ?)";
+                        : " AND (audience = 'session' OR (type = 'speedhunt' AND audience = ?)"
+                                + " OR (audience = 'user' AND recipientuserid = ? AND sourcedeviceid = ?)"
+                                + " OR (recipientuserid = ? AND audience = ?))";
                 try (var query = connection.prepareStatement("SELECT * FROM tc_game_notifications "
                         + "WHERE sessiondeviceid = ? AND generation = ? AND id > ?"
                         + recipientFilter + " ORDER BY id ASC")) {
                     query.setLong(1, deviceId);
                     query.setString(2, state.generation());
                     query.setLong(3, after);
-                    if (recipientUserId != null) {
-                        query.setLong(4, recipientUserId);
+                    if (access != null) {
+                        // The stable 'hunters' audience also includes spectators.
+                        query.setString(4, ROLES.contains(String.valueOf(access.role()))
+                                ? Set.of("hunter", "spectator").contains(access.role())
+                                        ? "hunters" : "nonHunters" : "");
+                        query.setLong(5, access.userId());
+                        if (access.sourceDeviceId() == null) {
+                            query.setNull(6, Types.BIGINT);
+                        } else {
+                            query.setLong(6, access.sourceDeviceId());
+                        }
+                        query.setLong(7, access.userId());
+                        query.setString(8, liveRecipientAudience(access.role()));
                     }
                     query.setMaxRows(limit + 1);
                     try (var rows = query.executeQuery()) {

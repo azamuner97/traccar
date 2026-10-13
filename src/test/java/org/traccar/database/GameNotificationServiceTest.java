@@ -13,6 +13,7 @@ import org.traccar.storage.query.Columns;
 
 import java.time.Instant;
 import java.util.List;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.Executors;
 
@@ -196,13 +197,15 @@ public class GameNotificationServiceTest {
         service.create(900, state.generation(), second);
 
         assertEquals(3, service.list(900, state.generation(), null, 100, null).items().size());
-        var firstUser = service.list(900, state.generation(), null, 100, 10L).items();
+        var firstUser = service.list(900, state.generation(), null, 100,
+                new GameNotificationService.ReadAccess(10, 100L, "hunter")).items();
         assertEquals(List.of("session", "exit-1"), firstUser.stream().map(
                 GameNotificationService.Entry::id).toList());
         assertEquals(10, firstUser.getLast().recipientUserId());
         assertEquals(100, firstUser.getLast().sourceDeviceId());
         assertEquals(List.of("session", "exit-2"), service.list(
-                900, state.generation(), null, 100, 11L).items().stream().map(
+                900, state.generation(), null, 100,
+                new GameNotificationService.ReadAccess(11, 101L, "hunter")).items().stream().map(
                         GameNotificationService.Entry::id).toList());
 
         try (var connection = source.getConnection(); var statement = connection.createStatement()) {
@@ -211,6 +214,71 @@ public class GameNotificationServiceTest {
         assertEquals(List.of("session", "exit-2"), service.list(
                 900, state.generation(), null, 100, null).items().stream().map(
                         GameNotificationService.Entry::id).toList());
+    }
+
+    @Test
+    void reassignedOrRevokedSourceOnlyReceivesEligibleHistory() throws Exception {
+        var state = service.initialize(900);
+        service.create(900, state.generation(), alert("session"));
+        for (long sourceId : List.of(100L, 101L)) {
+            service.create(900, state.generation(), new GameNotificationService.Alert(
+                    "private-" + sourceId, "liveTrackingStarted", "user", "2026-01-01T12:00:00Z",
+                    "UTC", "message", 10L, sourceId));
+        }
+        for (long sourceId : List.of(100L, 101L)) {
+            var page = service.list(900, state.generation(), null, 1,
+                    new GameNotificationService.ReadAccess(10, sourceId, "player"));
+            assertEquals("session", page.items().getFirst().id());
+            assertTrue(page.hasMore());
+            var next = service.list(900, state.generation(), page.nextCursor(), 100,
+                    new GameNotificationService.ReadAccess(10, sourceId, "player"));
+            assertEquals(List.of("private-" + sourceId), next.items().stream().map(
+                    GameNotificationService.Entry::id).toList());
+        }
+        assertEquals(List.of("session"), service.list(900, null, null, 100,
+                new GameNotificationService.ReadAccess(10, null, "player")).items().stream().map(
+                        GameNotificationService.Entry::id).toList());
+        User user = new User();
+        user.getAttributes().put("traccarToolUserRole", "player");
+        user.getAttributes().put(GameNotificationService.ASSIGNED_DEVICE_ATTRIBUTE, "100");
+        assertEquals(100L, GameNotificationService.assignedDeviceId(user));
+        user.getAttributes().put(GameNotificationService.ASSIGNED_DEVICE_ATTRIBUTE, "9223372036854775808");
+        assertNull(GameNotificationService.assignedDeviceId(user));
+        user.getAttributes().put(GameNotificationService.ASSIGNED_DEVICE_ATTRIBUTE, 100);
+        user.getAttributes().put("traccarToolUserRole", "spectator");
+        assertNull(GameNotificationService.assignedDeviceId(user));
+    }
+
+    @Test
+    void speedhuntRoleVariantsExposeParticipantNamesOnlyToHuntersAndSpectators() throws Exception {
+        var state = service.initialize(900);
+        for (String audience : List.of("nonHunters", "hunters")) {
+            var message = "[13:00:00] Speedhunt: Ping 2 out of 4 sent."
+                    + ("hunters".equals(audience) ? " Participant: Älice." : "");
+            service.create(900, state.generation(), new GameNotificationService.Alert(
+                    "ping-" + audience, "speedhunt", audience, "2026-01-01T12:00:00Z",
+                    "Europe/Zurich", message, null, null));
+        }
+        for (String role : List.of("player", "supporter", "hunter", "spectator")) {
+            var page = service.list(900, state.generation(), null, 1,
+                    new GameNotificationService.ReadAccess(10, null, role));
+            assertEquals(1, page.items().size());
+            assertFalse(page.hasMore());
+            boolean named = Set.of("hunter", "spectator").contains(role);
+            assertEquals(named, page.items().getFirst().message().contains("Älice"));
+            assertEquals(named ? "hunters" : "nonHunters", page.items().getFirst().audience());
+            assertTrue(service.list(900, state.generation(), page.nextCursor(), 1,
+                    new GameNotificationService.ReadAccess(10, null, role)).items().isEmpty());
+        }
+        assertEquals(2, service.list(900, null, null, 100, null).items().size());
+        for (String audience : List.of("nonHunters", "hunters")) {
+            assertThrows(BadRequestException.class, () -> GameNotificationService.validate(
+                    new GameNotificationService.Alert("bad", "playerCaught", audience,
+                            "2026-01-01T12:00:00Z", "UTC", "message", null, null)));
+            assertThrows(BadRequestException.class, () -> GameNotificationService.validate(
+                    new GameNotificationService.Alert("bad", "speedhunt", audience,
+                            "2026-01-01T12:00:00Z", "UTC", "message", 10L, 100L)));
+        }
     }
 
     @Test
@@ -235,6 +303,50 @@ public class GameNotificationServiceTest {
                 new GameNotificationService.Alert("d", "notificationTest", "session",
                         "2026-01-01T12:00:00Z", "UTC", "message", 10L, 100L))) {
             assertThrows(BadRequestException.class, () -> GameNotificationService.validate(invalid));
+        }
+    }
+
+    @Test
+    void liveRecipientRecordsAreAccountAndCurrentRoleScopedNotAssignedToTheSource() throws Exception {
+        var state = service.initialize(900);
+        for (String role : List.of("hunter", "player", "supporter", "spectator")) {
+            String audience = GameNotificationService.liveRecipientAudience(role);
+            for (String type : List.of("livePingReceived", "livePingEnded")) {
+                var alert = new GameNotificationService.Alert(role + "-" + type, type, audience,
+                        "2026-01-01T12:00:00Z", "UTC", "Alice live ping. Reason: Public transport.", 10L, 100L);
+                service.create(900, state.generation(), alert);
+                assertThrows(BadRequestException.class, () -> GameNotificationService.validate(
+                        new GameNotificationService.Alert("bad", type, "user", alert.occurredAt(), "UTC",
+                                "message", 10L, 100L)));
+                assertThrows(BadRequestException.class, () -> GameNotificationService.validate(
+                        new GameNotificationService.Alert("bad", type, audience, alert.occurredAt(), "UTC",
+                                "message", null, 100L)));
+            }
+        }
+        for (String role : List.of("hunter", "player", "supporter", "spectator")) {
+            var access = new GameNotificationService.ReadAccess(10, null, role);
+            var first = service.list(900, state.generation(), null, 1, access);
+            assertEquals(1, first.items().size());
+            assertTrue(first.hasMore());
+            assertEquals(GameNotificationService.liveRecipientAudience(role), first.items().getFirst().audience());
+            var second = service.list(900, state.generation(), first.nextCursor(), 1, access);
+            assertEquals(1, second.items().size());
+            assertFalse(second.hasMore());
+            assertTrue(service.list(900, state.generation(), null, 100,
+                    new GameNotificationService.ReadAccess(11, null, role)).items().isEmpty());
+        }
+        assertTrue(service.list(900, state.generation(), null, 100,
+                new GameNotificationService.ReadAccess(10, null, "unrelated")).items().isEmpty());
+        assertEquals(8, service.list(900, null, null, 100, null).items().size());
+        for (String role : List.of("hunter", "player", "supporter", "spectator")) {
+            var changed = new GameNotificationService.Alert("changed", "livePingTargetsChanged",
+                    GameNotificationService.liveRecipientAudience(role), "2026-01-01T12:00:00Z", "UTC",
+                    "Destinations changed", 10L, 100L);
+            if ("spectator".equals(role)) {
+                assertDoesNotThrow(() -> GameNotificationService.validate(changed));
+            } else {
+                assertThrows(BadRequestException.class, () -> GameNotificationService.validate(changed));
+            }
         }
     }
 }
