@@ -218,6 +218,13 @@ public class GameNotificationServiceTest {
         assertDoesNotThrow(() -> GameNotificationService.validate(alert("session")));
         assertDoesNotThrow(() -> GameNotificationService.validate(new GameNotificationService.Alert(
                 "exit", "geofenceExit", "user", "2026-01-01T12:00:00Z", "UTC", "message", 10L, 100L)));
+        for (String type : List.of("liveTrackingStarted", "liveTrackingStopped", "liveTrackingTargetsChanged")) {
+            assertDoesNotThrow(() -> GameNotificationService.validate(new GameNotificationService.Alert(
+                    "live", type, "user", "2026-01-01T12:00:00Z", "UTC", "message", 10L, 100L)));
+            assertThrows(BadRequestException.class, () -> GameNotificationService.validate(
+                    new GameNotificationService.Alert("live", type, "session", "2026-01-01T12:00:00Z",
+                            "UTC", "message", null, null)));
+        }
         for (GameNotificationService.Alert invalid : List.of(
                 new GameNotificationService.Alert("a", "geofenceExit", "session",
                         "2026-01-01T12:00:00Z", "UTC", "message", null, null),

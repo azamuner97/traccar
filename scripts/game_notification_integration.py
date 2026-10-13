@@ -333,12 +333,14 @@ def main(tool_source=None):
         assert not request("POST", "/game-notifications", payload)["created"]
         request("POST", "/game-notifications", {**payload, "alert": {**alert, "message": "conflict"}}, expected=409)
         targeted_ids = {}
-        for key in ("player", "supporter", "hunter1"):
+        for key, alert_type in (
+                ("player", "liveTrackingStarted"), ("supporter", "liveTrackingStopped"),
+                ("hunter1", "liveTrackingTargetsChanged"), ("hunter2", "geofenceExit")):
             target_id = "exit-" + key
             targeted_ids[key] = target_id
             targeted = {
                 "id": target_id,
-                "type": "geofenceExit",
+                "type": alert_type,
                 "audience": "user",
                 "occurredAt": datetime.now(timezone.utc).isoformat(
                     timespec="milliseconds").replace("+00:00", "Z"),
@@ -399,10 +401,10 @@ def main(tool_source=None):
             cursor = page["nextCursor"]
             if not page["hasMore"]:
                 break
-        assert len(ids) == len(set(ids)) == 211
+        assert len(ids) == len(set(ids)) == 212
         request("DELETE", "/positions?" + urllib.parse.urlencode({"deviceId": session_id,
             "from": "2020-01-01T00:00:00Z", "to": "2030-01-01T00:00:00Z"}), expected=204)
-        assert sql("SELECT COUNT(*) FROM tc_game_notifications WHERE sessiondeviceid=" + str(session_id)) == "211"
+        assert sql("SELECT COUNT(*) FROM tc_game_notifications WHERE sessiondeviceid=" + str(session_id)) == "212"
         for socket in sockets:
             socket.close()
         sockets.clear()
@@ -415,7 +417,7 @@ def main(tool_source=None):
         supporter_id = generated_users["supporter"]["id"]
         request("DELETE", "/users/" + str(supporter_id), expected=204)
         user_ids.remove(supporter_id)
-        assert sql("SELECT COUNT(*) FROM tc_game_notifications WHERE sessiondeviceid=" + str(session_id)) == "210"
+        assert sql("SELECT COUNT(*) FROM tc_game_notifications WHERE sessiondeviceid=" + str(session_id)) == "211"
         after_recipient_delete = request("GET", "/game-notifications?" + urllib.parse.urlencode({
             "sessionDeviceId": session_id, "generation": generation, "limit": 500}))
         assert "exit-supporter" not in {record["id"] for record in after_recipient_delete["items"]}
@@ -452,7 +454,7 @@ def main(tool_source=None):
         assert sql("SELECT COUNT(*) FROM tc_game_notifications WHERE sessiondeviceid=" + str(session_id)) == "0"
         print("MySQL/HTTP notification audit passed: targeting authorization, private role sockets, hunter-group "
               "visibility, real geofence events without native links, timestamps, case-sensitive IDs, "
-              "211-row pagination, GPS cleanup, server restart, "
+              "212-row pagination, GPS cleanup, server restart, "
               "idempotency, recipient/session deletion cascades, atomic device saves and reset races.")
         if tool_source:
             print("Tool monitoring audit passed: healthy position websocket, enter/exit polling for player, "

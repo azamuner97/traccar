@@ -68,7 +68,7 @@ session identifier to the state and participant identities.
 
 The `tc_game_notifications` journal and authenticated `/api/game-notifications`
 API are the single source for live alerts and full-session history. Each immutable
-row contains a stable alert ID, session-device ID, generation, type, `session`
+row contains a stable alert ID, session-device ID, generation, type, `session` or `user`
 audience, UTC occurrence, IANA timezone, final timestamped message and server
 creation time. A database sequence supplies stable cursors; a unique
 session-device/alert-ID constraint prevents duplicate records. Alert IDs are
@@ -101,7 +101,7 @@ records on invalidation, login, reconnect, foreground return and drawer opening.
 Uploaded position content cannot create trusted notifications. No legacy position
 payload parsing, recovery, historical import or local-cache migration remains.
 
-All three types—`speedhunt`, `playerCaught`, `notificationTest`—target generated
+The three session types—`speedhunt`, `playerCaught`, `notificationTest`—target generated
 players, supporters, hunters and spectator; administrators and unrelated accounts
 are excluded. The `playerCaught` type covers newly caught players and supporters,
 using `<display name> was caught` for either role; unchanged saves and releases
@@ -114,6 +114,21 @@ Independent failures warn without gameplay rollback; explicit stale jobs do not
 push. Identical already-archived submissions skip duplicate pushes while the
 remaining batch continues. Ambiguous relay requests are not retried. No durable
 push outbox is added, so an archive row is not proof that its push was attempted.
+
+Version-2 personal types `geofenceExit`, `liveTrackingStarted`,
+`liveTrackingStopped`, and `liveTrackingTargetsChanged` use `user` audience,
+`recipientUserId`, and `sourceDeviceId`. Creation verifies the assigned generated
+account, session, role, and tracker access. API history and socket invalidation
+are private to that account. The live types extend existing validation without a
+new migration. Live starts require the first positive successful upload count;
+real stops are reported once, while temporary rebuilds stay silent.
+The Tool's optional editable Reason dropdown includes `Usage of public transport.`;
+reasons accompany that run's personal messages. Destination names come from the
+configured real groups, not role labels or internal mirror groups. Geofence
+automation changes the running service's actual routes and informs the affected
+account on addition/removal without stopping manual tracking on re-entry.
+Normal Tool exit drains pending delivery for at most 30 seconds with an Exit now
+option; forced exit and native push delivery remain best-effort.
 
 IndexedDB persists the full generation per origin, account and hidden session
 device, including local read flags, handled IDs, deletion tombstones and clear

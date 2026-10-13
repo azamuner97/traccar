@@ -48,6 +48,8 @@ public class GameNotificationService {
     public static final String ASSIGNED_DEVICE_ATTRIBUTE = DrawingUtil.ATTRIBUTE_ASSIGNED_DEVICE_ID;
     private static final Set<String> ROLES = Set.of("player", "supporter", "hunter", "spectator");
     private static final Set<String> SESSION_TYPES = Set.of("speedhunt", "playerCaught", "notificationTest");
+    private static final Set<String> TARGETED_TYPES = Set.of(
+            "geofenceExit", "liveTrackingStarted", "liveTrackingStopped", "liveTrackingTargetsChanged");
 
     @JsonInclude(JsonInclude.Include.NON_NULL)
     public record Alert(String id, String type, String audience, String occurredAt, String timeZone, String message,
@@ -110,7 +112,7 @@ public class GameNotificationService {
         }
         boolean session = "session".equals(alert.audience()) && SESSION_TYPES.contains(alert.type())
                 && alert.recipientUserId() == null && alert.sourceDeviceId() == null;
-        boolean targeted = "user".equals(alert.audience()) && "geofenceExit".equals(alert.type())
+        boolean targeted = "user".equals(alert.audience()) && TARGETED_TYPES.contains(alert.type())
                 && alert.recipientUserId() != null && alert.recipientUserId() > 0
                 && alert.sourceDeviceId() != null && alert.sourceDeviceId() > 0;
         if (!session && !targeted) {
