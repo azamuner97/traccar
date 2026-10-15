@@ -49,7 +49,9 @@ def main(tool_source=None):
                 devices[key] = device
                 device_ids.append(device["id"])
                 attributes["traccarToolAssignedDeviceId"] = device["id"]
-            email = api.PREFIX + "-" + key + "@example.invalid"
+            # Share-account emails append the tracker's unique ID. Keep the
+            # fixture email short enough for the existing 128-character column.
+            email = "p-" + api.PREFIX[-16:] + "-" + key + "@example.invalid"
             user = api.request("POST", "/users", {"name": key, "email": email, "password": api.PASSWORD,
                                "readonly": True, "deviceReadonly": True, "attributes": attributes})
             user_ids.append(user["id"])
@@ -87,6 +89,25 @@ def main(tool_source=None):
             access = api.request("GET", endpoint + "/access", credentials=credentials[key])
             assert {grant["deviceId"] for grant in access} == {peer}
             assert all(set(grant) == {"deviceId", "expiresAt"} for grant in access)
+        # A lease grants reads only, even if ordinary write restrictions are
+        # relaxed on the generated account. All trackers here are fixtures.
+        writable = {**users["first"], "readonly": False, "deviceReadonly": False}
+        api.request("PUT", f"/users/{writable['id']}", writable)
+        api.request("POST", "/commands/send", {"deviceId": second, "type": "custom",
+                    "attributes": {"data": "proximity-audit"}}, credentials=credentials["first"], expected=400)
+        api.request("PUT", f"/devices/{second}", devices["second"], credentials=credentials["first"], expected=400)
+        api.request("DELETE", f"/devices/{second}", credentials=credentials["first"], expected=400)
+        api.request("DELETE", f"/positions?deviceId={second}", credentials=credentials["first"], expected=400)
+        api.request("POST", "/permissions", {"userId": writable["id"], "deviceId": second},
+                    credentials=credentials["first"], expected=400)
+        share_expiry = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+        api.request("POST", "/share/device", urllib.parse.urlencode({"deviceId": first,
+                    "expiration": share_expiry}).encode(), credentials=credentials["first"])
+        shared_email = users["first"]["email"] + ":" + devices["first"]["uniqueId"]
+        user_ids.append(int(api.sql("SELECT id FROM tc_users WHERE email=" + api.literal(shared_email))))
+        api.request("POST", "/share/device", urllib.parse.urlencode({"deviceId": second,
+                    "expiration": share_expiry}).encode(), credentials=credentials["first"], expected=400)
+        api.request("PUT", f"/users/{writable['id']}", users["first"])
         for key in ("hunter", "spectator"):
             circles = api.request("GET", endpoint + "/circles", credentials=credentials[key])
             assert len(circles) == 1 and circles[0]["playerCount"] == 2
@@ -183,8 +204,18 @@ def main(tool_source=None):
         api.wait_for_server()
         assert api.request("GET", endpoint)["grants"] == []
         assert api.request("GET", endpoint)["circles"] == []
+        revision = api.request("GET", endpoint)["revision"] + 1
+        api.request("PUT", endpoint, snapshot(revision, 3600))
+        session_state = api.request("GET", f"/devices/{session_id}")
+        api.sql(f"UPDATE tc_devices SET attributes=JSON_REMOVE(attributes,'$.traccarToolGameState') WHERE id={session_id}")
+        deadline = time.monotonic() + 8
+        while first in {device["id"] for device in api.request("GET", "/devices", credentials=credentials["second"])}:
+            assert time.monotonic() < deadline, "Invalid session retained a long-lived proximity lease"
+            time.sleep(0.2)
+        api.request("PUT", f"/devices/{session_id}", session_state)
         print("MySQL/HTTP proximity audit passed: scoped access, anonymous circles, independent permanent grants, "
-              "revision/generation conflicts, real Tool publication, expiry, identity changes, and server restart.")
+              "read-only/non-shareable leases, revision/generation conflicts, real Tool publication, expiry, identity/session changes, "
+              "and server restart.")
     finally:
         for socket in sockets:
             socket.close()

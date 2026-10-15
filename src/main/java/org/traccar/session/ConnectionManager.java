@@ -347,6 +347,9 @@ public class ConnectionManager implements BroadcastInterface {
         if (local) {
             broadcastService.updateEvent(true, userId, event);
         }
+        if (event.getDeviceId() > 0 && !canReadDevice(userId, event.getDeviceId())) {
+            return;
+        }
         Set<UpdateListener> userListeners = listeners.get(userId);
         if (userListeners != null) {
             for (UpdateListener listener : userListeners) {
@@ -524,6 +527,9 @@ public class ConnectionManager implements BroadcastInterface {
             record.setUniqueId(firstEntry.getKey());
             record.setDeviceId(firstEntry.getValue().getDeviceId());
             for (long userId : deviceUsers.getOrDefault(record.getDeviceId(), Set.of())) {
+                if (!canReadDevice(userId, record.getDeviceId())) {
+                    continue;
+                }
                 for (UpdateListener listener : listeners.getOrDefault(userId, Set.of())) {
                     listener.onUpdateLog(record);
                 }

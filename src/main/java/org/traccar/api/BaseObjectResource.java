@@ -98,7 +98,7 @@ public abstract class BaseObjectResource<T extends BaseModel> extends BaseResour
     @Path("{id}")
     @PUT
     public Response update(T entity) throws Exception {
-        permissionsService.checkPermission(baseClass, getUserId(), entity.getId());
+        permissionsService.checkWritePermission(baseClass, getUserId(), entity.getId());
 
         boolean skipReadonly = false;
         if (entity instanceof User after) {
@@ -142,7 +142,7 @@ public abstract class BaseObjectResource<T extends BaseModel> extends BaseResour
     @Path("{id}")
     @DELETE
     public Response remove(@PathParam("id") long id) throws Exception {
-        permissionsService.checkPermission(baseClass, getUserId(), id);
+        permissionsService.checkWritePermission(baseClass, getUserId(), id);
         permissionsService.checkEdit(getUserId(), baseClass, false, false);
 
         storage.removeObject(baseClass, new Request(new Condition.Equals("id", id)));

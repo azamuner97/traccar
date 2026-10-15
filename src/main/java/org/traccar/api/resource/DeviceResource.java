@@ -98,7 +98,7 @@ public class DeviceResource extends BaseObjectResource<Device> {
     @Path("{id}")
     @PUT
     public Response update(Device device) throws Exception {
-        permissionsService.checkPermission(Device.class, getUserId(), device.getId());
+        permissionsService.checkWritePermission(Device.class, getUserId(), device.getId());
         permissionsService.checkEdit(getUserId(), device, false, false);
         gameNotifications.updateDevice(device);
         cacheManager.invalidateObject(true, Device.class, device.getId(), ObjectOperation.UPDATE);
@@ -175,7 +175,7 @@ public class DeviceResource extends BaseObjectResource<Device> {
     @Path("{id}/accumulators")
     @PUT
     public Response updateAccumulators(DeviceAccumulators entity) throws Exception {
-        permissionsService.checkPermission(Device.class, getUserId(), entity.getDeviceId());
+        permissionsService.checkWritePermission(Device.class, getUserId(), entity.getDeviceId());
         permissionsService.checkEdit(getUserId(), Device.class, false, false);
 
         Position position = storage.getObject(Position.class, new Request(
@@ -236,7 +236,7 @@ public class DeviceResource extends BaseObjectResource<Device> {
                 new Columns.All(),
                 new Condition.And(
                         new Condition.Equals("id", deviceId),
-                        new Condition.Permission(User.class, getUserId(), Device.class))));
+                        new Condition.Permission(User.class, getUserId(), Device.class).excludeTemporary())));
         if (device != null) {
             String name = "device";
             String extension = imageExtension(type);

@@ -116,7 +116,7 @@ public class PositionResource extends BaseResource {
             return Response.status(Response.Status.NOT_FOUND).build();
         }
 
-        permissionsService.checkPermission(Device.class, getUserId(), position.getDeviceId());
+        permissionsService.checkWritePermission(Device.class, getUserId(), position.getDeviceId());
 
         storage.removeObject(Position.class, request);
         return Response.status(Response.Status.NO_CONTENT).build();
@@ -126,7 +126,7 @@ public class PositionResource extends BaseResource {
     public Response remove(
             @QueryParam("deviceId") long deviceId,
             @QueryParam("from") Date from, @QueryParam("to") Date to) throws StorageException {
-        permissionsService.checkPermission(Device.class, getUserId(), deviceId);
+        permissionsService.checkWritePermission(Device.class, getUserId(), deviceId);
         permissionsService.checkRestriction(getUserId(), UserRestrictions::getReadonly);
 
         var conditions = new LinkedList<Condition>();

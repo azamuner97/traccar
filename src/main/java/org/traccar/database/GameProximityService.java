@@ -60,7 +60,8 @@ public class GameProximityService {
                 if (!Boolean.TRUE.equals(value.get("traccarToolGameState"))) {
                     throw new BadRequestException("Not a managed session device");
                 }
-                return (String) value.get(GameNotificationService.GENERATION_ATTRIBUTE);
+                Object generation = value.get(GameNotificationService.GENERATION_ATTRIBUTE);
+                return generation instanceof String ? (String) generation : null;
             }
         }
     }
@@ -325,7 +326,15 @@ public class GameProximityService {
             for (long sessionId : sessions) {
                 connection.setAutoCommit(false);
                 try {
-                    String generation = generation(connection, sessionId, true);
+                    String generation;
+                    try {
+                        generation = generation(connection, sessionId, true);
+                    } catch (NotFoundException | BadRequestException error) {
+                        // The session can be deleted or lose its managed marker
+                        // after the scan. Revoke its leases without blocking
+                        // expiry and reconciliation for the remaining sessions.
+                        generation = null;
+                    }
                     Set<Long> users = new HashSet<>();
                     var participants = participants(connection, sessionId);
                     boolean changed = false;

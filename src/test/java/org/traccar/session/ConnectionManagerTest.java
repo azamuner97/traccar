@@ -1,5 +1,7 @@
 package org.traccar.session;
 
+import io.netty.channel.Channel;
+import org.traccar.Protocol;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.traccar.broadcast.BroadcastService;
@@ -8,16 +10,20 @@ import org.traccar.database.DeviceLookupService;
 import org.traccar.database.NotificationManager;
 import org.traccar.model.Device;
 import org.traccar.model.Drawing;
+import org.traccar.model.Event;
 import org.traccar.model.Geofence;
 import org.traccar.model.Group;
 import org.traccar.model.Notification;
+import org.traccar.model.LogRecord;
 import org.traccar.model.ObjectOperation;
 import org.traccar.model.User;
+import org.traccar.model.Position;
 import org.traccar.session.cache.CacheManager;
 import org.traccar.storage.Storage;
 import org.traccar.storage.query.Request;
 
 import java.util.List;
+import java.net.InetSocketAddress;
 
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
@@ -36,12 +42,14 @@ public class ConnectionManagerTest {
     private ConnectionManager.UpdateListener secondListener;
     private Storage storage;
     private BroadcastService broadcastService;
+    private DeviceLookupService deviceLookupService;
 
     @BeforeEach
     public void setUp() throws Exception {
         storage = mock(Storage.class);
         when(storage.getObjects(eq(Device.class), any(Request.class))).thenReturn(List.of());
         broadcastService = mock(BroadcastService.class);
+        deviceLookupService = mock(DeviceLookupService.class);
 
         connectionManager = new ConnectionManager(
                 new Config(),
@@ -49,7 +57,7 @@ public class ConnectionManagerTest {
                 storage,
                 mock(NotificationManager.class),
                 broadcastService,
-                mock(DeviceLookupService.class));
+                deviceLookupService);
 
         listener = mock(ConnectionManager.UpdateListener.class);
         secondListener = mock(ConnectionManager.UpdateListener.class);
@@ -69,6 +77,43 @@ public class ConnectionManagerTest {
         reset(listener);
         connectionManager.invalidateObject(true, Device.class, 1, ObjectOperation.UPDATE);
         verify(listener, never()).onUpdateGeofences();
+    }
+
+    @Test
+    public void testRevokedAuthorizationStopsEveryDeviceSocketPayloadBeforeCacheRefresh() throws Exception {
+        Device device = new Device();
+        device.setId(100);
+        device.setUniqueId("proximity-fixture");
+        when(storage.getObjects(eq(Device.class), any(Request.class))).thenReturn(List.of(device));
+        when(storage.getObject(eq(Device.class), any(Request.class))).thenReturn(device);
+        connectionManager.removeListener(1, listener);
+        connectionManager.addListener(1, listener);
+        Channel channel = mock(Channel.class);
+        var local = new InetSocketAddress("127.0.0.1", 5056);
+        var remote = new InetSocketAddress("127.0.0.1", 12345);
+        when(channel.localAddress()).thenReturn(local);
+        when(deviceLookupService.lookup(any(String[].class))).thenReturn(device);
+        connectionManager.getDeviceSession(mock(Protocol.class), channel, remote, "proximity-fixture");
+        var position = new Position();
+        position.setDeviceId(100);
+        var event = new Event();
+        event.setDeviceId(100);
+        var log = new LogRecord(local, remote);
+        connectionManager.updateDevice(false, device);
+        connectionManager.updatePosition(false, position);
+        connectionManager.updateEvent(false, 1, event);
+        connectionManager.updateLog(log);
+        verify(listener).onUpdateDevice(device);
+        verify(listener).onUpdatePosition(position);
+        verify(listener).onUpdateEvent(event);
+        verify(listener).onUpdateLog(log);
+        reset(listener);
+        when(storage.getObject(eq(Device.class), any(Request.class))).thenReturn(null);
+        connectionManager.updateDevice(false, device);
+        connectionManager.updatePosition(false, position);
+        connectionManager.updateEvent(false, 1, event);
+        connectionManager.updateLog(log);
+        verifyNoInteractions(listener);
     }
 
     @Test

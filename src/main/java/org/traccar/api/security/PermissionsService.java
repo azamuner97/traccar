@@ -114,7 +114,7 @@ public class PermissionsService {
                 if (!denied && addition && getUser(userId).getDeviceLimit() > 0) {
                     int deviceCount = storage.getObjects(Device.class, new Request(
                             new Columns.Include("id"),
-                            new Condition.Permission(User.class, userId, Device.class))).size();
+                            new Condition.Permission(User.class, userId, Device.class).excludeTemporary())).size();
                     denied = deviceCount >= getUser(userId).getDeviceLimit();
                 }
             } else if (clazz.equals(Command.class)) {
@@ -230,15 +230,26 @@ public class PermissionsService {
 
     public <T extends BaseModel> void checkPermission(
             Class<T> clazz, long userId, long objectId) throws StorageException, SecurityException {
+        checkPermission(clazz, userId, objectId, true);
+    }
+
+    public <T extends BaseModel> void checkWritePermission(
+            Class<T> clazz, long userId, long objectId) throws StorageException, SecurityException {
+        checkPermission(clazz, userId, objectId, false);
+    }
+
+    private <T extends BaseModel> void checkPermission(
+            Class<T> clazz, long userId, long objectId, boolean includeTemporary)
+            throws StorageException, SecurityException {
         Class<? extends BaseModel> queryClass = clazz.equals(LinkedDevice.class) ? Device.class : clazz;
         if (!getUser(userId).getAdministrator() && !(queryClass.equals(User.class) && userId == objectId)) {
+            var permission = new Condition.Permission(User.class, userId,
+                    queryClass.equals(User.class) ? ManagedUser.class : queryClass);
             var object = storage.getObject(queryClass, new Request(
                     new Columns.Include("id"),
                     new Condition.And(
                             new Condition.Equals("id", objectId),
-                            new Condition.Permission(
-                                    User.class, userId,
-                                    queryClass.equals(User.class) ? ManagedUser.class : queryClass))));
+                            includeTemporary ? permission : permission.excludeTemporary())));
             if (object == null) {
                 throw new SecurityException(queryClass.getSimpleName() + " access denied");
             }

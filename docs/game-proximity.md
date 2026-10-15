@@ -15,6 +15,9 @@ grants must share their episode and expiry. Sources must belong to unique enable
 player/supporter accounts in that session and have permanent owner access to real
 devices. Expiring grants contribute to device reads and websocket positions, but
 remain separate from ordinary direct/group permission inventories.
+Temporary visibility cannot authorize device edits, position deletion, commands,
+permission changes, or share tokens, even when an account has ordinary write
+privileges.
 
 A circle contains `id`, `latitude`, `longitude`, `diameterMeters`, `playerCount`,
 `supporterCount`, UTC `expiresAt`, and internal `participantDeviceIds`. Only
@@ -26,10 +29,14 @@ are omitted so local browser expiry cannot remove independently authorized acces
 
 Identical revisions are idempotent; obsolete/conflicting revisions and generations
 return 409. Invalid snapshots return 400 and identity/scope violations return 403.
-Lease expiry is checked by reads and position delivery and reconciled every second,
+Lease expiry is checked by reads and device, position, event, and log delivery and reconciled every second,
 including after startup. Account, device, and permanent-permission changes also
 reconcile invalid identities. Scoped websocket invalidations refresh circles and
 device inventories; browsers clear expired temporary markers even while offline.
+Invalidated or deleted session devices revoke their remaining state without
+interrupting cleanup for other sessions. Browsers retain known lease deadlines
+until a successful inventory refresh so delayed packets cannot restore expired
+peer markers or positions.
 
 Run the focused MySQL audit with Python 3.14 and websocket-client:
 `../Traccar-Tool/venv_traccar/bin/python scripts/game_proximity_integration.py --tool-source ../Traccar-Tool/src`.

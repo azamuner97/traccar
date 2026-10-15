@@ -135,6 +135,7 @@ public class CommandResource extends ExtendedObjectResource<Command> {
             var devices = DeviceUtil.getAccessibleDevices(storage, getUserId(), List.of(), List.of(groupId));
             List<QueuedCommand> queuedCommands = new ArrayList<>();
             for (Device device : devices) {
+                permissionsService.checkWritePermission(Device.class, getUserId(), device.getId());
                 Command command = QueuedCommand.fromCommand(entity).toCommand();
                 command.setDeviceId(device.getId());
                 QueuedCommand queuedCommand = commandsManager.sendCommand(command);
@@ -146,7 +147,7 @@ public class CommandResource extends ExtendedObjectResource<Command> {
                 return Response.accepted(queuedCommands).build();
             }
         } else {
-            permissionsService.checkPermission(Device.class, getUserId(), entity.getDeviceId());
+            permissionsService.checkWritePermission(Device.class, getUserId(), entity.getDeviceId());
             QueuedCommand queuedCommand = commandsManager.sendCommand(entity);
             if (queuedCommand != null) {
                 return Response.accepted(queuedCommand).build();

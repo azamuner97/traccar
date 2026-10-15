@@ -7,6 +7,7 @@ import jakarta.ws.rs.WebApplicationException;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.traccar.api.security.PermissionsService;
 import org.traccar.config.Config;
 import org.traccar.model.Device;
 import org.traccar.model.User;
@@ -85,6 +86,21 @@ public class GameProximityServiceTest {
     }
 
     @Test
+    void temporaryVisibilityCannotAuthorizeWritesButPermanentGroupAccessCan() throws Exception {
+        service.replace(900, snapshot(1, Instant.now().plusSeconds(120)));
+        var permissions = new PermissionsService(storage);
+        assertDoesNotThrow(() -> permissions.checkPermission(Device.class, 111, 12));
+        assertThrows(SecurityException.class, () -> permissions.checkWritePermission(Device.class, 111, 12));
+        assertDoesNotThrow(() -> permissions.checkWritePermission(Device.class, 111, 11));
+        try (var connection = source.getConnection(); var statement = connection.createStatement()) {
+            statement.execute("INSERT INTO tc_groups VALUES(1,0)");
+            statement.execute("UPDATE tc_devices SET groupid=1 WHERE id=12");
+            statement.execute("INSERT INTO tc_user_group VALUES(111,1)");
+        }
+        assertDoesNotThrow(() -> permissions.checkWritePermission(Device.class, 111, 12));
+    }
+
+    @Test
     void identicalWritesAreIdempotentAndObsoleteRevisionsAreRejected() throws Exception {
         var snapshot = snapshot(1, Instant.now().plusSeconds(120));
         assertEquals(service.replace(900, snapshot), service.replace(900, snapshot));
@@ -134,6 +150,28 @@ public class GameProximityServiceTest {
         assertEquals(List.of(12L), devices(112, false));
         assertTrue(service.get(900).grants().isEmpty());
         assertTrue(service.circles(900).isEmpty());
+    }
+
+    @Test
+    void invalidSessionDevicesDoNotPreventOtherSessionsFromExpiring() throws Exception {
+        service.replace(900, snapshot(1, Instant.now().plusSeconds(3600)));
+        try (var connection = source.getConnection(); var statement = connection.createStatement()) {
+            statement.execute("INSERT INTO tc_devices VALUES(901,'{\"traccarToolGameState\":true,\""
+                    + GameNotificationService.GENERATION_ATTRIBUTE + "\":\"" + generation + "\"}',0)");
+        }
+        service.replace(901, new GameProximityService.Snapshot(generation, 1, List.of(), List.of()));
+        try (var connection = source.getConnection(); var statement = connection.createStatement()) {
+            statement.execute("UPDATE tc_devices SET attributes='{}' WHERE id=900");
+            statement.execute("DELETE FROM tc_devices WHERE id=901");
+        }
+        assertEquals(2, service.reconcile().size());
+        assertEquals(List.of(11L, 900L), devices(111, false));
+        assertEquals(List.of(12L, 900L), devices(112, false));
+        try (var connection = source.getConnection(); var statement = connection.createStatement();
+                var rows = statement.executeQuery("SELECT COUNT(*) FROM tc_game_proximity_state")) {
+            assertTrue(rows.next());
+            assertEquals(0, rows.getInt(1));
+        }
     }
 
     @Test

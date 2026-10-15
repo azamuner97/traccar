@@ -70,7 +70,10 @@ public class ShareResource extends BaseResource {
                 new Columns.All(),
                 new Condition.And(
                         new Condition.Equals("id", id),
-                        new Condition.Permission(User.class, user.getId(), clazz))));
+                        new Condition.Permission(User.class, user.getId(), clazz).excludeTemporary())));
+        if (object == null) {
+            throw new SecurityException("Permanent access required for sharing");
+        }
 
         String shareEmail;
         if (clazz == Device.class) {
