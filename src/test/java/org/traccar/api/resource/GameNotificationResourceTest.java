@@ -5,6 +5,7 @@ import jakarta.ws.rs.ForbiddenException;
 import org.traccar.api.BaseResource;
 import org.traccar.api.security.PermissionsService;
 import org.traccar.database.GameNotificationService;
+import org.traccar.database.GameProximityService;
 import org.traccar.model.Device;
 import org.traccar.model.Server;
 import org.traccar.model.User;
@@ -65,6 +66,7 @@ public class GameNotificationResourceTest {
         inject(resource, BaseResource.class, "permissionsService", new PermissionsService(storage));
         inject(resource, GameNotificationResource.class, "service", journal);
         inject(resource, GameNotificationResource.class, "connectionManager", sockets);
+        inject(resource, GameNotificationResource.class, "proximity", mock(GameProximityService.class));
         return resource;
     }
 

@@ -22,6 +22,7 @@ import org.traccar.model.ObjectOperation;
 import org.traccar.model.Position;
 
 public interface BroadcastInterface {
+    default void updateGameProximity(boolean local, long sessionDeviceId, java.util.Set<Long> userIds) { }
 
     default void updateDevice(boolean local, Device device) {}
 

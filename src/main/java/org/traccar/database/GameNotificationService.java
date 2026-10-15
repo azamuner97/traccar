@@ -49,7 +49,8 @@ public class GameNotificationService {
     private static final Set<String> ROLES = Set.of("player", "supporter", "hunter", "spectator");
     private static final Set<String> SESSION_TYPES = Set.of("speedhunt", "playerCaught", "notificationTest");
     private static final Set<String> TARGETED_TYPES = Set.of(
-            "geofenceExit", "liveTrackingStarted", "liveTrackingStopped", "liveTrackingTargetsChanged");
+            "geofenceExit", "liveTrackingStarted", "liveTrackingStopped", "liveTrackingTargetsChanged",
+            "participantProximityEnter", "participantProximityExit");
     private static final Set<String> LIVE_RECIPIENT_TYPES = Set.of(
             "livePingReceived", "livePingEnded", "livePingTargetsChanged");
     private static final Map<String, String> LIVE_AUDIENCES = Map.of(
@@ -146,8 +147,9 @@ public class GameNotificationService {
         boolean targeted = "user".equals(alert.audience()) && TARGETED_TYPES.contains(alert.type())
                 && alert.recipientUserId() != null && alert.recipientUserId() > 0
                 && alert.sourceDeviceId() != null && alert.sourceDeviceId() > 0;
-        boolean role = "speedhunt".equals(alert.type())
+        boolean role = ("speedhunt".equals(alert.type()) || "participantProximityConsequence".equals(alert.type()))
                 && ("hunters".equals(alert.audience()) || "nonHunters".equals(alert.audience()))
+                && (!"participantProximityConsequence".equals(alert.type()) || "hunters".equals(alert.audience()))
                 && alert.recipientUserId() == null && alert.sourceDeviceId() == null;
         boolean liveRecipient = isLiveRecipientAlert(alert)
                 && alert.recipientUserId() != null && alert.recipientUserId() > 0
@@ -431,7 +433,8 @@ public class GameNotificationService {
                 String next = Long.toString(after);
                 String recipientFilter = access == null
                         ? ""
-                        : " AND (audience = 'session' OR (type = 'speedhunt' AND audience = ?)"
+                        : " AND (audience = 'session' OR"
+                                + " (type IN ('speedhunt','participantProximityConsequence') AND audience = ?)"
                                 + " OR (audience = 'user' AND recipientuserid = ? AND sourcedeviceid = ?)"
                                 + " OR (recipientuserid = ? AND audience = ?))";
                 try (var query = connection.prepareStatement("SELECT * FROM tc_game_notifications "

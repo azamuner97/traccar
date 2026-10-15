@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<databaseChangeLog xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+  xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-3.4.xsd">
+  <changeSet author="traccar-tool" id="game-proximity-1">
+    <createTable tableName="tc_game_proximity_state">
+      <column name="sessiondeviceid" type="INT"><constraints primaryKey="true" nullable="false" /></column>
+      <column name="generation" type="VARCHAR(36)"><constraints nullable="false" /></column>
+      <column name="revision" type="BIGINT"><constraints nullable="false" /></column>
+      <column name="snapshot" type="CLOB"><constraints nullable="false" /></column>
+    </createTable>
+    <addForeignKeyConstraint baseTableName="tc_game_proximity_state" baseColumnNames="sessiondeviceid"
+      referencedTableName="tc_devices" referencedColumnNames="id" constraintName="fk_game_proximity_state" onDelete="CASCADE" />
+    <createTable tableName="tc_game_proximity_grants">
+      <column name="sessiondeviceid" type="INT"><constraints nullable="false" /></column>
+      <column name="userid" type="INT"><constraints nullable="false" /></column>
+      <column name="sourcedeviceid" type="INT"><constraints nullable="false" /></column>
+      <column name="deviceid" type="INT"><constraints nullable="false" /></column>
+      <column name="expiresat" type="BIGINT"><constraints nullable="false" /></column>
+      <column name="data" type="TEXT"><constraints nullable="false" /></column>
+    </createTable>
+    <addPrimaryKey tableName="tc_game_proximity_grants" columnNames="sessiondeviceid,userid,deviceid" constraintName="pk_game_proximity_grants" />
+    <addForeignKeyConstraint baseTableName="tc_game_proximity_grants" baseColumnNames="sessiondeviceid"
+      referencedTableName="tc_devices" referencedColumnNames="id" constraintName="fk_game_proximity_grant_session" onDelete="CASCADE" />
+    <addForeignKeyConstraint baseTableName="tc_game_proximity_grants" baseColumnNames="userid"
+      referencedTableName="tc_users" referencedColumnNames="id" constraintName="fk_game_proximity_grant_user" onDelete="CASCADE" />
+    <addForeignKeyConstraint baseTableName="tc_game_proximity_grants" baseColumnNames="sourcedeviceid"
+      referencedTableName="tc_devices" referencedColumnNames="id" constraintName="fk_game_proximity_grant_source" onDelete="CASCADE" />
+    <addForeignKeyConstraint baseTableName="tc_game_proximity_grants" baseColumnNames="deviceid"
+      referencedTableName="tc_devices" referencedColumnNames="id" constraintName="fk_game_proximity_grant_target" onDelete="CASCADE" />
+    <createIndex tableName="tc_game_proximity_grants" indexName="idx_game_proximity_grant_access">
+      <column name="userid" /><column name="expiresat" /><column name="deviceid" />
+    </createIndex>
+    <createTable tableName="tc_game_proximity_circles">
+      <column name="sessiondeviceid" type="INT"><constraints nullable="false" /></column>
+      <column name="circleid" type="VARCHAR(64)"><constraints nullable="false" /></column>
+      <column name="expiresat" type="BIGINT"><constraints nullable="false" /></column>
+      <column name="data" type="TEXT"><constraints nullable="false" /></column>
+    </createTable>
+    <addPrimaryKey tableName="tc_game_proximity_circles" columnNames="sessiondeviceid,circleid" constraintName="pk_game_proximity_circles" />
+    <addForeignKeyConstraint baseTableName="tc_game_proximity_circles" baseColumnNames="sessiondeviceid"
+      referencedTableName="tc_devices" referencedColumnNames="id" constraintName="fk_game_proximity_circle_session" onDelete="CASCADE" />
+  </changeSet>
+</databaseChangeLog>

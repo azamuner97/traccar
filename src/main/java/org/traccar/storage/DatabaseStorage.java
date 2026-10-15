@@ -273,6 +273,10 @@ public class DatabaseStorage extends Storage {
                 if (condition.getIncludeGroups()) {
                     results.add(conditionId);
                 }
+                if (condition.getIncludeTemporary()) {
+                    results.add(conditionId);
+                    results.add(System.currentTimeMillis());
+                }
             }
             case Condition.LatestPositions condition -> {
                 if (condition.getDeviceId() > 0) {
@@ -476,6 +480,12 @@ public class DatabaseStorage extends Storage {
 
         }
 
+        if (condition.getIncludeTemporary()) {
+            result.append(" UNION SELECT g.").append(outputKey);
+            result.append(" FROM tc_game_proximity_grants g INNER JOIN tc_users u ON u.id = g.userid");
+            result.append(" WHERE g.").append(conditionKey).append(" = ?");
+            result.append(" AND g.expiresat > ? AND u.disabled = FALSE AND u.administrator = FALSE");
+        }
         return result.toString();
     }
 

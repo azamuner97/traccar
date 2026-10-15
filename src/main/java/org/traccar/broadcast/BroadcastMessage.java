@@ -21,6 +21,24 @@ import org.traccar.model.ObjectOperation;
 import org.traccar.model.Position;
 
 public class BroadcastMessage {
+    private Long gameProximityDeviceId;
+    private java.util.Set<Long> gameProximityUserIds;
+
+    public Long getGameProximityDeviceId() {
+        return gameProximityDeviceId;
+    }
+
+    public void setGameProximityDeviceId(Long gameProximityDeviceId) {
+        this.gameProximityDeviceId = gameProximityDeviceId;
+    }
+
+    public java.util.Set<Long> getGameProximityUserIds() {
+        return gameProximityUserIds;
+    }
+
+    public void setGameProximityUserIds(java.util.Set<Long> gameProximityUserIds) {
+        this.gameProximityUserIds = gameProximityUserIds;
+    }
 
     private Long gameNotificationsDeviceId;
     private Long gameNotificationsRecipientUserId;

@@ -26,6 +26,13 @@ import org.traccar.model.Permission;
 import org.traccar.model.Position;
 
 public abstract class BaseBroadcastService implements BroadcastService {
+    @Override
+    public void updateGameProximity(boolean local, long sessionDeviceId, java.util.Set<Long> userIds) {
+        BroadcastMessage message = new BroadcastMessage();
+        message.setGameProximityDeviceId(sessionDeviceId);
+        message.setGameProximityUserIds(userIds);
+        sendMessage(message);
+    }
 
     @Override
     public void updateGameNotifications(boolean local, long deviceId, Long recipientUserId) {
@@ -105,7 +112,10 @@ public abstract class BaseBroadcastService implements BroadcastService {
     protected abstract void sendMessage(BroadcastMessage message);
 
     protected void handleMessage(BroadcastMessage message) throws Exception {
-        if (message.getGameNotificationsDeviceId() != null) {
+        if (message.getGameProximityDeviceId() != null) {
+            listeners.forEach(listener -> listener.updateGameProximity(
+                    false, message.getGameProximityDeviceId(), message.getGameProximityUserIds()));
+        } else if (message.getGameNotificationsDeviceId() != null) {
             listeners.forEach(listener -> listener.updateGameNotifications(
                     false, message.getGameNotificationsDeviceId(),
                     message.getGameNotificationsRecipientUserId()));

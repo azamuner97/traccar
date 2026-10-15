@@ -18,6 +18,7 @@ import jakarta.ws.rs.QueryParam;
 import jakarta.ws.rs.core.MediaType;
 import org.traccar.api.BaseResource;
 import org.traccar.database.GameNotificationService;
+import org.traccar.database.GameProximityService;
 import org.traccar.model.Device;
 import org.traccar.model.User;
 import org.traccar.model.UserRestrictions;
@@ -38,6 +39,8 @@ public class GameNotificationResource extends BaseResource {
     private GameNotificationService service;
     @Inject
     private ConnectionManager connectionManager;
+    @Inject
+    private GameProximityService proximity;
 
     private void checkWrite(long deviceId) throws Exception {
         try {
@@ -174,6 +177,9 @@ public class GameNotificationResource extends BaseResource {
         }
         checkWrite(deviceId);
         var result = service.reset(deviceId, request.expectedGeneration(), request.replacementGeneration());
+        for (var change : proximity.reconcile()) {
+            connectionManager.updateGameProximity(true, change.sessionDeviceId(), change.userIds());
+        }
         connectionManager.updateGameNotifications(true, deviceId, null);
         return result;
     }

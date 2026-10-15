@@ -26,6 +26,7 @@ import org.traccar.config.Keys;
 import org.traccar.database.DeviceLookupService;
 import org.traccar.database.NotificationManager;
 import org.traccar.database.GameNotificationService;
+import org.traccar.database.GameProximityService;
 import org.traccar.model.BaseModel;
 import org.traccar.model.Device;
 import org.traccar.model.Drawing;
@@ -60,6 +61,8 @@ import java.util.stream.Collectors;
 
 @Singleton
 public class ConnectionManager implements BroadcastInterface {
+    @Inject
+    private GameProximityService gameProximity;
 
     private static final Logger LOGGER = LoggerFactory.getLogger(ConnectionManager.class);
 
@@ -309,6 +312,9 @@ public class ConnectionManager implements BroadcastInterface {
             removeDeviceSession(device.getId());
         }
         for (long userId : deviceUsers.getOrDefault(device.getId(), Collections.emptySet())) {
+            if (!canReadDevice(userId, device.getId())) {
+                continue;
+            }
             Set<UpdateListener> userListeners = listeners.get(userId);
             if (userListeners != null) {
                 for (UpdateListener listener : userListeners) {
@@ -324,6 +330,9 @@ public class ConnectionManager implements BroadcastInterface {
             broadcastService.updatePosition(true, position);
         }
         for (long userId : deviceUsers.getOrDefault(position.getDeviceId(), Collections.emptySet())) {
+            if (!canReadDevice(userId, position.getDeviceId())) {
+                continue;
+            }
             Set<UpdateListener> userListeners = listeners.get(userId);
             if (userListeners != null) {
                 for (UpdateListener listener : userListeners) {
@@ -362,6 +371,79 @@ public class ConnectionManager implements BroadcastInterface {
         listeners.getOrDefault(userId, Set.of()).forEach(UpdateListener::onUpdateUser);
     }
 
+    private boolean canReadDevice(long userId, long deviceId) {
+        try {
+            return storage.getObject(Device.class, new Request(new Columns.Include("id"),
+                    new Condition.And(new Condition.Equals("id", deviceId),
+                            new Condition.Permission(User.class, userId, Device.class)))) != null;
+        } catch (StorageException error) {
+            LOGGER.warn("Device access refresh failed", error);
+            return false;
+        }
+    }
+
+    private void refreshDeviceAccess(long userId) throws StorageException {
+        if (!listeners.containsKey(userId)) {
+            return;
+        }
+        Set<Long> current = storage.getObjects(Device.class, new Request(new Columns.Include("id"),
+                new Condition.Permission(User.class, userId, Device.class))).stream()
+                .map(BaseModel::getId).collect(Collectors.toSet());
+        Set<Long> before = userDevices.getOrDefault(userId, Set.of());
+        for (long deviceId : before) {
+            if (!current.contains(deviceId)) {
+                deviceUsers.computeIfPresent(deviceId, (ignored, users) -> {
+                    users.remove(userId);
+                    return users.isEmpty() ? null : users;
+                });
+            }
+        }
+        for (long deviceId : current) {
+            deviceUsers.computeIfAbsent(deviceId, ignored -> new HashSet<>()).add(userId);
+        }
+        userDevices.put(userId, current);
+        if (!current.equals(before)) {
+            listeners.getOrDefault(userId, Set.of()).forEach(UpdateListener::onUpdateDeviceAccess);
+        }
+    }
+
+    @Override
+    public synchronized void updateGameProximity(boolean local, long sessionDeviceId, Set<Long> userIds) {
+        if (local) {
+            broadcastService.updateGameProximity(true, sessionDeviceId, userIds);
+        }
+        for (long userId : userIds) {
+            try {
+                refreshDeviceAccess(userId);
+                listeners.getOrDefault(userId, Set.of()).forEach(UpdateListener::onUpdateDeviceAccess);
+            } catch (StorageException error) {
+                LOGGER.warn("Proximity device access refresh failed", error);
+            }
+        }
+        for (long userId : listeners.keySet()) {
+            try {
+                User user = storage.getObject(User.class, new Request(
+                        new Columns.All(), new Condition.Equals("id", userId)));
+                if (GameNotificationService.canReceive(user, sessionDeviceId) && !user.getDisabled()
+                        && Set.of("hunter", "spectator").contains(user.getAttributes().get("traccarToolUserRole"))) {
+                    listeners.get(userId).forEach(UpdateListener::onUpdateGameProximity);
+                }
+            } catch (StorageException error) {
+                LOGGER.warn("Proximity circle refresh failed", error);
+            }
+        }
+    }
+
+    private void reconcileProximity() {
+        try {
+            for (var change : gameProximity.reconcile()) {
+                updateGameProximity(true, change.sessionDeviceId(), change.userIds());
+            }
+        } catch (Exception error) {
+            LOGGER.warn("Proximity identity reconciliation failed", error);
+        }
+    }
+
     @Override
     public synchronized void updateGameNotifications(boolean local, long deviceId, Long recipientUserId) {
         if (local) {
@@ -385,6 +467,16 @@ public class ConnectionManager implements BroadcastInterface {
     @Override
     public synchronized <T extends BaseModel> void invalidateObject(
             boolean local, Class<T> clazz, long id, ObjectOperation operation) {
+        if (clazz.equals(User.class) || clazz.equals(Device.class)) {
+            reconcileProximity();
+            for (long userId : listeners.keySet()) {
+                try {
+                    refreshDeviceAccess(userId);
+                } catch (StorageException error) {
+                    LOGGER.warn("Device identity access refresh failed", error);
+                }
+            }
+        }
         if (clazz.equals(Geofence.class)) {
             updateGeofences();
         } else if (clazz.equals(Drawing.class)) {
@@ -399,16 +491,12 @@ public class ConnectionManager implements BroadcastInterface {
     @Override
     public synchronized <T1 extends BaseModel, T2 extends BaseModel> void invalidatePermission(
             boolean local, Class<T1> clazz1, long id1, Class<T2> clazz2, long id2, boolean link) {
-        if (clazz1.equals(User.class) && clazz2.equals(Device.class) && listeners.containsKey(id1)) {
-            if (link) {
-                userDevices.get(id1).add(id2);
-                deviceUsers.computeIfAbsent(id2, id -> new HashSet<>()).add(id1);
-            } else {
-                userDevices.get(id1).remove(id2);
-                deviceUsers.computeIfPresent(id2, (x, userIds) -> {
-                    userIds.remove(id1);
-                    return userIds.isEmpty() ? null : userIds;
-                });
+        if (clazz1.equals(User.class) && (clazz2.equals(Device.class) || clazz2.equals(Group.class))) {
+            reconcileProximity();
+            try {
+                refreshDeviceAccess(id1);
+            } catch (StorageException error) {
+                LOGGER.warn("Device permission refresh failed", error);
             }
         }
         if (clazz1.equals(User.class) && (clazz2.equals(Device.class) || clazz2.equals(Group.class))) {
@@ -444,6 +532,8 @@ public class ConnectionManager implements BroadcastInterface {
     }
 
     public interface UpdateListener {
+        default void onUpdateGameProximity() { }
+        default void onUpdateDeviceAccess() { }
         void onKeepalive();
         void onUpdateDevice(Device device);
         void onUpdatePosition(Position position);

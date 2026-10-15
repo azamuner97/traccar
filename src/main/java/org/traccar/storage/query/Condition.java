@@ -129,26 +129,41 @@ public interface Condition {
         private final Class<?> propertyClass;
         private final long propertyId;
         private final boolean excludeGroups;
+        private final boolean excludeTemporary;
 
         private Permission(
-                Class<?> ownerClass, long ownerId, Class<?> propertyClass, long propertyId, boolean excludeGroups) {
+                Class<?> ownerClass, long ownerId, Class<?> propertyClass, long propertyId,
+                boolean excludeGroups, boolean excludeTemporary) {
             this.ownerClass = ownerClass;
             this.ownerId = ownerId;
             this.propertyClass = propertyClass;
             this.propertyId = propertyId;
             this.excludeGroups = excludeGroups;
+            this.excludeTemporary = excludeTemporary;
         }
 
         public Permission(Class<?> ownerClass, long ownerId, Class<?> propertyClass) {
-            this(ownerClass, ownerId, propertyClass, 0, false);
+            this(ownerClass, ownerId, propertyClass, 0, false, false);
         }
 
         public Permission(Class<?> ownerClass, Class<?> propertyClass, long propertyId) {
-            this(ownerClass, 0, propertyClass, propertyId, false);
+            this(ownerClass, 0, propertyClass, propertyId, false, false);
         }
 
         public Permission excludeGroups() {
-            return new Permission(this.ownerClass, this.ownerId, this.propertyClass, this.propertyId, true);
+            return new Permission(this.ownerClass, this.ownerId, this.propertyClass, this.propertyId,
+                    true, this.excludeTemporary);
+        }
+
+        public Permission excludeTemporary() {
+            return new Permission(this.ownerClass, this.ownerId, this.propertyClass, this.propertyId,
+                    this.excludeGroups, true);
+        }
+
+        public boolean getIncludeTemporary() {
+            return !excludeTemporary && getIncludeGroups()
+                    && ownerClass.equals(org.traccar.model.User.class)
+                    && propertyClass.equals(org.traccar.model.Device.class);
         }
 
         public Class<?> getOwnerClass() {

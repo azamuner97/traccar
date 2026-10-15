@@ -43,4 +43,5 @@
   <include file="changelog-game-notifications-id-collation.xml" relativeToChangelogFile="true" />
   <include file="changelog-game-notifications-targeting.xml" relativeToChangelogFile="true" />
 
+    <include file="changelog-game-proximity.xml" relativeToChangelogFile="true" />
 </databaseChangeLog>
