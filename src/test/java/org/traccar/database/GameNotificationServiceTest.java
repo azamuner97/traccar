@@ -186,6 +186,31 @@ public class GameNotificationServiceTest {
     }
 
     @Test
+    void participantSharingStartIsPersonalIdempotentAndBoundToTheAssignedSource() throws Exception {
+        var state = service.initialize(900);
+        var alert = new GameNotificationService.Alert("episode-sharing-100", "participantProximityConsequence", "user",
+                "2026-01-01T12:00:00Z", "UTC", "Your approximate location is now being shared.", 10L, 100L);
+        assertTrue(service.create(900, state.generation(), alert).created());
+        assertFalse(service.create(900, state.generation(), alert).created());
+        assertEquals(List.of(alert.id()), service.list(900, state.generation(), null, 100,
+                new GameNotificationService.ReadAccess(10, 100L, "player")).items().stream().map(
+                        GameNotificationService.Entry::id).toList());
+        for (var access : List.of(
+                new GameNotificationService.ReadAccess(11, 100L, "player"),
+                new GameNotificationService.ReadAccess(10, 101L, "supporter"),
+                new GameNotificationService.ReadAccess(10, null, "player"),
+                new GameNotificationService.ReadAccess(11, null, "hunter"),
+                new GameNotificationService.ReadAccess(11, null, "spectator"))) {
+            assertTrue(service.list(900, state.generation(), null, 100, access).items().isEmpty());
+        }
+        for (String audience : List.of("session", "nonHunters")) {
+            assertThrows(BadRequestException.class, () -> GameNotificationService.validate(
+                    new GameNotificationService.Alert("bad", alert.type(), audience, alert.occurredAt(),
+                            "UTC", alert.message(), null, null)));
+        }
+    }
+
+    @Test
     void targetedAlertsArePrivateAndRecipientDeletionCascades() throws Exception {
         var state = service.initialize(900);
         service.create(900, state.generation(), alert("session"));
@@ -291,7 +316,7 @@ public class GameNotificationServiceTest {
         assertDoesNotThrow(() -> GameNotificationService.validate(new GameNotificationService.Alert(
                 "exit", "geofenceExit", "user", "2026-01-01T12:00:00Z", "UTC", "message", 10L, 100L)));
         for (String type : List.of("liveTrackingStarted", "liveTrackingStopped", "liveTrackingTargetsChanged",
-                "participantProximityEnter", "participantProximityExit")) {
+                "participantProximityEnter", "participantProximityExit", "participantProximityConsequence")) {
             assertDoesNotThrow(() -> GameNotificationService.validate(new GameNotificationService.Alert(
                     "live", type, "user", "2026-01-01T12:00:00Z", "UTC", "message", 10L, 100L)));
             assertThrows(BadRequestException.class, () -> GameNotificationService.validate(

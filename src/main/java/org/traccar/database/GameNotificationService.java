@@ -50,7 +50,7 @@ public class GameNotificationService {
     private static final Set<String> SESSION_TYPES = Set.of("speedhunt", "playerCaught", "notificationTest");
     private static final Set<String> TARGETED_TYPES = Set.of(
             "geofenceExit", "liveTrackingStarted", "liveTrackingStopped", "liveTrackingTargetsChanged",
-            "participantProximityEnter", "participantProximityExit");
+            "participantProximityEnter", "participantProximityExit", "participantProximityConsequence");
     private static final Set<String> LIVE_RECIPIENT_TYPES = Set.of(
             "livePingReceived", "livePingEnded", "livePingTargetsChanged");
     private static final Map<String, String> LIVE_AUDIENCES = Map.of(

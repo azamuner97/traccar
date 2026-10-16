@@ -126,13 +126,25 @@ def main(tool_source=None):
                         "alert": {"id": alert_type, "type": alert_type, "audience": "user",
                                   "occurredAt": occurred, "timeZone": "UTC", "message": "Personal proximity notice",
                                   "recipientUserId": users["first"]["id"], "sourceDeviceId": first}})
+        for key in ("first", "supporter"):
+            personal = {"sessionDeviceId": session_id, "generation": generation,
+                        "alert": {"id": "sharing-" + key, "type": "participantProximityConsequence", "audience": "user",
+                                  "occurredAt": occurred, "timeZone": "UTC",
+                                  "message": "Your approximate location is now being shared with hunters and spectators "
+                                             "because you remained too close to another participant. Please move apart.",
+                                  "recipientUserId": users[key]["id"], "sourceDeviceId": devices[key]["id"]}}
+            assert api.request("POST", "/game-notifications", personal)["created"]
+            assert not api.request("POST", "/game-notifications", personal)["created"]
+        api.request("POST", "/game-notifications", {**personal, "alert": {
+                    **personal["alert"], "id": "wrong-source", "sourceDeviceId": first}}, expected=403)
         api.request("POST", "/game-notifications", {"sessionDeviceId": session_id, "generation": generation,
                     "alert": {"id": "consequence", "type": "participantProximityConsequence", "audience": "hunters",
                               "occurredAt": occurred, "timeZone": "UTC", "message": "2 players are too close"}})
         for key in credentials:
             history = api.request("GET", f"/game-notifications?sessionDeviceId={session_id}", credentials=credentials[key])
             identifiers = {item["id"] for item in history["items"]}
-            expected = ({"participantProximityEnter", "participantProximityExit"} if key == "first"
+            expected = ({"participantProximityEnter", "participantProximityExit", "sharing-first"} if key == "first"
+                        else {"sharing-supporter"} if key == "supporter"
                         else {"consequence"} if key in {"hunter", "spectator"} else set())
             assert identifiers == expected, "Proximity notification audience isolation failed"
         for socket in sockets:
