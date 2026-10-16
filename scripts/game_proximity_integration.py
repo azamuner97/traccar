@@ -1,6 +1,7 @@
 """Local MySQL/HTTP proximity audit with isolated fixtures and no native pushes."""
 
 import argparse
+from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 import hashlib
 import http.cookiejar
@@ -8,6 +9,7 @@ import json
 import secrets
 import subprocess
 import sys
+from threading import Thread
 import time
 import urllib.request
 import urllib.parse
@@ -17,7 +19,142 @@ import websocket
 import game_notification_integration as api
 
 
-def main(tool_source=None):
+def audit_tool_delivery(session_device, users, devices, credentials, tool_source):
+    """Exercise service events, the live handler, and its real ordered HTTP worker."""
+    sys.path.insert(0, tool_source)
+    import requests
+    from traccar_game_manager.application.monitoring.service import MonitoringService
+    from traccar_game_manager.domain.session.credentials import normalize_login_credentials
+    from traccar_game_manager.domain.session.factory import default_session_template
+    from traccar_game_manager.infrastructure.platform.notification_worker import OrderedNotificationWorker
+    from traccar_game_manager.infrastructure.traccar.client import TraccarClient
+    from traccar_game_manager.ui.live_session.window import LiveSessionWindow
+
+    client = TraccarClient(api.BASE, "http://localhost:5056", api.EMAIL, api.PASSWORD, transport=requests)
+    pushes, warnings, events, checkpoints = [], [], [], []
+
+    class CapturedPushGateway:
+        def __getattr__(self, name):
+            return getattr(client, name)
+
+        def send_announcement(self, user_ids, subject, message, *, notificator):
+            assert notificator == "traccar"
+            pushes.append((list(user_ids), subject, message))
+
+    class Clock:
+        value = datetime.now(timezone.utc)
+
+        def now(self):
+            return self.value
+
+        def monotonic(self):
+            return self.value.timestamp()
+
+    class ManualScheduler:
+        def call_later(self, _delay, _callback):
+            return None
+
+        def cancel(self, _handle):
+            pass
+
+    session = default_session_template(api.PREFIX)
+    session["local_tz"] = "UTC"
+    session["traccar-server"]["web_url"] = api.BASE
+    session["devices"] = {"game_state": {"id": session_device["id"], "unique_id": session_device["uniqueId"]},
+                          "real": {device["uniqueId"]: device["id"] for device in devices.values()}}
+    session["device_roster"] = {
+        device["uniqueId"]: {"role": device["attributes"]["traccarToolRole"],
+                             "number": device["attributes"]["traccarToolRoleNumber"], "display_name": key}
+        for key, device in devices.items()}
+    session["users"] = {user["email"]: user["id"] for user in users.values()}
+    session["login_credentials"] = normalize_login_credentials({
+        user["email"]: {"role": user["attributes"]["traccarToolUserRole"],
+                        "number": devices[key]["attributes"]["traccarToolRoleNumber"] if key in devices else None}
+        for key, user in users.items()})
+    window = LiveSessionWindow.__new__(LiveSessionWindow)
+    window.session_snapshot = lambda: deepcopy(session)
+    window.devices = list(devices.values())
+    window.live_operations = CapturedPushGateway()
+    window._safe_monitoring_log = warnings.append
+    window._log_participant_proximity_event = lambda _event: None
+    worker = window._notification_worker = OrderedNotificationWorker()
+
+    def drain():
+        deadline = time.monotonic() + 30
+        while worker.pending:
+            assert time.monotonic() < deadline, "Tool notification worker did not drain"
+            time.sleep(0.05)
+        worker.flush_warnings()
+        assert not warnings, f"Tool notification delivery warnings: {warnings}"
+
+    def receive(kind, payload):
+        if kind in {"proximity", "proximity_publication"}:
+            if kind == "proximity":
+                events.append(deepcopy(payload))
+            window._handle_monitoring_service_event(kind, payload)
+
+    clock = Clock()
+    service = MonitoringService(window.live_operations, clock, ManualScheduler(), event_sink=receive,
+                                persist=checkpoints.append, stream_enabled=False, thread_factory=Thread)
+    members = [devices[key]["id"] for key in ("first", "second")]
+    service.configure(participant_ids=members, roles={member: "player" for member in members},
+                      participant_proximity={"player_player": True, "distance_m": 100.0,
+                                             "waiting_minutes": 0.01, "access_grace_minutes": 0.01,
+                                             "circle_diameter_m": 500.0})
+
+    def observe():
+        service.apply_positions({member: {"deviceId": member, "latitude": 47.0, "longitude": 8.0,
+                                          "fixTime": clock.now().isoformat()} for member in members})
+        drain()
+
+    try:
+        observe()
+        clock.value += timedelta(seconds=1)
+        observe()
+        activations = [event for event in events if event["transition"] == "consequence"]
+        assert len(activations) == 1 and set(activations[0]["newly_exposed_members"]) == set(members)
+        episode = activations[0]["episode_id"]
+        sharing_ids = {f"{episode}-sharing-{member}" for member in members}
+        message = ("Your approximate location is now being shared with hunters and spectators "
+                   "because you remained too close to another participant. Please move apart.")
+        for key in credentials:
+            history = api.request("GET", f"/game-notifications?sessionDeviceId={session_device['id']}",
+                                  credentials=credentials[key])["items"]
+            sharing = [item for item in history if item["id"] in sharing_ids]
+            if key in {"first", "second"}:
+                assert len(sharing) == 1, "Player did not receive the Tool sharing-start notification"
+                alert = sharing[0]
+                assert alert["type"] == "participantProximityConsequence" and alert["audience"] == "user"
+                assert alert["recipientUserId"] == users[key]["id"]
+                assert alert["sourceDeviceId"] == devices[key]["id"]
+                assert alert["message"].endswith(message)
+            else:
+                assert not sharing, "Personal sharing-start notification leaked to another account"
+            group = [item for item in history if item["id"] == f"{episode}-consequence"]
+            assert len(group) == (1 if key in {"hunter", "spectator"} else 0)
+        personal_pushes = [push for push in pushes if push[2].endswith(message)]
+        assert {tuple(push[0]) for push in personal_pushes} == {(users[key]["id"],) for key in ("first", "second")}
+        assert len(personal_pushes) == 2 and all(push[1] == "Participant proximity" for push in personal_pushes)
+        state = client.get_proximity_state(session_device["id"])
+        assert len(state["circles"]) == 1 and set(state["circles"][0]["participantDeviceIds"]) == set(members)
+        assert checkpoints[-1]["participant_proximity"]["pairs"]
+        count = len(pushes)
+        clock.value += timedelta(seconds=30)
+        observe()
+        assert len(pushes) == count, "Circle refresh repeated a sharing-start notification"
+        assert len([event for event in events if event["transition"] == "consequence"]) == 1
+    finally:
+        try:
+            window._handle_monitoring_service_event("proximity_publication", {"pairs": [], "circles": []})
+            drain()
+        finally:
+            worker.close()
+            worker._thread.join(timeout=5)
+    print("Tool delivery audit passed: live service, ordered worker, personal history, recipient isolation, "
+          "captured native pushes, and silent circle refresh.")
+
+
+def main(tool_source=None, skip_restart=False):
     api.wait_for_server()
     salt = secrets.token_bytes(24)
     digest = hashlib.pbkdf2_hmac("sha256", api.PASSWORD.encode(), salt, 200000, 24).hex().upper()
@@ -29,7 +166,8 @@ def main(tool_source=None):
     device_ids, user_ids, sockets = [], [], []
     try:
         session = api.request("POST", "/devices", {"name": api.PREFIX + "-session",
-                              "uniqueId": api.PREFIX + "-session", "attributes": {"traccarToolGameState": True}})
+                              "uniqueId": "traccar-tool-state-" + hashlib.sha256(api.PREFIX.encode()).hexdigest()[:24],
+                              "attributes": {"traccarToolGameState": True}})
         session_id = session["id"]
         device_ids.append(session_id)
         other = api.request("POST", "/devices", {"name": api.PREFIX + "-other",
@@ -155,34 +293,7 @@ def main(tool_source=None):
                     break
                 assert time.monotonic() < deadline
         if tool_source:
-            sys.path.insert(0, tool_source)
-            import requests
-            from traccar_game_manager.application.live_session.proximity import ProximityPublicationService
-            from traccar_game_manager.application.monitoring.proximity import ParticipantProximityMonitor
-            from traccar_game_manager.domain.session.credentials import normalize_login_credentials
-            from traccar_game_manager.infrastructure.traccar.client import TraccarClient
-
-            client = TraccarClient(api.BASE, "http://localhost:5056", api.EMAIL, api.PASSWORD, transport=requests)
-            tool_session = {"devices": {"game_state": {"id": session_id}, "real": {
-                device["uniqueId"]: device["id"] for device in devices.values()}},
-                "device_roster": {devices[key]["uniqueId"]: {"role": "player", "number": number,
-                                 "display_name": key} for key, number in (("first", 1), ("second", 2))},
-                "users": {users[key]["email"]: users[key]["id"] for key in ("first", "second")},
-                "login_credentials": normalize_login_credentials({users[key]["email"]: {
-                    "role": "player", "number": number} for key, number in (("first", 1), ("second", 2))})}
-            monitor = ParticipantProximityMonitor()
-            monitor.configure({"player_player": True, "distance_m": 100.0, "waiting_minutes": 0.01,
-                               "access_grace_minutes": 0.01, "circle_diameter_m": 500.0})
-            now = datetime.now(timezone.utc)
-            positions = {member: {"deviceId": member, "latitude": 47.0, "longitude": 8.0,
-                                  "fixTime": now.isoformat()} for member in (first, second)}
-            roles = {first: "player", second: "player"}
-            monitor.evaluate(positions, roles, set(), now, timedelta(minutes=5))
-            monitor.evaluate(positions, roles, set(), now + timedelta(seconds=1), timedelta(minutes=5))
-            publisher = ProximityPublicationService(client)
-            publisher.publish(tool_session, monitor.publication(now + timedelta(seconds=1)))
-            assert len(client.get_proximity_state(session_id)["circles"]) == 1
-            publisher.publish(tool_session, {"pairs": [], "circles": []})
+            audit_tool_delivery(session, users, devices, credentials, tool_source)
         current = api.request("GET", endpoint)["revision"]
         api.request("POST", "/permissions", {"userId": users["first"]["id"], "deviceId": second}, expected=204)
         short = snapshot(current + 1, 2)
@@ -209,13 +320,14 @@ def main(tool_source=None):
         assert api.request("GET", endpoint)["grants"] == []
         assert api.request("GET", endpoint)["circles"] == []
         api.request("PUT", f"/users/{updated['id']}", users["second"])
-        revision = api.request("GET", endpoint)["revision"] + 1
-        api.request("PUT", endpoint, snapshot(revision, 2))
-        subprocess.run(["docker", "compose", "--profile", "full", "restart", "traccar"], check=True,
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        api.wait_for_server()
-        assert api.request("GET", endpoint)["grants"] == []
-        assert api.request("GET", endpoint)["circles"] == []
+        if not skip_restart:
+            revision = api.request("GET", endpoint)["revision"] + 1
+            api.request("PUT", endpoint, snapshot(revision, 2))
+            subprocess.run(["docker", "compose", "--profile", "full", "restart", "traccar"], check=True,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            api.wait_for_server()
+            assert api.request("GET", endpoint)["grants"] == []
+            assert api.request("GET", endpoint)["circles"] == []
         revision = api.request("GET", endpoint)["revision"] + 1
         api.request("PUT", endpoint, snapshot(revision, 3600))
         session_state = api.request("GET", f"/devices/{session_id}")
@@ -226,8 +338,8 @@ def main(tool_source=None):
             time.sleep(0.2)
         api.request("PUT", f"/devices/{session_id}", session_state)
         print("MySQL/HTTP proximity audit passed: scoped access, anonymous circles, independent permanent grants, "
-              "read-only/non-shareable leases, revision/generation conflicts, real Tool publication, expiry, identity/session changes, "
-              "and server restart.")
+              "read-only/non-shareable leases, revision/generation conflicts, expiry, and identity/session changes"
+              + ("." if skip_restart else ", and server restart."))
     finally:
         for socket in sockets:
             socket.close()
@@ -245,4 +357,6 @@ def main(tool_source=None):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--tool-source")
-    main(parser.parse_args().tool_source)
+    parser.add_argument("--skip-restart", action="store_true", help="Leave a running development server uninterrupted")
+    args = parser.parse_args()
+    main(args.tool_source, args.skip_restart)

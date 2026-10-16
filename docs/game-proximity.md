@@ -41,5 +41,16 @@ peer markers or positions.
 Run the focused MySQL audit with Python 3.14 and websocket-client:
 `../Traccar-Tool/venv_traccar/bin/python scripts/game_proximity_integration.py --tool-source ../Traccar-Tool/src`.
 It creates and removes isolated fixtures, restarts only the local server, preserves
-Docker volumes, and never sends native pushes. The existing notification audit
+Docker volumes, and never sends native pushes. With `--tool-source`, the audit
+drives the actual monitoring service, live-window notification handler, and ordered
+HTTP worker. It verifies the personal sharing-start notice in both players'
+history, recipient isolation, captured push calls, circle publication, and silent
+refreshes. Add `--skip-restart` when auditing alongside an active development
+session; this skips only the server-restart check. The existing notification audit
 and desktop/mobile browser audits remain required alongside this check.
+
+After updating Tool source, fully quit and reopen the Tool application. Rebuilding
+Docker updates the server and web app; a running Python Tool retains its imported
+monitoring code. To verify a sharing-start notice after restarting, separate the
+participants and then begin a new close episode. Restored active episodes do not
+replay notices that have already been marked as emitted.
