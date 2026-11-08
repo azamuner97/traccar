@@ -61,11 +61,19 @@ public class GameEffectsService {
     public record Delivery(String deliveryId, List<PositionInput> positions, RuntimeInput runtime,
                            NotificationInput notifications, List<PushInput> pushes,
                            List<GameSessionService.LogInput> logs,
-                           List<GameRequestService.Completion> requests, JsonNode status) {
+                           List<GameRequestService.Completion> requests, JsonNode status,
+                           List<GameJokerService.Use> jokers, List<Long> caughtParticipants) {
         public Delivery(String deliveryId, List<PositionInput> positions, RuntimeInput runtime,
                         NotificationInput notifications, List<PushInput> pushes,
                         List<GameSessionService.LogInput> logs) {
-            this(deliveryId, positions, runtime, notifications, pushes, logs, null, null);
+            this(deliveryId, positions, runtime, notifications, pushes, logs, null, null, null, null);
+        }
+
+        public Delivery(String deliveryId, List<PositionInput> positions, RuntimeInput runtime,
+                        NotificationInput notifications, List<PushInput> pushes,
+                        List<GameSessionService.LogInput> logs, List<GameRequestService.Completion> requests,
+                        JsonNode status) {
+            this(deliveryId, positions, runtime, notifications, pushes, logs, requests, status, null, null);
         }
     }
 
@@ -75,12 +83,14 @@ public class GameEffectsService {
     public record RequestOutcome(long id, String status) { }
     public record Outcome(String deliveryId, boolean replayed, long epoch, List<PositionOutcome> positions,
                           Long runtimeRevision, String generation, List<AlertOutcome> alerts,
-                          List<PushOutcome> pushes, List<RequestOutcome> requests, Long statusRevision) { }
+                          List<PushOutcome> pushes, List<RequestOutcome> requests, Long statusRevision,
+                          List<GameJokerService.UseOutcome> jokers) { }
 
     /** The committed outcome plus what the caller publishes after commit. */
     public record Applied(Outcome outcome, List<Position> latest, Set<Long> devices, Long notificationDevice,
                           Set<Long> notifiedRecipients, boolean sessionNotified, List<Long> queuedPushes,
-                          boolean runtimeChanged, boolean requestsChanged, boolean statusChanged) { }
+                          boolean runtimeChanged, boolean requestsChanged, boolean statusChanged,
+                          boolean jokersChanged) { }
 
     private final DataSource dataSource;
     private final ObjectMapper objectMapper;
@@ -289,7 +299,8 @@ public class GameEffectsService {
         }
         return new Outcome(outcome.deliveryId(), true, outcome.epoch(), outcome.positions(),
                 outcome.runtimeRevision(), outcome.generation(), outcome.alerts(), pushes,
-                outcome.requests() == null ? List.of() : outcome.requests(), outcome.statusRevision());
+                outcome.requests() == null ? List.of() : outcome.requests(), outcome.statusRevision(),
+                outcome.jokers() == null ? List.of() : outcome.jokers());
     }
 
     private static boolean member(Connection connection, long gameSessionId, long userId) throws SQLException {
@@ -354,7 +365,7 @@ public class GameEffectsService {
                         throw new WebApplicationException("Delivery ID was already used for different effects", 409);
                     }
                     return new Applied(stored(connection, rows.getLong("id"), rows.getString("outcome")),
-                            List.of(), Set.of(), null, Set.of(), false, List.of(), false, false, false);
+                            List.of(), Set.of(), null, Set.of(), false, List.of(), false, false, false, false);
                 }
             }
         }
@@ -483,6 +494,15 @@ public class GameEffectsService {
             sessions.appendLogs(connection, gameSessionId, delivery.logs());
         }
 
+        List<GameJokerService.UseOutcome> jokerOutcomes = new ArrayList<>();
+        for (var use : delivery.jokers() == null ? List.<GameJokerService.Use>of() : delivery.jokers()) {
+            jokerOutcomes.add(GameJokerService.use(connection, gameSessionId, use, "Operator"));
+        }
+        boolean caught = delivery.caughtParticipants() != null && !delivery.caughtParticipants().isEmpty();
+        if (caught) {
+            GameJokerService.participantsCaught(connection, gameSessionId, delivery.caughtParticipants(), now);
+        }
+
         List<RequestOutcome> requestOutcomes = new ArrayList<>();
         if (delivery.requests() != null && !delivery.requests().isEmpty()) {
             for (var request : requests.complete(connection, gameSessionId, delivery.requests())) {
@@ -493,13 +513,14 @@ public class GameEffectsService {
                 : requests.putStatus(connection, gameSessionId, delivery.status());
 
         Outcome outcome = new Outcome(delivery.deliveryId(), false, epoch, positionOutcomes, runtimeRevision,
-                generation, alertOutcomes, pushOutcomes, requestOutcomes, statusRevision);
+                generation, alertOutcomes, pushOutcomes, requestOutcomes, statusRevision, jokerOutcomes);
         try (var query = connection.prepareStatement("UPDATE tc_game_deliveries SET outcome = ? WHERE id = ?")) {
             query.setString(1, objectMapper.writeValueAsString(outcome));
             query.setLong(2, rowId);
             query.executeUpdate();
         }
         return new Applied(outcome, latest, devices, notificationDevice, notifiedRecipients, sessionNotified,
-                queued, runtimeRevision != null, !requestOutcomes.isEmpty(), statusRevision != null);
+                queued, runtimeRevision != null, !requestOutcomes.isEmpty() || caught, statusRevision != null,
+                !jokerOutcomes.isEmpty() || caught || !requestOutcomes.isEmpty());
     }
 }

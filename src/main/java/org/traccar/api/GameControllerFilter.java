@@ -215,7 +215,8 @@ public class GameControllerFilter implements ContainerRequestFilter, ContainerRe
                 }
                 Long id = number(path.get(1));
                 String part = String.join("/", path.subList(2, path.size()));
-                if (ALWAYS_FENCED_PARTS.contains(part) || part.startsWith("requests/")) {
+                if (ALWAYS_FENCED_PARTS.contains(part) || part.startsWith("requests/")
+                        || part.startsWith("jokers/")) {
                     return Decision.REQUIRED;
                 }
                 Long executing = controller.executingSessionId();

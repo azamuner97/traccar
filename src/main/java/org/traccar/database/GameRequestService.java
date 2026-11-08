@@ -58,6 +58,8 @@ public class GameRequestService {
     public static final Set<String> OPEN = Set.of(PENDING, APPROVED, EXECUTING);
     public static final Set<String> HUNTER_TYPES = Set.of(
             "speedhuntStaticPing", "speedhuntLivePing", "speedhuntStopLivePing", "speedhuntTerminate");
+    /** Joker requests players and supporters make for themselves. */
+    public static final Set<String> JOKER_TYPES = GameJokerService.REQUEST_TYPES.keySet();
     public static final int EXPIRY_SECONDS = 120;
     private static final int MAX_LIVE_MINUTES = 240;
 
@@ -342,16 +344,28 @@ public class GameRequestService {
         if (submission == null || submission.type() == null) {
             throw new BadRequestException("Request type required");
         }
-        if (!HUNTER_TYPES.contains(submission.type())) {
+        boolean joker = JOKER_TYPES.contains(submission.type());
+        if (!HUNTER_TYPES.contains(submission.type()) && !joker) {
             throw new BadRequestException("Unknown request type");
         }
-        if (!"hunter".equals(member.role())) {
-            throw new ForbiddenException("Only hunters control speedhunts");
+        if (joker) {
+            if (!"player".equals(member.role()) && !"supporter".equals(member.role())
+                    || member.assignedDeviceId() == null) {
+                throw new ForbiddenException("Only players and supporters use jokers");
+            }
+            // Jokers are always for the requester themselves.
+            submission = new Submission(submission.type(), member.assignedDeviceId(), null,
+                    submission.parameters());
+        } else {
+            if (!"hunter".equals(member.role())) {
+                throw new ForbiddenException("Only hunters control speedhunts");
+            }
+            if (submission.targetDeviceId() == null || submission.baseRevision() == null) {
+                throw new BadRequestException("Participant and speedhunt revision required");
+            }
         }
-        if (submission.targetDeviceId() == null || submission.baseRevision() == null) {
-            throw new BadRequestException("Participant and speedhunt revision required");
-        }
-        JsonNode parameters = parameters(submission);
+        final Submission accepted = submission;
+        JsonNode parameters = parameters(accepted);
         return transaction(connection -> {
             try (var query = connection.prepareStatement(
                     "SELECT id FROM tc_game_sessions WHERE id = ? FOR UPDATE")) {
@@ -365,7 +379,7 @@ public class GameRequestService {
             try (var query = connection.prepareStatement("SELECT login FROM tc_game_session_members"
                     + " WHERE gamesessionid = ? AND assigneddeviceid = ? AND role IN ('player','supporter')")) {
                 query.setLong(1, member.gameSessionId());
-                query.setLong(2, submission.targetDeviceId());
+                query.setLong(2, accepted.targetDeviceId());
                 try (var rows = query.executeQuery()) {
                     if (!rows.next()) {
                         throw new BadRequestException("Unknown participant");
@@ -374,30 +388,35 @@ public class GameRequestService {
                 }
             }
             JsonNode target = participant(statusDocument(connection, member.gameSessionId()),
-                    submission.targetDeviceId());
+                    accepted.targetDeviceId());
             if (target == null) {
                 throw conflict("The game status is not available yet; try again shortly");
             }
             if (target.path("caught").asBoolean(false)) {
-                throw conflict("This participant is out of the game");
+                throw conflict(joker ? "You are out of the game" : "This participant is out of the game");
             }
-            if (target.path("speedhunt").path("revision").asLong(-1) != submission.baseRevision()) {
+            if (!joker && target.path("speedhunt").path("revision").asLong(-1) != accepted.baseRevision()) {
                 throw conflict("The speedhunt changed meanwhile; refresh and try again");
             }
             if (target.hasNonNull("name")) {
                 targetLabel = target.get("name").asText();
             }
-            try (var query = connection.prepareStatement("SELECT COUNT(*) FROM tc_game_requests WHERE"
+            // Speedhunt actions on one participant are serialized; a participant has one open request
+            // per joker type.
+            Set<String> conflicting = joker ? Set.of(accepted.type()) : HUNTER_TYPES;
+            try (var query = connection.prepareStatement("SELECT type FROM tc_game_requests WHERE"
                     + " gamesessionid = ? AND targetdeviceid = ? AND status IN (?,?,?)")) {
                 query.setLong(1, member.gameSessionId());
-                query.setLong(2, submission.targetDeviceId());
+                query.setLong(2, accepted.targetDeviceId());
                 query.setString(3, PENDING);
                 query.setString(4, APPROVED);
                 query.setString(5, EXECUTING);
                 try (var rows = query.executeQuery()) {
-                    rows.next();
-                    if (rows.getLong(1) > 0) {
-                        throw conflict("Another request for this participant is still open");
+                    while (rows.next()) {
+                        if (conflicting.contains(rows.getString(1))) {
+                            throw conflict(joker ? "You already have an open request for this joker"
+                                    : "Another request for this participant is still open");
+                        }
                     }
                 }
             }
@@ -408,13 +427,17 @@ public class GameRequestService {
                     + "parameters,status,createdat,expiresat,updatedat) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     Statement.RETURN_GENERATED_KEYS)) {
                 query.setLong(1, member.gameSessionId());
-                query.setString(2, submission.type());
+                query.setString(2, accepted.type());
                 query.setLong(3, member.userId());
                 query.setString(4, userLabel(connection, member.userId()));
                 query.setString(5, member.role());
-                query.setLong(6, submission.targetDeviceId());
+                query.setLong(6, accepted.targetDeviceId());
                 query.setString(7, text(targetLabel, 128));
-                query.setLong(8, submission.baseRevision());
+                if (accepted.baseRevision() == null) {
+                    query.setNull(8, java.sql.Types.BIGINT);
+                } else {
+                    query.setLong(8, accepted.baseRevision());
+                }
                 query.setString(9, objectMapper.writeValueAsString(parameters));
                 query.setString(10, PENDING);
                 query.setTimestamp(11, Timestamp.from(now), utc());
@@ -425,6 +448,11 @@ public class GameRequestService {
                     keys.next();
                     id = keys.getLong(1);
                 }
+            }
+            if (joker) {
+                GameJokerService.reserve(connection, member.gameSessionId(), accepted.targetDeviceId(),
+                        GameJokerService.REQUEST_TYPES.get(accepted.type()), id,
+                        userLabel(connection, member.userId()));
             }
             return memberView(load(connection, member.gameSessionId(), id, false));
         });
@@ -491,6 +519,9 @@ public class GameRequestService {
             }
             query.setLong(index, id);
             query.executeUpdate();
+        }
+        if (terminal) {
+            GameJokerService.settle(connection);
         }
     }
 
@@ -654,6 +685,7 @@ public class GameRequestService {
                 query.executeUpdate();
             }
         }
+        GameJokerService.settle(connection);
         return sessions;
     }
 

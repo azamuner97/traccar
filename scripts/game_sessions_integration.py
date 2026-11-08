@@ -333,6 +333,64 @@ def audit_tool_requests(tool_source, session_id, target, submit):
     return revision + 1
 
 
+def audit_jokers(session_id, tracker_id, mirror_id, hunter, player):
+    """Get hunter positions jokers: grants, reservations, consumption, over-allocation and release."""
+    change = f"/game-sessions/{session_id}/jokers/change"
+    grant = {"deviceId": tracker_id, "type": "hunterPositions", "quantity": 1, "reason": "audit"}
+    api.request("POST", change, grant, epoch=False, expected=423)
+    api.request("POST", change, {**grant, "type": "break"}, expected=400)
+    api.request("POST", change, grant)
+    api.request("GET", "/game-jokers", credentials=hunter, expected=403)
+
+    def inventory():
+        own = api.request("GET", "/game-jokers", credentials=player)
+        return next(item for item in own["inventories"] if item["type"] == "hunterPositions")
+
+    assert inventory()["available"] == 1
+    joker = {"type": "jokerHunterPositions"}
+    request = api.request("POST", "/game-requests", joker, credentials=player)
+    assert request["targetDeviceId"] == tracker_id and request["status"] == "pending"
+    assert inventory()["reserved"] == 1 and inventory()["available"] == 0
+    api.request("POST", "/game-requests", joker, credentials=player, expected=409)
+    assert all(item["type"] != "jokerHunterPositions"
+               for item in api.request("GET", "/game-requests", credentials=hunter)), "jokers are private"
+
+    # The Tool delivers each hunter's snapshot with its own fix time, together with the outcome.
+    api.request("POST", f"/game-sessions/{session_id}/requests/{request['id']}/claim", {})
+    fix_time = (datetime.now(timezone.utc) - timedelta(minutes=3)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+    outcome = api.request("POST", f"/game-sessions/{session_id}/effects", {
+        "deliveryId": "audit" + uuid4().hex,
+        "positions": [{"deviceId": mirror_id, "latitude": 47.3, "longitude": 8.6, "fixTime": fix_time}],
+        "requests": [{"id": request["id"], "status": "succeeded", "message": "Positions of 1 hunter(s) sent."}]})
+    assert outcome["positions"][0]["latest"] and outcome["positions"][0]["fixTime"].startswith(fix_time[:19])
+    position = api.request("GET", f"/positions?id={stored_device(mirror_id)['positionId']}")[0]
+    assert position["fixTime"].startswith(fix_time[:19]), position["fixTime"]
+    assert inventory()["used"] == 1 and inventory()["available"] == 0
+
+    # An operator relay without a joker left needs a confirmed use beyond the allocation.
+    use = {"deviceId": tracker_id, "type": "hunterPositions", "overAllocate": False, "detail": "Manual relay"}
+    api.request("POST", f"/game-sessions/{session_id}/effects",
+                {"deliveryId": "audit" + uuid4().hex, "jokers": [use]}, expected=409)
+    over = api.request("POST", f"/game-sessions/{session_id}/effects",
+                       {"deliveryId": "audit" + uuid4().hex, "jokers": [{**use, "overAllocate": True}]})
+    assert over["jokers"] == [{"deviceId": tracker_id, "type": "hunterPositions", "overAllocated": True}]
+    assert inventory()["overAllocated"] == 1 and inventory()["available"] == 0
+    api.request("POST", "/game-requests", joker, credentials=player, expected=409)
+
+    # Caught: the open request ends and its reserved joker returns.
+    api.request("POST", change, {**grant, "quantity": 2})
+    pending = api.request("POST", "/game-requests", joker, credentials=player)
+    api.request("POST", f"/game-sessions/{session_id}/effects",
+                {"deliveryId": "audit" + uuid4().hex, "caughtParticipants": [tracker_id]})
+    ended = next(item for item in api.request("GET", "/game-requests", credentials=player)
+                 if item["id"] == pending["id"])
+    assert ended["status"] == "cancelled", ended
+    assert inventory()["reserved"] == 0
+    kinds = [entry["kind"] for entry in api.request("GET", f"/game-sessions/{session_id}/jokers/ledger")]
+    assert kinds[:7] == ["release", "reserve", "grant", "overuse", "use", "reserve", "grant"], kinds
+    api.request("POST", change, {**grant, "quantity": -1})
+
+
 def audit_requests(tool_source=None):
     """Hunters' requests: membership, role-filtered status, revisions, lifecycle, invalidation."""
     password = secrets.token_hex(24)
@@ -347,10 +405,13 @@ def audit_requests(tool_source=None):
     state = api.request("POST", "/devices", {"name": api.PREFIX + "-rq-state", "uniqueId": api.PREFIX + "-rq-state",
                                              "attributes": {"traccarToolGameState": True}})
     tracker = api.request("POST", "/devices", {"name": api.PREFIX + "-rq-anna", "uniqueId": api.PREFIX + "-rq-anna"})
+    mirror = api.request("POST", "/devices", {"name": api.PREFIX + "-rq-h1-anna", "uniqueId": api.PREFIX + "-rq-h1-anna",
+                                              "attributes": {"traccarToolMirror": True}})
     try:
         api.request("PUT", f"/game-sessions/{session_id}/resources", {
             "expectedRevision": 1, "sessionDeviceId": state["id"],
-            "resources": {"devices": {"real": {"anna": tracker["id"]}}},
+            "resources": {"devices": {"real": {"anna": tracker["id"]},
+                                      "mirroring": {"hunter_1_to_player_1": mirror["id"]}}},
             "members": [{"userId": hunter_id, "role": "hunter", "number": 1, "assignedDeviceId": None,
                          "login": "hunter1"},
                         {"userId": player_id, "role": "player", "number": 1, "assignedDeviceId": tracker["id"],
@@ -403,6 +464,8 @@ def audit_requests(tool_source=None):
         assert seen["status"] == "succeeded" and seen["message"] == "Ping 1 of 4 sent." and seen["detail"] is None
         assert api.request("GET", f"/game-sessions/{session_id}/requests?state=all")[0]["detail"] == "operator only"
 
+        audit_jokers(session_id, tracker["id"], mirror["id"], hunter, player)
+
         revision = 2
         if tool_source:
             revision = audit_tool_requests(tool_source, session_id, tracker["id"], lambda base: api.request(
@@ -424,7 +487,7 @@ def audit_requests(tool_source=None):
         api.acquire_controller()
         assert not api.request("GET", "/game-status", credentials=hunter)["controllerActive"]
     finally:
-        for device_id in (tracker["id"], state["id"]):
+        for device_id in (mirror["id"], tracker["id"], state["id"]):
             api.request("DELETE", f"/devices/{device_id}", expected=204)
         api.sql(f"DELETE FROM tc_users WHERE id IN ({hunter_id},{player_id}) AND email LIKE "
                 + api.literal(api.PREFIX + "-%") + ";")

@@ -25,6 +25,7 @@ import jakarta.ws.rs.HeaderParam;
 import org.traccar.api.BaseResource;
 import org.traccar.database.GameControllerService;
 import org.traccar.database.GameEffectsService;
+import org.traccar.database.GameJokerService;
 import org.traccar.database.GamePushOutbox;
 import org.traccar.database.GameRequestService;
 import org.traccar.database.GameSessionService;
@@ -68,6 +69,9 @@ public class GameSessionResource extends BaseResource {
 
     @Inject
     private GameRequestService requests;
+
+    @Inject
+    private GameJokerService jokers;
 
     @Inject
     private GamePushOutbox outbox;
@@ -306,6 +310,9 @@ public class GameSessionResource extends BaseResource {
         if (applied.statusChanged()) {
             connectionManager.updateGameMembers(true, id, GameStatusResource.INVALIDATION);
         }
+        if (applied.jokersChanged()) {
+            connectionManager.updateGameMembers(true, id, GameJokerResource.INVALIDATION);
+        }
         return applied.outcome();
     }
 
@@ -355,5 +362,33 @@ public class GameSessionResource extends BaseResource {
     public com.fasterxml.jackson.databind.JsonNode operatorStatus(@PathParam("id") long id) throws Exception {
         checkOperator();
         return requests.operatorStatus(id);
+    }
+
+    @GET
+    @Path("{id}/jokers")
+    public GameJokerService.Overview jokerOverview(@PathParam("id") long id) throws Exception {
+        checkOperator();
+        return jokers.overview(id);
+    }
+
+    @GET
+    @Path("{id}/jokers/ledger")
+    public List<GameJokerService.LedgerEntry> jokerLedger(@PathParam("id") long id, @QueryParam("limit") int limit)
+            throws Exception {
+        checkOperator();
+        return jokers.ledger(id, limit);
+    }
+
+    /** Grants (positive quantity) or revokes (negative) unused jokers of one participant. */
+    @POST
+    @Path("{id}/jokers/change")
+    public GameJokerService.Inventory changeJokers(@PathParam("id") long id, GameJokerService.Change change)
+            throws Exception {
+        checkOperator();
+        var user = permissionsService.getUser(getUserId());
+        String actor = user.getName() == null || user.getName().isBlank() ? user.getEmail() : user.getName();
+        var result = jokers.change(id, change, actor);
+        connectionManager.updateGameMembers(true, id, GameJokerResource.INVALIDATION);
+        return result;
     }
 }

@@ -4843,6 +4843,92 @@ paths:
             application/json:
               schema:
                 type: object
+  /game-jokers:
+    get:
+      operationId: getGameJokers
+      summary: The signed-in player's or supporter's own jokers and open reservations
+      tags:
+        - Game Requests
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GameJokerOverview'
+        '403':
+          description: Only players and supporters hold jokers
+          content: {}
+  /game-sessions/{id}/jokers:
+    parameters:
+      - $ref: '#/components/parameters/GameSessionId'
+    get:
+      operationId: getGameSessionJokers
+      summary: Joker inventories of every player and supporter, and the open reservations
+      tags:
+        - Game Requests
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GameJokerOverview'
+  /game-sessions/{id}/jokers/ledger:
+    parameters:
+      - $ref: '#/components/parameters/GameSessionId'
+    get:
+      operationId: getGameSessionJokerLedger
+      summary: Grants, revokes, reservations, releases and uses, newest first
+      tags:
+        - Game Requests
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 1000
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/GameJokerLedgerEntry'
+  /game-sessions/{id}/jokers/change:
+    parameters:
+      - $ref: '#/components/parameters/GameSessionId'
+      - $ref: '#/components/parameters/GameControllerEpoch'
+    post:
+      operationId: changeGameSessionJokers
+      summary: Grant (positive quantity) or revoke (negative) unused jokers of one participant
+      tags:
+        - Game Requests
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GameJokerChange'
+      responses:
+        '200':
+          description: The participant's inventory of that type
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GameJokerInventory'
+        '400':
+          description: Unknown participant or joker type, or a type not available yet
+          content: {}
+        '409':
+          description: Revoking more than the unused quantity
+          content: {}
+        '423':
+          description: The game controller lease is required, or another Tool instance holds it
+          content: {}
   /game-controller:
     get:
       operationId: getGameController
@@ -6594,6 +6680,30 @@ components:
         status:
           type: [object, 'null']
           description: Replaces the published status document
+        jokers:
+          type: [array, 'null']
+          description: >-
+            Operator joker uses (manual and live hunter relay). A use without an available joker needs
+            overAllocate and is recorded beyond the allocation; reserved uses are never taken.
+          items:
+            type: object
+            required: [deviceId, type]
+            properties:
+              deviceId:
+                type: integer
+                format: int64
+              type:
+                type: string
+              overAllocate:
+                type: [boolean, 'null']
+              detail:
+                type: [string, 'null']
+        caughtParticipants:
+          type: [array, 'null']
+          description: Real trackers of newly caught participants; their open requests end and reservations are released
+          items:
+            type: integer
+            format: int64
         logs:
           type: [array, 'null']
           items:
@@ -6610,7 +6720,7 @@ components:
     GameEffectsOutcome:
       type: object
       required: [deliveryId, replayed, epoch, positions, runtimeRevision, generation, alerts, pushes, requests,
-                 statusRevision]
+                 statusRevision, jokers]
       properties:
         deliveryId:
           type: string
@@ -6682,6 +6792,19 @@ components:
         statusRevision:
           type: [integer, 'null']
           format: int64
+        jokers:
+          type: array
+          items:
+            type: object
+            required: [deviceId, type, overAllocated]
+            properties:
+              deviceId:
+                type: integer
+                format: int64
+              type:
+                type: string
+              overAllocated:
+                type: boolean
     GameRequest:
       type: object
       required: [id, gameSessionId, type, requesterUserId, requesterLabel, requesterRole, targetDeviceId,
@@ -6696,7 +6819,8 @@ components:
           format: int64
         type:
           type: string
-          enum: [speedhuntStaticPing, speedhuntLivePing, speedhuntStopLivePing, speedhuntTerminate]
+          enum: [speedhuntStaticPing, speedhuntLivePing, speedhuntStopLivePing, speedhuntTerminate,
+                 jokerHunterPositions]
         requesterUserId:
           type: [integer, 'null']
           format: int64
@@ -6740,17 +6864,21 @@ components:
           format: date-time
     GameRequestSubmission:
       type: object
-      required: [type, targetDeviceId, baseRevision]
+      required: [type]
+      description: >-
+        Hunters' speedhunt requests need targetDeviceId and baseRevision. Jokers (jokerHunterPositions) are always
+        for the requesting player or supporter and reserve one available joker.
       properties:
         type:
           type: string
-          enum: [speedhuntStaticPing, speedhuntLivePing, speedhuntStopLivePing, speedhuntTerminate]
+          enum: [speedhuntStaticPing, speedhuntLivePing, speedhuntStopLivePing, speedhuntTerminate,
+                 jokerHunterPositions]
         targetDeviceId:
-          type: integer
+          type: [integer, 'null']
           format: int64
           description: Assigned tracker of a player or supporter of the member's session
         baseRevision:
-          type: integer
+          type: [integer, 'null']
           format: int64
           description: The participant's speedhunt revision from /game-status the request is based on
         parameters:
@@ -6809,6 +6937,111 @@ components:
           description: >-
             speedhunt.active for everyone; participants (with per-participant speedhunt revision) and limits only
             for hunters and spectators
+    GameJokerInventory:
+      type: object
+      required: [deviceId, type, granted, used, reserved, available, overAllocated]
+      properties:
+        deviceId:
+          type: integer
+          format: int64
+          description: The participant's real tracker
+        type:
+          type: string
+          enum: [hunterPositions, fakeTimetable, fakeSpeedhunt, break]
+        granted:
+          type: integer
+        used:
+          type: integer
+          description: Uses, including uses beyond the allocation
+        reserved:
+          type: integer
+          description: Uses held by open requests
+        available:
+          type: integer
+          minimum: 0
+        overAllocated:
+          type: integer
+          description: Uses beyond the granted quantity
+    GameJokerReservation:
+      type: object
+      required: [id, deviceId, type, requestId, status, createdAt]
+      properties:
+        id:
+          type: integer
+          format: int64
+        deviceId:
+          type: integer
+          format: int64
+        type:
+          type: string
+        requestId:
+          type: [integer, 'null']
+          format: int64
+        status:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+    GameJokerOverview:
+      type: object
+      required: [inventories, reservations]
+      properties:
+        inventories:
+          type: array
+          items:
+            $ref: '#/components/schemas/GameJokerInventory'
+        reservations:
+          type: array
+          items:
+            $ref: '#/components/schemas/GameJokerReservation'
+    GameJokerLedgerEntry:
+      type: object
+      required: [id, deviceId, type, kind, quantity, requestId, reservationId, actor, detail, occurredAt]
+      properties:
+        id:
+          type: integer
+          format: int64
+        deviceId:
+          type: integer
+          format: int64
+        type:
+          type: string
+        kind:
+          type: string
+          enum: [grant, revoke, reserve, release, use, overuse]
+        quantity:
+          type: integer
+        requestId:
+          type: [integer, 'null']
+          format: int64
+        reservationId:
+          type: [integer, 'null']
+          format: int64
+        actor:
+          type: [string, 'null']
+        detail:
+          type: [string, 'null']
+        occurredAt:
+          type: string
+          format: date-time
+    GameJokerChange:
+      type: object
+      required: [deviceId, type, quantity]
+      properties:
+        deviceId:
+          type: integer
+          format: int64
+        type:
+          type: string
+          enum: [hunterPositions, fakeTimetable, fakeSpeedhunt, break]
+        quantity:
+          type: integer
+          minimum: -1000
+          maximum: 1000
+          not:
+            const: 0
+        reason:
+          type: [string, 'null']
   parameters:
     GameControllerEpoch:
       name: X-Game-Controller-Epoch

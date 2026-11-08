@@ -389,6 +389,34 @@ supporters only learn whether a speedhunt runs, never whom it targets.
 Members' and administrators' WebSocket clients receive
 `{"invalidate": ["game-requests"]}` and `["game-status"]` when these change.
 
+## Jokers
+
+Players and supporters hold jokers per type (`changelog-game-jokers.xml`,
+implementation plan stage 4), keyed by their real tracker:
+`tc_game_jokers` keeps the granted quantity and the uses (including uses beyond
+the allocation), `tc_game_joker_reservations` the uses held by open requests,
+and `tc_game_joker_ledger` every grant, revoke, reservation, release and use.
+New sessions start without jokers. In this version only "Get hunter positions"
+(`hunterPositions`) can be granted and used; the break and fake-ping jokers
+follow.
+
+- Operators grant or revoke unused jokers with the fenced
+  `POST /api/game-sessions/{id}/jokers/change`, and read the overview and
+  ledger at `…/jokers` and `…/jokers/ledger`. Members read their own inventory
+  at `GET /api/game-jokers`; unused inventories stay private.
+- A participant's `jokerHunterPositions` request reserves one available joker.
+  A succeeded request consumes it; any other end (rejected, cancelled,
+  expired, failed, or invalidated by a change of control) releases it.
+- An operator relay uses a joker inside its effects delivery (`jokers`). It
+  never takes reserved uses; without an available joker it needs
+  `overAllocate` and is recorded beyond the allocation. Available never goes
+  below zero.
+- `caughtParticipants` in an effects delivery ends the participants' open
+  requests and releases their reservations.
+
+Hunter relay snapshots carry the hunter position's own fix time, so a mirror
+shows its age; an older fix is stored without becoming latest.
+
 ## Multi-participant replay
 
 The replay page accepts individual devices, nested groups, or all devices
