@@ -473,6 +473,8 @@ public class GameSessionService {
                 query.setLong(4, id);
                 query.executeUpdate();
             }
+            // Hunter access to real participant trackers before the change; only access it adds is refused.
+            List<GameAccessRule.Violation> accessBefore = GameAccessRule.beforeMembers(connection, id);
             try (var query = connection.prepareStatement(
                     "DELETE FROM tc_game_session_members WHERE gamesessionid = ?")) {
                 query.setLong(1, id);
@@ -498,6 +500,8 @@ public class GameSessionService {
                     query.executeUpdate();
                 }
             }
+            // A new hunter, or a new participant tracker, must not break mirror-only hunter access.
+            GameAccessRule.checkMembers(connection, id, accessBefore);
             touch(connection, id);
             return new Revision(current + 1);
         });

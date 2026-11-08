@@ -393,6 +393,10 @@ public class GameJokerService {
                 throw new WebApplicationException(
                         "Set a positive break duration in the game settings before granting break jokers", 409);
             }
+            if (change.quantity() > 0) {
+                // Break and fake jokers need hunters to see participants only through mirrors.
+                GameAccessRule.checkGrant(connection, gameSessionId, type);
+            }
             int[] counts = counts(connection, gameSessionId, change.deviceId(), type, true);
             int available = Math.max(0, counts[0] - counts[1] - counts[2]);
             if (change.quantity() < 0 && -change.quantity() > available) {

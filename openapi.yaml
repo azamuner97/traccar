@@ -714,6 +714,11 @@ paths:
         '400':
           description: Bad request
           content: {}
+        '422':
+          description: >-
+            Mirror-only hunter access: moving it to this group would let a hunter of a game session with
+            break or fake jokers see a real participant tracker
+          content: {}
     delete:
       operationId: deleteDevicesId
       summary: Delete a Device
@@ -978,6 +983,11 @@ paths:
         '400':
           description: Bad request
           content: {}
+        '422':
+          description: >-
+            Mirror-only hunter access: moving it to this group would let a hunter of a game session with
+            break or fake jokers see a real participant tracker
+          content: {}
     delete:
       operationId: deleteGroupsId
       summary: Delete a Group
@@ -1092,6 +1102,11 @@ paths:
         '400':
           description: No permission
           content: {}
+        '422':
+          description: >-
+            Mirror-only hunter access: the change would let a hunter of a game session with break or fake
+            jokers see a real participant tracker, directly or through a group
+          content: {}
     delete:
       operationId: deletePermissions
       summary: Unlink an Object from another Object
@@ -1130,6 +1145,11 @@ paths:
           content: {}
         '400':
           description: Bad request
+          content: {}
+        '422':
+          description: >-
+            Mirror-only hunter access: the change would let a hunter of a game session with break or fake
+            jokers see a real participant tracker, directly or through a group
           content: {}
     delete:
       operationId: deletePermissionsBulk
@@ -4115,6 +4135,11 @@ paths:
         '409':
           description: Revision conflict, or a user or session device already belongs to another session
           content: {}
+        '422':
+          description: >-
+            Mirror-only hunter access: the session has break or fake jokers and a hunter would see a real
+            participant tracker
+          content: {}
   /game-sessions/{id}/runtime:
     parameters:
       - $ref: '#/components/parameters/GameControllerEpoch'
@@ -4927,8 +4952,10 @@ paths:
           content: {}
         '409':
           description: >-
-            Revoking more than the unused quantity, or granting break jokers before a positive
-            game_settings.break_duration_minutes is configured
+            Revoking more than the unused quantity, granting break jokers before a positive
+            game_settings.break_duration_minutes is configured, or granting break or fake jokers while a
+            hunter of the session sees a real participant tracker, directly or through a group
+            (mirror-only hunter access)
           content: {}
         '423':
           description: The game controller lease is required, or another Tool instance holds it

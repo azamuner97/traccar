@@ -547,6 +547,54 @@ def audit_breaks(session_id, tracker_id, hunter, player, tool_source=None):
     api.request("POST", change, {**grant, "quantity": -1})
 
 
+def audit_mirror_only_access(session_id, tracker_id, hunter_id, player_id):
+    """With break jokers in the session, hunters never get real participant trackers, directly or through groups."""
+    parent = api.request("POST", "/groups", {"name": api.PREFIX + "-real-parent"})
+    real = api.request("POST", "/groups", {"name": api.PREFIX + "-real", "groupId": parent["id"]})
+    view = api.request("POST", "/groups", {"name": api.PREFIX + "-hunter-view"})
+    device = api.request("GET", f"/devices/{tracker_id}")
+    second_id = create_user(api.PREFIX + "-hunter2", api.PREFIX + "-hunter2@example.invalid", secrets.token_hex(24),
+                            False)
+    try:
+        api.request("PUT", f"/devices/{tracker_id}", {**device, "groupId": real["id"]})
+        # Direct access, access inherited from a parent group, and moves into a group a hunter sees are refused.
+        api.request("POST", "/permissions", {"userId": hunter_id, "deviceId": tracker_id}, expected=422)
+        api.request("POST", "/permissions", {"userId": hunter_id, "groupId": parent["id"]}, expected=422)
+        api.request("POST", "/permissions", {"userId": hunter_id, "groupId": view["id"]}, expected=204)
+        group = api.request("GET", f"/groups/{real['id']}")
+        api.request("PUT", f"/groups/{real['id']}", {**group, "groupId": view["id"]}, expected=422)
+        api.request("PUT", f"/devices/{tracker_id}", {**device, "groupId": view["id"]}, expected=422)
+        # Other members keep their real access.
+        api.request("POST", "/permissions", {"userId": player_id, "groupId": parent["id"]}, expected=204)
+        api.request("DELETE", "/permissions", {"userId": player_id, "groupId": parent["id"]}, expected=204)
+
+        # Access granted behind the server's back blocks new break jokers and membership saves.
+        api.sql(f"INSERT INTO tc_user_device(userid,deviceid) VALUES({hunter_id},{tracker_id});")
+        change = f"/game-sessions/{session_id}/jokers/change"
+        api.request("POST", change, {"deviceId": tracker_id, "type": "break", "quantity": 1}, expected=409)
+        api.request("POST", change, {"deviceId": tracker_id, "type": "hunterPositions", "quantity": 1})
+        api.request("POST", change, {"deviceId": tracker_id, "type": "hunterPositions", "quantity": -1})
+        # A save that does not add such access is accepted; a new hunter who already has it is refused.
+        stored = api.request("GET", f"/game-sessions/{session_id}")
+        api.request("PUT", f"/game-sessions/{session_id}/resources", {
+            "expectedRevision": stored["resourcesRevision"], "sessionDeviceId": stored["sessionDeviceId"],
+            "resources": stored["resources"], "members": stored["members"]})
+        api.sql(f"INSERT INTO tc_user_device(userid,deviceid) VALUES({second_id},{tracker_id});")
+        stored = api.request("GET", f"/game-sessions/{session_id}")
+        second = {"userId": second_id, "role": "hunter", "number": 2, "assignedDeviceId": None, "login": "hunter2"}
+        api.request("PUT", f"/game-sessions/{session_id}/resources", {
+            "expectedRevision": stored["resourcesRevision"], "sessionDeviceId": stored["sessionDeviceId"],
+            "resources": stored["resources"], "members": stored["members"] + [second]}, expected=422)
+        assert api.request("GET", f"/game-sessions/{session_id}")["resourcesRevision"] \
+            == stored["resourcesRevision"], "a refused membership save changes nothing"
+    finally:
+        api.sql(f"DELETE FROM tc_user_device WHERE userid IN ({hunter_id},{second_id}) AND deviceid={tracker_id};")
+        api.sql(f"DELETE FROM tc_users WHERE id={second_id} AND email LIKE " + api.literal(api.PREFIX + "-%") + ";")
+        api.request("PUT", f"/devices/{tracker_id}", {**device, "groupId": 0})
+        for group_id in (real["id"], parent["id"], view["id"]):
+            api.request("DELETE", f"/groups/{group_id}", expected=204)
+
+
 def audit_requests(tool_source=None):
     """Hunters' requests: membership, role-filtered status, revisions, lifecycle, invalidation."""
     password = secrets.token_hex(24)
@@ -622,6 +670,7 @@ def audit_requests(tool_source=None):
 
         audit_jokers(session_id, tracker["id"], mirror["id"], hunter, player)
         audit_breaks(session_id, tracker["id"], hunter, player, tool_source)
+        audit_mirror_only_access(session_id, tracker["id"], hunter_id, player_id)
 
         revision = 2
         if tool_source:
@@ -669,7 +718,8 @@ def main(tool_source=None):
               "endpoints, push fencing, drift reporting, takeover, expiry, and idempotent effects with "
               "latest-position and online status, hunters' requests with role-filtered status, stale "
               "revisions, approval, claim, outcome, cancellation and invalidation on takeover, break jokers "
-              "with a configured duration, one refusal for everyone during speedhunts and the published break"
+              "with a configured duration, one refusal for everyone during speedhunts and the published break, "
+              "mirror-only hunter access for permissions, group and device moves, joker grants and membership"
               + (", plus the Tool's repository round trip." if tool_source else "."))
     finally:
         api.delete_game_sessions()

@@ -17,3 +17,6 @@ bin
 /.env
 /docker/compose/.env
 docker/compose/.env.production
+
+# Python bytecode written by the integration audits
+__pycache__/

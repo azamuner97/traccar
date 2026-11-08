@@ -447,6 +447,39 @@ effects deliveries use only "Get hunter positions" jokers.
 Hunter relay snapshots carry the hunter position's own fix time, so a mirror
 shows its age; an older fix is stored without becoming latest.
 
+### Mirror-only hunter access
+
+Break and fake-ping jokers only protect a participant while hunters see players
+and supporters through mirrors. Once a session has break or fake jokers
+allocated or active (`granted` or `used` above zero in `tc_game_jokers`), no
+hunter of that session may access a real tracker of its players and
+supporters, directly (`tc_user_device`) or through a group (`tc_user_group`, at
+any nesting depth of `tc_groups`). `GameAccessRule` checks this wherever access
+or jokers are granted:
+
+- granting break or fake jokers (`…/jokers/change`) is refused with 409 while a
+  hunter already has such access;
+- `GameAccessFilter` refuses `POST /api/permissions` (and `/bulk`), and device
+  or group moves (`PUT /api/devices/{id}`, `PUT /api/groups/{id}` with a new
+  `groupId`) that would add such access, with 422 and a text naming the
+  hunter. It applies to every caller allowed to make the change, the
+  controlling Tool included; other callers get Traccar's own refusal, so the
+  answer tells them nothing about the game's trackers or hunters. Access the
+  request does not add never blocks it;
+- saving session members (`PUT …/resources`) that would make a user with such
+  access a hunter, or such a device a participant tracker, is refused with
+  422 (409 there means a revision conflict). Access the new members do not add
+  never blocks the save.
+
+Spectators keep their access to real trackers; the Tool additionally refuses
+device setup that would give hunters real trackers or the spectator's password.
+
+Known limits: Traccar saves permissions without database transactions, so a
+permission grant and a first break or fake joker grant made at the same moment
+can both pass their checks. Making a hunter an administrator, or linking them
+as manager of another user (`managedUserId`), is not checked; only
+administrators can do either.
+
 ## Multi-participant replay
 
 The replay page accepts individual devices, nested groups, or all devices

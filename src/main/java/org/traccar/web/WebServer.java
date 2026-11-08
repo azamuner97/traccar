@@ -45,6 +45,7 @@ import org.slf4j.LoggerFactory;
 import org.traccar.BaseProtocol;
 import org.traccar.LifecycleObject;
 import org.traccar.api.CorsResponseFilter;
+import org.traccar.api.GameAccessFilter;
 import org.traccar.api.GameControllerFilter;
 import org.traccar.protocol.OsmAndProtocol;
 import org.traccar.api.DateParameterConverterProvider;
@@ -195,6 +196,7 @@ public class WebServer implements LifecycleObject {
                 DateParameterConverterProvider.class,
                 SecurityRequestFilter.class,
                 GameControllerFilter.class,
+                GameAccessFilter.class,
                 CorsResponseFilter.class,
                 ResourceErrorHandler.class,
                 StreamWriter.class);
