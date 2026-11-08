@@ -43,6 +43,14 @@ public abstract class BaseBroadcastService implements BroadcastService {
     }
 
     @Override
+    public void updateGameMembers(boolean local, Long gameSessionId, String resource) {
+        var message = new BroadcastMessage();
+        message.setGameMembersResource(resource);
+        message.setGameMembersSessionId(gameSessionId);
+        sendMessage(message);
+    }
+
+    @Override
     public void updateGameAdmin(boolean local, String resource) {
         var message = new BroadcastMessage();
         message.setGameAdminResource(resource);
@@ -122,6 +130,9 @@ public abstract class BaseBroadcastService implements BroadcastService {
         if (message.getGameProximityDeviceId() != null) {
             listeners.forEach(listener -> listener.updateGameProximity(
                     false, message.getGameProximityDeviceId(), message.getGameProximityUserIds()));
+        } else if (message.getGameMembersResource() != null) {
+            listeners.forEach(listener -> listener.updateGameMembers(
+                    false, message.getGameMembersSessionId(), message.getGameMembersResource()));
         } else if (message.getGameAdminResource() != null) {
             listeners.forEach(listener -> listener.updateGameAdmin(false, message.getGameAdminResource()));
         } else if (message.getGameNotificationsDeviceId() != null) {

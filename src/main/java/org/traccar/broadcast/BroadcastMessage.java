@@ -40,6 +40,25 @@ public class BroadcastMessage {
         this.gameProximityUserIds = gameProximityUserIds;
     }
 
+    private String gameMembersResource;
+    private Long gameMembersSessionId;
+
+    public String getGameMembersResource() {
+        return gameMembersResource;
+    }
+
+    public void setGameMembersResource(String gameMembersResource) {
+        this.gameMembersResource = gameMembersResource;
+    }
+
+    public Long getGameMembersSessionId() {
+        return gameMembersSessionId;
+    }
+
+    public void setGameMembersSessionId(Long gameMembersSessionId) {
+        this.gameMembersSessionId = gameMembersSessionId;
+    }
+
     private String gameAdminResource;
 
     public String getGameAdminResource() {

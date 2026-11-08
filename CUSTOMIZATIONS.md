@@ -359,6 +359,36 @@ credentials, geofence plans or timetable change (not on runtime saves or
 effects, which follow every game action), and `["game-controller"]` when the
 lease changes.
 
+## Game requests and status
+
+Session members submit self-service requests (`changelog-game-requests.xml`,
+implementation plan stage 3). Membership authorizes them; in this stage
+hunters control speedhunts on the players and supporters of their own session:
+static ping, live ping (optional duration up to 240 minutes), stopping a live
+ping, and ending a speedhunt (`POST /api/game-requests`). Requests are
+refused while no Tool executes the session, when the participant is out, when
+the speedhunt changed since the revision the hunter saw (409), and while
+another request for the same participant is still open.
+
+The controlling Tool processes them through fenced endpoints:
+`GET /api/game-sessions/{id}/requests`, `POST …/requests/{requestId}/decision`
+(`await`, `approve`, `reject`) and `POST …/requests/{requestId}/claim`.
+Outcomes commit with the action's own effects (`requests` in the effects
+delivery). Requests move through pending, approved, executing, succeeded,
+failed, rejected, expired and cancelled; members see every step but never the
+operator-only `detail`. The server expires requests awaiting approval or
+execution after two minutes, and a change of control (acquisition, takeover,
+release, expiry, server restart) invalidates every open request while keeping
+its history.
+
+The Tool publishes a status document with each effects delivery that changes
+it (`status`, stored in `tc_game_session_status`). `GET /api/game-status`
+returns the member's role-filtered view: hunters and spectators see each
+player's and supporter's speedhunt state with its revision; players and
+supporters only learn whether a speedhunt runs, never whom it targets.
+Members' and administrators' WebSocket clients receive
+`{"invalidate": ["game-requests"]}` and `["game-status"]` when these change.
+
 ## Multi-participant replay
 
 The replay page accepts individual devices, nested groups, or all devices

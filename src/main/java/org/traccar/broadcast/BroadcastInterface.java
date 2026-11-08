@@ -37,6 +37,12 @@ public interface BroadcastInterface {
     /** Invalidates an administrator-only game resource ("game-sessions" or "game-controller"). */
     default void updateGameAdmin(boolean local, String resource) {}
 
+    /**
+     * Invalidates a game resource for administrators and the members of one session ({@code null}: every
+     * session), e.g. "game-requests" or "game-status".
+     */
+    default void updateGameMembers(boolean local, Long gameSessionId, String resource) {}
+
     default <T extends BaseModel> void invalidateObject(
             boolean local, Class<T> clazz, long id, ObjectOperation operation) throws Exception {}
 

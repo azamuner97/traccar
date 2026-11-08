@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<databaseChangeLog xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+  xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-3.4.xsd">
+
+  <!-- Self-service game requests and the published session status (implementation plan, stage 3). -->
+  <changeSet author="traccar-tool" id="game-requests-1">
+    <createTable tableName="tc_game_requests">
+      <column name="id" type="BIGINT" autoIncrement="true"><constraints primaryKey="true" nullable="false" /></column>
+      <column name="gamesessionid" type="BIGINT"><constraints nullable="false" /></column>
+      <column name="type" type="VARCHAR(32)"><constraints nullable="false" /></column>
+      <column name="requesteruserid" type="INT" />
+      <column name="requesterlabel" type="VARCHAR(128)" />
+      <column name="requesterrole" type="VARCHAR(16)"><constraints nullable="false" /></column>
+      <column name="targetdeviceid" type="INT" />
+      <column name="targetlabel" type="VARCHAR(128)" />
+      <column name="baserevision" type="BIGINT" />
+      <column name="parameters" type="VARCHAR(1024)"><constraints nullable="false" /></column>
+      <column name="status" type="VARCHAR(16)"><constraints nullable="false" /></column>
+      <column name="approvalrequired" type="BOOLEAN" />
+      <column name="message" type="VARCHAR(512)" />
+      <column name="detail" type="VARCHAR(512)" />
+      <column name="epoch" type="BIGINT" />
+      <column name="createdat" type="TIMESTAMP(3)"><constraints nullable="false" /></column>
+      <column name="expiresat" type="TIMESTAMP(3)"><constraints nullable="false" /></column>
+      <column name="decidedat" type="TIMESTAMP(3)" />
+      <column name="completedat" type="TIMESTAMP(3)" />
+      <column name="updatedat" type="TIMESTAMP(3)"><constraints nullable="false" /></column>
+    </createTable>
+    <createIndex tableName="tc_game_requests" indexName="idx_game_requests_session_status">
+      <column name="gamesessionid" />
+      <column name="status" />
+    </createIndex>
+    <createIndex tableName="tc_game_requests" indexName="idx_game_requests_status_expiry">
+      <column name="status" />
+      <column name="expiresat" />
+    </createIndex>
+    <addForeignKeyConstraint baseTableName="tc_game_requests" baseColumnNames="gamesessionid"
+      referencedTableName="tc_game_sessions" referencedColumnNames="id" constraintName="fk_game_requests_session" onDelete="CASCADE" />
+    <addForeignKeyConstraint baseTableName="tc_game_requests" baseColumnNames="requesteruserid"
+      referencedTableName="tc_users" referencedColumnNames="id" constraintName="fk_game_requests_user" onDelete="SET NULL" />
+
+    <!-- The status document the controlling Tool publishes; members read a role-filtered view of it. -->
+    <createTable tableName="tc_game_session_status">
+      <column name="gamesessionid" type="BIGINT"><constraints primaryKey="true" nullable="false" /></column>
+      <column name="revision" type="BIGINT"><constraints nullable="false" /></column>
+      <column name="document" type="CLOB"><constraints nullable="false" /></column>
+      <column name="updatedat" type="TIMESTAMP(3)"><constraints nullable="false" /></column>
+    </createTable>
+    <addForeignKeyConstraint baseTableName="tc_game_session_status" baseColumnNames="gamesessionid"
+      referencedTableName="tc_game_sessions" referencedColumnNames="id" constraintName="fk_game_session_status_session" onDelete="CASCADE" />
+  </changeSet>
+</databaseChangeLog>

@@ -278,6 +278,158 @@ def audit_controller(user_id, user_login, user_credentials):
             api.request("DELETE", f"/devices/{device_id}", expected=204)
 
 
+def audit_tool_requests(tool_source, session_id, target, submit):
+    """The Tool's request processor and gateway against the real server."""
+    sys.path.insert(0, tool_source)
+    import requests
+    from traccar_game_manager.application.game_requests.processor import (
+        GameRequestProcessor, RequestCheck, RequestResult, SpeedhuntStatusTracker)
+    from traccar_game_manager.domain.game.settings import normalize_game_settings
+    from traccar_game_manager.infrastructure.traccar.effects import SessionEffects
+    from traccar_game_manager.infrastructure.traccar.game_requests import GameRequestGateway
+    from traccar_game_manager.infrastructure.traccar.game_sessions import GameSessionApi
+
+    class Transport:
+        get, post, put, delete = (staticmethod(requests.get), staticmethod(requests.post),
+                                  staticmethod(requests.put), staticmethod(requests.delete))
+
+    client = GameSessionApi(api.BASE, api.EMAIL, api.PASSWORD, transport=Transport(),
+                            epoch_provider=lambda: api.CONTROLLER["epoch"])
+    gateway = GameRequestGateway(client, session_id, SessionEffects(client, session_id))
+    tracker = SpeedhuntStatusTracker()
+    tracker.seed(gateway.published_status())
+    participant = {"deviceId": target, "name": "Anna", "role": "player", "caught": False,
+                   "speedhunt": {"running": True, "pings": 1, "live": False}}
+    # Like the live window: publish the Tool's own status first, then hunters act on it.
+    gateway.publish_status(tracker.build([participant]))
+    revision = tracker.revision(target)
+    submit(revision)
+    executed = []
+
+    class Actions:
+        def participant(self, device_id):
+            return {"id": device_id, "name": "Anna", "caught": False}
+
+        def check(self, kind, item, parameters):
+            return RequestCheck()
+
+        def execute(self, kind, item, parameters):
+            executed.append(kind)
+            participant["speedhunt"] = {**participant["speedhunt"], "pings": 2}
+            return RequestResult(True, "Ping 2 of 4 sent.")
+
+    settings = normalize_game_settings({})
+    processor = GameRequestProcessor(gateway, Actions(), settings=lambda: settings,
+                                     status=lambda: (tracker.build([participant]), tracker), log=lambda _m: None)
+    processor.sync(gateway.list_open())
+    awaiting = processor.awaiting()
+    assert len(awaiting) == 1, awaiting
+    processor.approve(awaiting[0]["id"])
+    done = next(item for item in client.list_requests(session_id, state="all") if item["id"] == awaiting[0]["id"])
+    assert done["status"] == "succeeded" and done["message"] == "Ping 2 of 4 sent.", done
+    assert executed == ["speedhuntStaticPing"]
+    published = gateway.published_status()["participants"][0]["speedhunt"]
+    assert published["pings"] == 2 and published["revision"] == revision + 1, published
+    return revision + 1
+
+
+def audit_requests(tool_source=None):
+    """Hunters' requests: membership, role-filtered status, revisions, lifecycle, invalidation."""
+    password = secrets.token_hex(24)
+    hunter_email, player_email = api.PREFIX + "-hunter@example.invalid", api.PREFIX + "-player@example.invalid"
+    hunter_id = create_user(api.PREFIX + "-hunter", hunter_email, password, False)
+    player_id = create_user(api.PREFIX + "-player", player_email, password, False)
+    hunter, player = (hunter_email, password), (player_email, password)
+    session = api.request("POST", "/game-sessions", {"name": api.PREFIX + "-requests", "schemaVersion": 4,
+                                                     "config": {}})
+    session_id = session["id"]
+    api.GAME_SESSION_IDS.append(session_id)
+    state = api.request("POST", "/devices", {"name": api.PREFIX + "-rq-state", "uniqueId": api.PREFIX + "-rq-state",
+                                             "attributes": {"traccarToolGameState": True}})
+    tracker = api.request("POST", "/devices", {"name": api.PREFIX + "-rq-anna", "uniqueId": api.PREFIX + "-rq-anna"})
+    try:
+        api.request("PUT", f"/game-sessions/{session_id}/resources", {
+            "expectedRevision": 1, "sessionDeviceId": state["id"],
+            "resources": {"devices": {"real": {"anna": tracker["id"]}}},
+            "members": [{"userId": hunter_id, "role": "hunter", "number": 1, "assignedDeviceId": None,
+                         "login": "hunter1"},
+                        {"userId": player_id, "role": "player", "number": 1, "assignedDeviceId": tracker["id"],
+                         "login": "player1"}]})
+        submission = {"type": "speedhuntStaticPing", "targetDeviceId": tracker["id"], "baseRevision": 1}
+        # Not running yet: no Tool executes this session.
+        api.request("POST", "/game-requests", submission, credentials=hunter, expected=409)
+        api.request("PUT", "/game-controller/session", {"gameSessionId": session_id})
+        def publish(revision, running=False):
+            return api.request("POST", f"/game-sessions/{session_id}/effects", {
+                "deliveryId": "audit" + uuid4().hex,
+                "status": {"version": 1, "limits": {"pingsPerSpeedhunt": 4}, "participants": [
+                    {"deviceId": tracker["id"], "name": "Anna", "role": "player", "caught": False,
+                     "speedhunt": {"revision": revision, "running": running, "pings": 0, "live": False}}]}})
+        publish(1, running=True)
+
+        hunter_view = api.request("GET", "/game-status", credentials=hunter)
+        assert hunter_view["controllerActive"] and hunter_view["role"] == "hunter"
+        assert hunter_view["status"]["participants"][0]["speedhunt"]["revision"] == 1
+        player_view = api.request("GET", "/game-status", credentials=player)
+        assert player_view["status"]["speedhunt"]["active"] is True
+        assert "participants" not in player_view["status"], "players must not learn the speedhunt target"
+        api.request("GET", "/game-status", expected=403)
+
+        api.request("POST", "/game-requests", submission, credentials=player, expected=403)
+        api.request("POST", "/game-requests", {**submission, "baseRevision": 0}, credentials=hunter, expected=409)
+        pending = api.request("POST", "/game-requests", submission, credentials=hunter)
+        assert pending["status"] == "pending" and pending["targetLabel"] == "Anna"
+        api.request("POST", "/game-requests", submission, credentials=hunter, expected=409)
+        assert api.request("GET", "/game-requests", credentials=player) == []
+
+        # The controlling Tool: wait for approval, approve, claim, and commit the outcome with the status.
+        base = f"/game-sessions/{session_id}/requests/{pending['id']}"
+        api.request("POST", base + "/decision", {"decision": "await"}, epoch=False, expected=423)
+        api.request("POST", base + "/decision", {"decision": "await", "message": "Waiting for the operator",
+                                                 "detail": "limit"})
+        assert api.request("GET", "/game-requests", credentials=hunter)[0]["approvalRequired"] is True
+        api.request("POST", base + "/decision", {"decision": "approve"})
+        assert api.request("POST", base + "/claim", {})["status"] == "executing"
+        api.request("POST", base + "/claim", {}, expected=409)
+        outcome = api.request("POST", f"/game-sessions/{session_id}/effects", {
+            "deliveryId": "audit" + uuid4().hex,
+            "requests": [{"id": pending["id"], "status": "succeeded", "message": "Ping 1 of 4 sent.",
+                          "detail": "operator only"}],
+            "status": {"version": 1, "participants": [
+                {"deviceId": tracker["id"], "name": "Anna", "role": "player", "caught": False,
+                 "speedhunt": {"revision": 2, "running": True, "pings": 1, "live": False}}]}})
+        assert outcome["requests"] == [{"id": pending["id"], "status": "succeeded"}], outcome
+        seen = api.request("GET", "/game-requests", credentials=hunter)[0]
+        assert seen["status"] == "succeeded" and seen["message"] == "Ping 1 of 4 sent." and seen["detail"] is None
+        assert api.request("GET", f"/game-sessions/{session_id}/requests?state=all")[0]["detail"] == "operator only"
+
+        revision = 2
+        if tool_source:
+            revision = audit_tool_requests(tool_source, session_id, tracker["id"], lambda base: api.request(
+                "POST", "/game-requests", {**submission, "baseRevision": base}, credentials=hunter))
+        # Cancelling, and invalidation when another Tool takes over.
+        submission["baseRevision"] = revision
+        second = api.request("POST", "/game-requests", submission, credentials=hunter)
+        assert api.request("POST", f"/game-requests/{second['id']}/cancel", {}, credentials=hunter)["status"] \
+            == "cancelled"
+        third = api.request("POST", "/game-requests", {**submission, "type": "speedhuntTerminate"},
+                            credentials=hunter)
+        epoch = api.CONTROLLER["epoch"]
+        api.request("POST", "/game-controller/takeover", {"instanceId": "audit-req-" + uuid4().hex[:16],
+                                                          "label": "Other PC"}, epoch=False)
+        expired = next(item for item in api.request("GET", "/game-requests", credentials=hunter)
+                       if item["id"] == third["id"])
+        assert expired["status"] == "expired" and "Control of the game changed" in expired["message"]
+        api.request("POST", "/game-controller/release", {}, epoch=epoch + 1)
+        api.acquire_controller()
+        assert not api.request("GET", "/game-status", credentials=hunter)["controllerActive"]
+    finally:
+        for device_id in (tracker["id"], state["id"]):
+            api.request("DELETE", f"/devices/{device_id}", expected=204)
+        api.sql(f"DELETE FROM tc_users WHERE id IN ({hunter_id},{player_id}) AND email LIKE "
+                + api.literal(api.PREFIX + "-%") + ";")
+
+
 def main(tool_source=None):
     api.wait_for_server()
     admin_id = create_user(api.PREFIX, api.EMAIL, api.PASSWORD, True)
@@ -288,13 +440,15 @@ def main(tool_source=None):
         api.acquire_controller()
         audit_http((user_email, user_password), [])
         audit_controller(user_id, api.PREFIX + "-user", (user_email, user_password))
+        audit_requests(tool_source)
         if tool_source:
             audit_tool(tool_source)
         print("MySQL/HTTP game-session audit passed: admin-only access, revision conflicts and idempotent retries, "
               "credential encryption at rest, stable timetable entry IDs, notification history after device "
               "deletion, cascading deletion of saved data, controller lease with fenced game and standard "
               "endpoints, push fencing, drift reporting, takeover, expiry, and idempotent effects with "
-              "latest-position and online status"
+              "latest-position and online status, hunters' requests with role-filtered status, stale "
+              "revisions, approval, claim, outcome, cancellation and invalidation on takeover"
               + (", plus the Tool's repository round trip." if tool_source else "."))
     finally:
         api.delete_game_sessions()

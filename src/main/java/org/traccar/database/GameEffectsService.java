@@ -60,32 +60,42 @@ public class GameEffectsService {
     public record PushInput(Long userId, String subject, String message, String notificator, String alertId) { }
     public record Delivery(String deliveryId, List<PositionInput> positions, RuntimeInput runtime,
                            NotificationInput notifications, List<PushInput> pushes,
-                           List<GameSessionService.LogInput> logs) { }
+                           List<GameSessionService.LogInput> logs,
+                           List<GameRequestService.Completion> requests, JsonNode status) {
+        public Delivery(String deliveryId, List<PositionInput> positions, RuntimeInput runtime,
+                        NotificationInput notifications, List<PushInput> pushes,
+                        List<GameSessionService.LogInput> logs) {
+            this(deliveryId, positions, runtime, notifications, pushes, logs, null, null);
+        }
+    }
 
     public record PositionOutcome(long deviceId, long positionId, boolean latest, String fixTime) { }
     public record AlertOutcome(String alertId, boolean created) { }
     public record PushOutcome(Long id, Long userId, String status, String detail) { }
+    public record RequestOutcome(long id, String status) { }
     public record Outcome(String deliveryId, boolean replayed, long epoch, List<PositionOutcome> positions,
                           Long runtimeRevision, String generation, List<AlertOutcome> alerts,
-                          List<PushOutcome> pushes) { }
+                          List<PushOutcome> pushes, List<RequestOutcome> requests, Long statusRevision) { }
 
     /** The committed outcome plus what the caller publishes after commit. */
     public record Applied(Outcome outcome, List<Position> latest, Set<Long> devices, Long notificationDevice,
                           Set<Long> notifiedRecipients, boolean sessionNotified, List<Long> queuedPushes,
-                          boolean runtimeChanged) { }
+                          boolean runtimeChanged, boolean requestsChanged, boolean statusChanged) { }
 
     private final DataSource dataSource;
     private final ObjectMapper objectMapper;
     private final GameSessionService sessions;
     private final GameNotificationService notifications;
+    private final GameRequestService requests;
 
     @Inject
     public GameEffectsService(DataSource dataSource, ObjectMapper objectMapper, GameSessionService sessions,
-                              GameNotificationService notifications) {
+                              GameNotificationService notifications, GameRequestService requests) {
         this.dataSource = dataSource;
         this.objectMapper = objectMapper;
         this.sessions = sessions;
         this.notifications = notifications;
+        this.requests = requests;
     }
 
     private static Calendar utc() {
@@ -278,7 +288,8 @@ public class GameEffectsService {
             pushes.add(push.id() != null && current.containsKey(push.id()) ? current.get(push.id()) : push);
         }
         return new Outcome(outcome.deliveryId(), true, outcome.epoch(), outcome.positions(),
-                outcome.runtimeRevision(), outcome.generation(), outcome.alerts(), pushes);
+                outcome.runtimeRevision(), outcome.generation(), outcome.alerts(), pushes,
+                outcome.requests() == null ? List.of() : outcome.requests(), outcome.statusRevision());
     }
 
     private static boolean member(Connection connection, long gameSessionId, long userId) throws SQLException {
@@ -343,7 +354,7 @@ public class GameEffectsService {
                         throw new WebApplicationException("Delivery ID was already used for different effects", 409);
                     }
                     return new Applied(stored(connection, rows.getLong("id"), rows.getString("outcome")),
-                            List.of(), Set.of(), null, Set.of(), false, List.of(), false);
+                            List.of(), Set.of(), null, Set.of(), false, List.of(), false, false, false);
                 }
             }
         }
@@ -472,14 +483,23 @@ public class GameEffectsService {
             sessions.appendLogs(connection, gameSessionId, delivery.logs());
         }
 
+        List<RequestOutcome> requestOutcomes = new ArrayList<>();
+        if (delivery.requests() != null && !delivery.requests().isEmpty()) {
+            for (var request : requests.complete(connection, gameSessionId, delivery.requests())) {
+                requestOutcomes.add(new RequestOutcome(request.id(), request.status()));
+            }
+        }
+        Long statusRevision = delivery.status() == null ? null
+                : requests.putStatus(connection, gameSessionId, delivery.status());
+
         Outcome outcome = new Outcome(delivery.deliveryId(), false, epoch, positionOutcomes, runtimeRevision,
-                generation, alertOutcomes, pushOutcomes);
+                generation, alertOutcomes, pushOutcomes, requestOutcomes, statusRevision);
         try (var query = connection.prepareStatement("UPDATE tc_game_deliveries SET outcome = ? WHERE id = ?")) {
             query.setString(1, objectMapper.writeValueAsString(outcome));
             query.setLong(2, rowId);
             query.executeUpdate();
         }
         return new Applied(outcome, latest, devices, notificationDevice, notifiedRecipients, sessionNotified,
-                queued, runtimeRevision != null);
+                queued, runtimeRevision != null, !requestOutcomes.isEmpty(), statusRevision != null);
     }
 }

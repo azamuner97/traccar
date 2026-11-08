@@ -10,8 +10,11 @@ import jakarta.inject.Inject;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.traccar.api.resource.GameControllerResource;
+import org.traccar.api.resource.GameRequestResource;
+import org.traccar.api.resource.GameStatusResource;
 import org.traccar.database.GameControllerService;
 import org.traccar.database.GamePushOutbox;
+import org.traccar.database.GameRequestService;
 import org.traccar.session.ConnectionManager;
 
 import java.util.concurrent.ScheduledExecutorService;
@@ -28,14 +31,16 @@ public class TaskGameController implements ScheduleTask {
     private final GameControllerService controller;
     private final GamePushOutbox outbox;
     private final ConnectionManager connectionManager;
+    private final GameRequestService requests;
     private boolean started;
 
     @Inject
-    public TaskGameController(
-            GameControllerService controller, GamePushOutbox outbox, ConnectionManager connectionManager) {
+    public TaskGameController(GameControllerService controller, GamePushOutbox outbox,
+                              ConnectionManager connectionManager, GameRequestService requests) {
         this.controller = controller;
         this.outbox = outbox;
         this.connectionManager = connectionManager;
+        this.requests = requests;
     }
 
     @Override
@@ -59,6 +64,11 @@ public class TaskGameController implements ScheduleTask {
             }
             if (controller.recordExpiry()) {
                 connectionManager.updateGameAdmin(true, GameControllerResource.INVALIDATION);
+                connectionManager.updateGameMembers(true, null, GameRequestResource.INVALIDATION);
+                connectionManager.updateGameMembers(true, null, GameStatusResource.INVALIDATION);
+            }
+            for (long gameSessionId : requests.expire()) {
+                connectionManager.updateGameMembers(true, gameSessionId, GameRequestResource.INVALIDATION);
             }
         } catch (Exception error) {
             LOGGER.warn("Game controller maintenance failed", error);

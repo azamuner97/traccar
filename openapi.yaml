@@ -87,6 +87,11 @@ tags:
     description: Game notification journal
   - name: Game Proximity
     description: Participant proximity access and circles
+  - name: Game Requests
+    description: >-
+      Self-service game requests of session members and the role-filtered game status. Hunters control
+      speedhunts on players and supporters of their session; the controlling Tool approves and executes the
+      requests. Players and supporters never learn whom a speedhunt targets.
   - name: Game Controller
     description: >-
       Server-wide controller lease for Traccar Tool (administrators only). Fenced requests carry the current
@@ -4631,6 +4636,213 @@ paths:
         '423':
           description: The game controller lease is required, or another Tool instance holds it
           content: {}
+  /game-requests:
+    get:
+      operationId: getGameRequests
+      summary: Requests visible to the signed-in member (hunters and spectators see all speedhunt requests)
+      tags:
+        - Game Requests
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+      responses:
+        '200':
+          description: Newest first
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/GameRequest'
+        '403':
+          description: The account does not take part in a game
+          content: {}
+    post:
+      operationId: postGameRequest
+      summary: Submit a request; it expires after two minutes unless the Tool handles it
+      tags:
+        - Game Requests
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GameRequestSubmission'
+      responses:
+        '200':
+          description: Pending request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GameRequest'
+        '400':
+          description: Invalid request or unknown participant
+          content: {}
+        '403':
+          description: The member's role may not make this request
+          content: {}
+        '409':
+          description: >-
+            The game is not running, the speedhunt changed (stale revision), the participant is out, or another
+            request for the participant is still open
+          content: {}
+  /game-requests/{id}/cancel:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+    post:
+      operationId: cancelGameRequest
+      summary: Cancel the member's own pending or approved request
+      tags:
+        - Game Requests
+      responses:
+        '200':
+          description: Cancelled request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GameRequest'
+        '403':
+          description: Not the requester
+          content: {}
+        '409':
+          description: The request is no longer open
+          content: {}
+  /game-status:
+    get:
+      operationId: getGameStatus
+      summary: The signed-in member's role-filtered view of the game
+      tags:
+        - Game Requests
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GameStatus'
+        '403':
+          description: The account does not take part in a game
+          content: {}
+  /game-sessions/{id}/requests:
+    parameters:
+      - $ref: '#/components/parameters/GameSessionId'
+    get:
+      operationId: getGameSessionRequests
+      summary: Requests of a session for the operator (open requests oldest first, or all newest first)
+      tags:
+        - Game Requests
+      parameters:
+        - name: state
+          in: query
+          schema:
+            type: string
+            enum: [open, all]
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/GameRequest'
+  /game-sessions/{id}/requests/{requestId}/decision:
+    parameters:
+      - $ref: '#/components/parameters/GameSessionId'
+      - $ref: '#/components/parameters/GameControllerEpoch'
+      - name: requestId
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+    post:
+      operationId: decideGameRequest
+      summary: The controller's decision on a request (await operator approval, approve or reject)
+      tags:
+        - Game Requests
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GameRequestDecision'
+      responses:
+        '200':
+          description: Updated request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GameRequest'
+        '409':
+          description: The request is no longer open for this decision
+          content: {}
+        '423':
+          description: The game controller lease is required, or another Tool instance holds it
+          content: {}
+  /game-sessions/{id}/requests/{requestId}/claim:
+    parameters:
+      - $ref: '#/components/parameters/GameSessionId'
+      - $ref: '#/components/parameters/GameControllerEpoch'
+      - name: requestId
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+    post:
+      operationId: claimGameRequest
+      summary: Claim a pending or approved request for execution (an expired one becomes expired)
+      tags:
+        - Game Requests
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        '200':
+          description: Executing (or expired) request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GameRequest'
+        '409':
+          description: The request is no longer open
+          content: {}
+        '423':
+          description: The game controller lease is required, or another Tool instance holds it
+          content: {}
+  /game-sessions/{id}/status:
+    parameters:
+      - $ref: '#/components/parameters/GameSessionId'
+    get:
+      operationId: getGameSessionStatus
+      summary: The complete status document the controlling Tool published
+      tags:
+        - Game Requests
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
   /game-controller:
     get:
       operationId: getGameController
@@ -6374,6 +6586,14 @@ components:
           maxItems: 500
           items:
             $ref: '#/components/schemas/GameEffectsPush'
+        requests:
+          type: [array, 'null']
+          description: Outcomes of requests this operation executed or refused
+          items:
+            $ref: '#/components/schemas/GameRequestCompletion'
+        status:
+          type: [object, 'null']
+          description: Replaces the published status document
         logs:
           type: [array, 'null']
           items:
@@ -6389,7 +6609,8 @@ components:
                 type: string
     GameEffectsOutcome:
       type: object
-      required: [deliveryId, replayed, epoch, positions, runtimeRevision, generation, alerts, pushes]
+      required: [deliveryId, replayed, epoch, positions, runtimeRevision, generation, alerts, pushes, requests,
+                 statusRevision]
       properties:
         deliveryId:
           type: string
@@ -6447,6 +6668,147 @@ components:
                 enum: [queued, attempting, sent, failed, uncertain, skipped, rejected]
               detail:
                 type: [string, 'null']
+        requests:
+          type: array
+          items:
+            type: object
+            required: [id, status]
+            properties:
+              id:
+                type: integer
+                format: int64
+              status:
+                type: string
+        statusRevision:
+          type: [integer, 'null']
+          format: int64
+    GameRequest:
+      type: object
+      required: [id, gameSessionId, type, requesterUserId, requesterLabel, requesterRole, targetDeviceId,
+                 targetLabel, baseRevision, parameters, status, approvalRequired, message, detail, createdAt,
+                 expiresAt, decidedAt, completedAt]
+      properties:
+        id:
+          type: integer
+          format: int64
+        gameSessionId:
+          type: integer
+          format: int64
+        type:
+          type: string
+          enum: [speedhuntStaticPing, speedhuntLivePing, speedhuntStopLivePing, speedhuntTerminate]
+        requesterUserId:
+          type: [integer, 'null']
+          format: int64
+        requesterLabel:
+          type: [string, 'null']
+        requesterRole:
+          type: string
+        targetDeviceId:
+          type: [integer, 'null']
+          format: int64
+        targetLabel:
+          type: [string, 'null']
+        baseRevision:
+          type: [integer, 'null']
+          format: int64
+        parameters:
+          type: object
+        status:
+          type: string
+          enum: [pending, approved, executing, succeeded, failed, rejected, expired, cancelled]
+        approvalRequired:
+          type: [boolean, 'null']
+          description: True once the Tool queued it for the operator's approval
+        message:
+          type: [string, 'null']
+          description: Outcome or progress message for the requester
+        detail:
+          type: [string, 'null']
+          description: Operator-only detail; always null for members
+        createdAt:
+          type: string
+          format: date-time
+        expiresAt:
+          type: string
+          format: date-time
+        decidedAt:
+          type: [string, 'null']
+          format: date-time
+        completedAt:
+          type: [string, 'null']
+          format: date-time
+    GameRequestSubmission:
+      type: object
+      required: [type, targetDeviceId, baseRevision]
+      properties:
+        type:
+          type: string
+          enum: [speedhuntStaticPing, speedhuntLivePing, speedhuntStopLivePing, speedhuntTerminate]
+        targetDeviceId:
+          type: integer
+          format: int64
+          description: Assigned tracker of a player or supporter of the member's session
+        baseRevision:
+          type: integer
+          format: int64
+          description: The participant's speedhunt revision from /game-status the request is based on
+        parameters:
+          type: [object, 'null']
+          properties:
+            durationMinutes:
+              type: number
+              exclusiveMinimum: 0
+              maximum: 240
+    GameRequestDecision:
+      type: object
+      required: [decision]
+      properties:
+        decision:
+          type: string
+          enum: [await, approve, reject]
+        message:
+          type: [string, 'null']
+        detail:
+          type: [string, 'null']
+    GameRequestCompletion:
+      type: object
+      required: [id, status]
+      properties:
+        id:
+          type: integer
+          format: int64
+        status:
+          type: string
+          enum: [succeeded, failed, rejected]
+        message:
+          type: [string, 'null']
+        detail:
+          type: [string, 'null']
+    GameStatus:
+      type: object
+      required: [gameSessionId, role, controllerActive, serverTime, revision, status]
+      properties:
+        gameSessionId:
+          type: integer
+          format: int64
+        role:
+          type: string
+          enum: [player, supporter, hunter, spectator]
+        controllerActive:
+          type: boolean
+          description: Whether a Tool controls and executes this session right now
+        serverTime:
+          type: string
+          format: date-time
+        revision:
+          type: integer
+          format: int64
+        status:
+          type: object
+          description: >-
+            speedhunt.active for everyone; participants (with per-participant speedhunt revision) and limits only
+            for hunters and spectators
   parameters:
     GameControllerEpoch:
       name: X-Game-Controller-Epoch

@@ -26,6 +26,7 @@ import org.traccar.api.BaseResource;
 import org.traccar.database.GameControllerService;
 import org.traccar.database.GameEffectsService;
 import org.traccar.database.GamePushOutbox;
+import org.traccar.database.GameRequestService;
 import org.traccar.database.GameSessionService;
 import org.traccar.model.Device;
 import org.traccar.session.ConnectionManager;
@@ -64,6 +65,9 @@ public class GameSessionResource extends BaseResource {
 
     @Inject
     private GameEffectsService effects;
+
+    @Inject
+    private GameRequestService requests;
 
     @Inject
     private GamePushOutbox outbox;
@@ -296,6 +300,60 @@ public class GameSessionResource extends BaseResource {
             }
         }
         outbox.dispatch(applied.queuedPushes());
+        if (applied.requestsChanged()) {
+            connectionManager.updateGameMembers(true, id, GameRequestResource.INVALIDATION);
+        }
+        if (applied.statusChanged()) {
+            connectionManager.updateGameMembers(true, id, GameStatusResource.INVALIDATION);
+        }
         return applied.outcome();
+    }
+
+    public record RequestDecision(String decision, String message, String detail) { }
+
+    @GET
+    @Path("{id}/requests")
+    public List<GameRequestService.Request> listRequests(
+            @PathParam("id") long id, @QueryParam("state") String state, @QueryParam("limit") int limit)
+            throws Exception {
+        checkOperator();
+        return requests.operatorList(id, !"all".equals(state), limit);
+    }
+
+    /** The controller's decision: {@code await} (operator approval needed), {@code approve} or {@code reject}. */
+    @POST
+    @Path("{id}/requests/{requestId}/decision")
+    public GameRequestService.Request decideRequest(
+            @PathParam("id") long id, @PathParam("requestId") long requestId, RequestDecision decision)
+            throws Exception {
+        checkOperator();
+        if (decision == null) {
+            throw new BadRequestException("Decision required");
+        }
+        var result = requests.decide(id, requestId, decision.decision(), decision.message(), decision.detail());
+        connectionManager.updateGameMembers(true, id, GameRequestResource.INVALIDATION);
+        return result;
+    }
+
+    @POST
+    @Path("{id}/requests/{requestId}/claim")
+    public GameRequestService.Request claimRequest(
+            @PathParam("id") long id, @PathParam("requestId") long requestId,
+            @HeaderParam(GameControllerService.EPOCH_HEADER) String header) throws Exception {
+        checkOperator();
+        Long epoch = GameControllerService.parseEpoch(header);
+        if (epoch == null) {
+            throw GameControllerService.locked("Claiming requires the game controller lease");
+        }
+        var result = requests.claim(id, requestId, epoch);
+        connectionManager.updateGameMembers(true, id, GameRequestResource.INVALIDATION);
+        return result;
+    }
+
+    @GET
+    @Path("{id}/status")
+    public com.fasterxml.jackson.databind.JsonNode operatorStatus(@PathParam("id") long id) throws Exception {
+        checkOperator();
+        return requests.operatorStatus(id);
     }
 }

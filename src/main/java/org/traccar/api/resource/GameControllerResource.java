@@ -67,6 +67,9 @@ public class GameControllerResource extends BaseResource {
 
     private void changed() {
         connectionManager.updateGameAdmin(true, INVALIDATION);
+        // Control changes invalidate open requests and the members' view of the game.
+        connectionManager.updateGameMembers(true, null, GameRequestResource.INVALIDATION);
+        connectionManager.updateGameMembers(true, null, GameStatusResource.INVALIDATION);
     }
 
     @GET

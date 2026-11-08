@@ -63,6 +63,8 @@ import java.util.stream.Collectors;
 public class ConnectionManager implements BroadcastInterface {
     @Inject
     private GameProximityService gameProximity;
+    @Inject
+    private org.traccar.database.GameRequestService gameRequests;
 
     private static final Logger LOGGER = LoggerFactory.getLogger(ConnectionManager.class);
 
@@ -555,7 +557,32 @@ public class ConnectionManager implements BroadcastInterface {
         }
     }
 
+    @Override
+    public synchronized void updateGameMembers(boolean local, Long gameSessionId, String resource) {
+        if (local) {
+            broadcastService.updateGameMembers(true, gameSessionId, resource);
+        }
+        try {
+            var sessions = gameRequests.sessionsOf(listeners.keySet());
+            for (var entry : listeners.entrySet()) {
+                Long session = sessions.get(entry.getKey());
+                boolean member = session != null && (gameSessionId == null || session.equals(gameSessionId));
+                if (!member) {
+                    User user = storage.getObject(User.class, new Request(
+                            new Columns.Include("administrator"), new Condition.Equals("id", entry.getKey())));
+                    member = user != null && user.getAdministrator();
+                }
+                if (member) {
+                    entry.getValue().forEach(listener -> listener.onUpdateGameAdmin(resource));
+                }
+            }
+        } catch (Exception error) {
+            LOGGER.warn("Game member invalidation failed", error);
+        }
+    }
+
     public interface UpdateListener {
+        /** Sends {@code {"invalidate": [resource]}} for a game resource. */
         default void onUpdateGameAdmin(String resource) { }
         default void onUpdateGameProximity() { }
         default void onUpdateDeviceAccess() { }

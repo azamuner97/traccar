@@ -254,7 +254,10 @@ public class GameControllerService {
                 row.gameSessionId(), detail, at);
     }
 
+    static final String CONTROL_CHANGED = "Control of the game changed before this request was handled";
+
     private void end(Connection connection, String state, Instant at) throws SQLException {
+        GameRequestService.invalidateOpen(connection, now(), CONTROL_CHANGED);
         try (var query = connection.prepareStatement("UPDATE tc_game_controller SET state = ?, gamesessionid = NULL,"
                 + " endedat = ? WHERE id = 1")) {
             query.setString(1, state);
@@ -348,6 +351,7 @@ public class GameControllerService {
         } else if (STATE_ACTIVE.equals(current.state())) {
             historyFor(connection, current, "expired", null, current.expiresAt());
         }
+        GameRequestService.invalidateOpen(connection, now, CONTROL_CHANGED);
         long epoch = current.epoch() + 1;
         String user = userLabel(connection, userId);
         Instant expires = now.plusSeconds(leaseSeconds);

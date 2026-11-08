@@ -1,0 +1,678 @@
+/*
+ * Copyright 2026 Traccar Tool contributors
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy at http://www.apache.org/licenses/LICENSE-2.0
+ */
+package org.traccar.database;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.JsonNodeFactory;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import jakarta.inject.Inject;
+import jakarta.inject.Singleton;
+import jakarta.ws.rs.BadRequestException;
+import jakarta.ws.rs.ForbiddenException;
+import jakarta.ws.rs.NotFoundException;
+import jakarta.ws.rs.WebApplicationException;
+
+import javax.sql.DataSource;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.sql.Statement;
+import java.sql.Timestamp;
+import java.time.Clock;
+import java.time.Instant;
+import java.time.temporal.ChronoUnit;
+import java.util.ArrayList;
+import java.util.Calendar;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.TimeZone;
+
+/**
+ * Self-service game requests and the status document the controlling Tool publishes.
+ * <p>
+ * Members submit requests; the server authorizes them from session membership and the published status,
+ * keeps at most one open request per participant, and expires requests awaiting approval or execution after
+ * two minutes. The controlling Tool decides, claims and completes them; completions commit inside the effects
+ * transaction. A change of control invalidates every open request and keeps its history.
+ */
+@Singleton
+public class GameRequestService {
+
+    public static final String PENDING = "pending";
+    public static final String APPROVED = "approved";
+    public static final String EXECUTING = "executing";
+    public static final String SUCCEEDED = "succeeded";
+    public static final String FAILED = "failed";
+    public static final String REJECTED = "rejected";
+    public static final String EXPIRED = "expired";
+    public static final String CANCELLED = "cancelled";
+
+    public static final Set<String> OPEN = Set.of(PENDING, APPROVED, EXECUTING);
+    public static final Set<String> HUNTER_TYPES = Set.of(
+            "speedhuntStaticPing", "speedhuntLivePing", "speedhuntStopLivePing", "speedhuntTerminate");
+    public static final int EXPIRY_SECONDS = 120;
+    private static final int MAX_LIVE_MINUTES = 240;
+
+    public record Membership(long gameSessionId, long userId, String role, Long assignedDeviceId) { }
+    public record Submission(String type, Long targetDeviceId, Long baseRevision, JsonNode parameters) { }
+    public record Request(long id, long gameSessionId, String type, Long requesterUserId, String requesterLabel,
+                          String requesterRole, Long targetDeviceId, String targetLabel, Long baseRevision,
+                          JsonNode parameters, String status, Boolean approvalRequired, String message,
+                          String detail, String createdAt, String expiresAt, String decidedAt,
+                          String completedAt) { }
+    public record Completion(Long id, String status, String message, String detail) { }
+    public record Status(long gameSessionId, String role, boolean controllerActive, String serverTime,
+                         long revision, JsonNode status) { }
+
+    @FunctionalInterface
+    private interface Work<T> {
+        T run(Connection connection) throws Exception;
+    }
+
+    private final DataSource dataSource;
+    private final ObjectMapper objectMapper;
+    private final Clock clock;
+
+    @Inject
+    public GameRequestService(DataSource dataSource, ObjectMapper objectMapper) {
+        this(dataSource, objectMapper, Clock.systemUTC());
+    }
+
+    public GameRequestService(DataSource dataSource, ObjectMapper objectMapper, Clock clock) {
+        this.dataSource = dataSource;
+        this.objectMapper = objectMapper;
+        this.clock = clock;
+    }
+
+    // --- helpers ------------------------------------------------------------------------------------------
+
+    private <T> T transaction(Work<T> work) throws Exception {
+        try (var connection = dataSource.getConnection()) {
+            connection.setAutoCommit(false);
+            try {
+                T result = work.run(connection);
+                connection.commit();
+                return result;
+            } catch (Exception error) {
+                connection.rollback();
+                throw error;
+            }
+        }
+    }
+
+    private static Calendar utc() {
+        return Calendar.getInstance(TimeZone.getTimeZone("UTC"));
+    }
+
+    private Instant now() {
+        return clock.instant().truncatedTo(ChronoUnit.MILLIS);
+    }
+
+    private static String iso(ResultSet rows, String column) throws SQLException {
+        Timestamp value = rows.getTimestamp(column, utc());
+        return value == null ? null : value.toInstant().toString();
+    }
+
+    private static Long nullableLong(ResultSet rows, String column) throws SQLException {
+        long value = rows.getLong(column);
+        return rows.wasNull() ? null : value;
+    }
+
+    private static String text(String value, int length) {
+        if (value == null) {
+            return null;
+        }
+        String cleaned = value.replaceAll("\\p{Cntrl}", " ").trim();
+        return cleaned.length() > length ? cleaned.substring(0, length) : cleaned;
+    }
+
+    private static WebApplicationException conflict(String message) {
+        return new WebApplicationException(message, 409);
+    }
+
+    private Request request(ResultSet rows) throws Exception {
+        boolean approval = rows.getBoolean("approvalrequired");
+        Boolean approvalRequired = rows.wasNull() ? null : approval;
+        return new Request(rows.getLong("id"), rows.getLong("gamesessionid"), rows.getString("type"),
+                nullableLong(rows, "requesteruserid"), rows.getString("requesterlabel"),
+                rows.getString("requesterrole"), nullableLong(rows, "targetdeviceid"), rows.getString("targetlabel"),
+                nullableLong(rows, "baserevision"), objectMapper.readTree(rows.getString("parameters")),
+                rows.getString("status"), approvalRequired, rows.getString("message"), rows.getString("detail"),
+                iso(rows, "createdat"), iso(rows, "expiresat"), iso(rows, "decidedat"), iso(rows, "completedat"));
+    }
+
+    /** The view a member sees: the operator-only detail is removed. */
+    private static Request memberView(Request request) {
+        return new Request(request.id(), request.gameSessionId(), request.type(), request.requesterUserId(),
+                request.requesterLabel(), request.requesterRole(), request.targetDeviceId(), request.targetLabel(),
+                request.baseRevision(), request.parameters(), request.status(), request.approvalRequired(),
+                request.message(), null, request.createdAt(), request.expiresAt(), request.decidedAt(),
+                request.completedAt());
+    }
+
+    private Request load(Connection connection, long gameSessionId, long id, boolean lock) throws Exception {
+        try (var query = connection.prepareStatement("SELECT * FROM tc_game_requests WHERE id = ?"
+                + " AND gamesessionid = ?" + (lock ? " FOR UPDATE" : ""))) {
+            query.setLong(1, id);
+            query.setLong(2, gameSessionId);
+            try (var rows = query.executeQuery()) {
+                if (!rows.next()) {
+                    throw new NotFoundException("Game request not found");
+                }
+                return request(rows);
+            }
+        }
+    }
+
+    private JsonNode statusDocument(Connection connection, long gameSessionId) throws Exception {
+        try (var query = connection.prepareStatement(
+                "SELECT document FROM tc_game_session_status WHERE gamesessionid = ?")) {
+            query.setLong(1, gameSessionId);
+            try (var rows = query.executeQuery()) {
+                return rows.next() ? objectMapper.readTree(rows.getString(1)) : null;
+            }
+        }
+    }
+
+    /** The participant entry of the published status, or {@code null}. */
+    private static JsonNode participant(JsonNode status, long deviceId) {
+        if (status == null || !status.path("participants").isArray()) {
+            return null;
+        }
+        for (JsonNode item : status.get("participants")) {
+            if (item.path("deviceId").asLong() == deviceId) {
+                return item;
+            }
+        }
+        return null;
+    }
+
+    /** Whether the controller lease is active and executes the given session. */
+    private boolean executing(Connection connection, long gameSessionId) throws SQLException {
+        try (var query = connection.prepareStatement(
+                "SELECT state,expiresat,gamesessionid FROM tc_game_controller WHERE id = 1")) {
+            try (var rows = query.executeQuery()) {
+                if (!rows.next()) {
+                    return false;
+                }
+                Timestamp expires = rows.getTimestamp("expiresat", utc());
+                Long session = nullableLong(rows, "gamesessionid");
+                return GameControllerService.STATE_ACTIVE.equals(rows.getString("state")) && expires != null
+                        && expires.toInstant().isAfter(now()) && session != null && session == gameSessionId;
+            }
+        }
+    }
+
+    private static String userLabel(Connection connection, long userId) throws SQLException {
+        try (var query = connection.prepareStatement("SELECT name,email FROM tc_users WHERE id = ?")) {
+            query.setLong(1, userId);
+            try (var rows = query.executeQuery()) {
+                if (!rows.next()) {
+                    return null;
+                }
+                String label = rows.getString("name");
+                return text(label == null || label.isBlank() ? rows.getString("email") : label, 128);
+            }
+        }
+    }
+
+    // --- membership and status ----------------------------------------------------------------------------
+
+    public Membership membership(long userId) throws Exception {
+        try (var connection = dataSource.getConnection();
+             var query = connection.prepareStatement("SELECT gamesessionid,role,assigneddeviceid"
+                     + " FROM tc_game_session_members WHERE userid = ?")) {
+            query.setLong(1, userId);
+            try (var rows = query.executeQuery()) {
+                if (!rows.next()) {
+                    throw new ForbiddenException("This account does not take part in a game");
+                }
+                return new Membership(rows.getLong("gamesessionid"), userId, rows.getString("role"),
+                        nullableLong(rows, "assigneddeviceid"));
+            }
+        }
+    }
+
+    /**
+     * The status a member may see. Hunters and spectators see the named speedhunt state; players and
+     * supporters only learn whether any speedhunt runs, never whom it targets.
+     */
+    public Status status(Membership member) throws Exception {
+        return transaction(connection -> {
+            long revision = 0;
+            JsonNode document = null;
+            try (var query = connection.prepareStatement(
+                    "SELECT revision,document FROM tc_game_session_status WHERE gamesessionid = ?")) {
+                query.setLong(1, member.gameSessionId());
+                try (var rows = query.executeQuery()) {
+                    if (rows.next()) {
+                        revision = rows.getLong(1);
+                        document = objectMapper.readTree(rows.getString(2));
+                    }
+                }
+            }
+            boolean active = executing(connection, member.gameSessionId());
+            return new Status(member.gameSessionId(), member.role(), active, now().toString(), revision,
+                    filter(document, member.role(), active));
+        });
+    }
+
+    static JsonNode filter(JsonNode document, String role, boolean active) {
+        ObjectNode result = JsonNodeFactory.instance.objectNode();
+        boolean running = false;
+        if (document != null && document.path("participants").isArray()) {
+            for (JsonNode item : document.get("participants")) {
+                JsonNode speedhunt = item.path("speedhunt");
+                running |= speedhunt.path("running").asBoolean(false) || speedhunt.path("live").asBoolean(false);
+            }
+        }
+        result.putObject("speedhunt").put("active", active && running);
+        if (("hunter".equals(role) || "spectator".equals(role)) && document != null) {
+            result.set("participants", document.path("participants").deepCopy());
+            result.set("limits", document.path("limits").deepCopy());
+        }
+        return result;
+    }
+
+    public JsonNode operatorStatus(long gameSessionId) throws Exception {
+        return transaction(connection -> {
+            JsonNode document = statusDocument(connection, gameSessionId);
+            return document == null ? JsonNodeFactory.instance.objectNode() : document;
+        });
+    }
+
+    /** Replaces the published status inside an effects transaction. */
+    long putStatus(Connection connection, long gameSessionId, JsonNode document) throws Exception {
+        if (document == null || !document.isObject()) {
+            throw new BadRequestException("Status must be a JSON object");
+        }
+        String serialized = objectMapper.writeValueAsString(document);
+        if (serialized.length() > 1_000_000) {
+            throw new BadRequestException("Status exceeds the size limit");
+        }
+        long revision = 0;
+        try (var query = connection.prepareStatement(
+                "SELECT revision FROM tc_game_session_status WHERE gamesessionid = ? FOR UPDATE")) {
+            query.setLong(1, gameSessionId);
+            try (var rows = query.executeQuery()) {
+                if (rows.next()) {
+                    revision = rows.getLong(1);
+                }
+            }
+        }
+        String sql = revision == 0
+                ? "INSERT INTO tc_game_session_status (revision,document,updatedat,gamesessionid) VALUES (?,?,?,?)"
+                : "UPDATE tc_game_session_status SET revision = ?, document = ?, updatedat = ? WHERE gamesessionid = ?";
+        try (var query = connection.prepareStatement(sql)) {
+            query.setLong(1, revision + 1);
+            query.setString(2, serialized);
+            query.setTimestamp(3, Timestamp.from(now()), utc());
+            query.setLong(4, gameSessionId);
+            query.executeUpdate();
+        }
+        return revision + 1;
+    }
+
+    // --- member requests ----------------------------------------------------------------------------------
+
+    private JsonNode parameters(Submission submission) {
+        ObjectNode result = JsonNodeFactory.instance.objectNode();
+        if ("speedhuntLivePing".equals(submission.type()) && submission.parameters() != null
+                && submission.parameters().has("durationMinutes")
+                && !submission.parameters().get("durationMinutes").isNull()) {
+            JsonNode minutes = submission.parameters().get("durationMinutes");
+            if (!minutes.isNumber() || minutes.asDouble() <= 0 || minutes.asDouble() > MAX_LIVE_MINUTES) {
+                throw new BadRequestException("Live ping duration must be between 0 and " + MAX_LIVE_MINUTES
+                        + " minutes");
+            }
+            result.put("durationMinutes", minutes.asDouble());
+        }
+        return result;
+    }
+
+    public Request submit(Membership member, Submission submission) throws Exception {
+        if (submission == null || submission.type() == null) {
+            throw new BadRequestException("Request type required");
+        }
+        if (!HUNTER_TYPES.contains(submission.type())) {
+            throw new BadRequestException("Unknown request type");
+        }
+        if (!"hunter".equals(member.role())) {
+            throw new ForbiddenException("Only hunters control speedhunts");
+        }
+        if (submission.targetDeviceId() == null || submission.baseRevision() == null) {
+            throw new BadRequestException("Participant and speedhunt revision required");
+        }
+        JsonNode parameters = parameters(submission);
+        return transaction(connection -> {
+            try (var query = connection.prepareStatement(
+                    "SELECT id FROM tc_game_sessions WHERE id = ? FOR UPDATE")) {
+                query.setLong(1, member.gameSessionId());
+                query.executeQuery().close();
+            }
+            if (!executing(connection, member.gameSessionId())) {
+                throw conflict("The game is not running right now; try again later");
+            }
+            String targetLabel = null;
+            try (var query = connection.prepareStatement("SELECT login FROM tc_game_session_members"
+                    + " WHERE gamesessionid = ? AND assigneddeviceid = ? AND role IN ('player','supporter')")) {
+                query.setLong(1, member.gameSessionId());
+                query.setLong(2, submission.targetDeviceId());
+                try (var rows = query.executeQuery()) {
+                    if (!rows.next()) {
+                        throw new BadRequestException("Unknown participant");
+                    }
+                    targetLabel = rows.getString(1);
+                }
+            }
+            JsonNode target = participant(statusDocument(connection, member.gameSessionId()),
+                    submission.targetDeviceId());
+            if (target == null) {
+                throw conflict("The game status is not available yet; try again shortly");
+            }
+            if (target.path("caught").asBoolean(false)) {
+                throw conflict("This participant is out of the game");
+            }
+            if (target.path("speedhunt").path("revision").asLong(-1) != submission.baseRevision()) {
+                throw conflict("The speedhunt changed meanwhile; refresh and try again");
+            }
+            if (target.hasNonNull("name")) {
+                targetLabel = target.get("name").asText();
+            }
+            try (var query = connection.prepareStatement("SELECT COUNT(*) FROM tc_game_requests WHERE"
+                    + " gamesessionid = ? AND targetdeviceid = ? AND status IN (?,?,?)")) {
+                query.setLong(1, member.gameSessionId());
+                query.setLong(2, submission.targetDeviceId());
+                query.setString(3, PENDING);
+                query.setString(4, APPROVED);
+                query.setString(5, EXECUTING);
+                try (var rows = query.executeQuery()) {
+                    rows.next();
+                    if (rows.getLong(1) > 0) {
+                        throw conflict("Another request for this participant is still open");
+                    }
+                }
+            }
+            Instant now = now();
+            long id;
+            try (var query = connection.prepareStatement("INSERT INTO tc_game_requests (gamesessionid,type,"
+                    + "requesteruserid,requesterlabel,requesterrole,targetdeviceid,targetlabel,baserevision,"
+                    + "parameters,status,createdat,expiresat,updatedat) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    Statement.RETURN_GENERATED_KEYS)) {
+                query.setLong(1, member.gameSessionId());
+                query.setString(2, submission.type());
+                query.setLong(3, member.userId());
+                query.setString(4, userLabel(connection, member.userId()));
+                query.setString(5, member.role());
+                query.setLong(6, submission.targetDeviceId());
+                query.setString(7, text(targetLabel, 128));
+                query.setLong(8, submission.baseRevision());
+                query.setString(9, objectMapper.writeValueAsString(parameters));
+                query.setString(10, PENDING);
+                query.setTimestamp(11, Timestamp.from(now), utc());
+                query.setTimestamp(12, Timestamp.from(now.plusSeconds(EXPIRY_SECONDS)), utc());
+                query.setTimestamp(13, Timestamp.from(now), utc());
+                query.executeUpdate();
+                try (var keys = query.getGeneratedKeys()) {
+                    keys.next();
+                    id = keys.getLong(1);
+                }
+            }
+            return memberView(load(connection, member.gameSessionId(), id, false));
+        });
+    }
+
+    /** Hunters and spectators see every speedhunt request of their session; others only their own. */
+    public List<Request> list(Membership member, int requestedLimit) throws Exception {
+        int limit = requestedLimit <= 0 ? 50 : Math.min(requestedLimit, 200);
+        boolean shared = "hunter".equals(member.role()) || "spectator".equals(member.role());
+        return transaction(connection -> {
+            List<Request> result = new ArrayList<>();
+            String sql = "SELECT * FROM tc_game_requests WHERE gamesessionid = ?"
+                    + (shared ? " AND (requesteruserid = ? OR type IN ("
+                            + String.join(",", HUNTER_TYPES.stream().map(type -> "'" + type + "'").toList())
+                            + "))" : " AND requesteruserid = ?")
+                    + " ORDER BY id DESC";
+            try (PreparedStatement query = connection.prepareStatement(sql)) {
+                query.setLong(1, member.gameSessionId());
+                query.setLong(2, member.userId());
+                query.setMaxRows(limit);
+                try (var rows = query.executeQuery()) {
+                    while (rows.next()) {
+                        result.add(memberView(request(rows)));
+                    }
+                }
+            }
+            return result;
+        });
+    }
+
+    public Request cancel(Membership member, long id) throws Exception {
+        return transaction(connection -> {
+            Request request = load(connection, member.gameSessionId(), id, true);
+            if (request.requesterUserId() == null || request.requesterUserId() != member.userId()) {
+                throw new ForbiddenException("Only the requester can cancel this request");
+            }
+            if (!PENDING.equals(request.status()) && !APPROVED.equals(request.status())) {
+                throw conflict("The request can no longer be cancelled");
+            }
+            update(connection, id, CANCELLED, "Cancelled by the requester", null, false);
+            return memberView(load(connection, member.gameSessionId(), id, false));
+        });
+    }
+
+    // --- controller operations ----------------------------------------------------------------------------
+
+    private void update(Connection connection, long id, String status, String message, String detail,
+                        boolean decided) throws SQLException {
+        Instant now = now();
+        boolean terminal = !OPEN.contains(status);
+        try (var query = connection.prepareStatement("UPDATE tc_game_requests SET status = ?, message = ?,"
+                + " detail = ?, updatedat = ?" + (decided ? ", decidedat = ?" : "")
+                + (terminal ? ", completedat = ?" : "") + " WHERE id = ?")) {
+            int index = 1;
+            query.setString(index++, status);
+            query.setString(index++, text(message, 512));
+            query.setString(index++, text(detail, 512));
+            query.setTimestamp(index++, Timestamp.from(now), utc());
+            if (decided) {
+                query.setTimestamp(index++, Timestamp.from(now), utc());
+            }
+            if (terminal) {
+                query.setTimestamp(index++, Timestamp.from(now), utc());
+            }
+            query.setLong(index, id);
+            query.executeUpdate();
+        }
+    }
+
+    public List<Request> operatorList(long gameSessionId, boolean openOnly, int requestedLimit) throws Exception {
+        int limit = requestedLimit <= 0 ? 100 : Math.min(requestedLimit, 500);
+        return transaction(connection -> {
+            List<Request> result = new ArrayList<>();
+            try (var query = connection.prepareStatement("SELECT * FROM tc_game_requests WHERE gamesessionid = ?"
+                    + (openOnly ? " AND status IN ('pending','approved','executing') ORDER BY id"
+                            : " ORDER BY id DESC"))) {
+                query.setLong(1, gameSessionId);
+                query.setMaxRows(limit);
+                try (var rows = query.executeQuery()) {
+                    while (rows.next()) {
+                        result.add(request(rows));
+                    }
+                }
+            }
+            return result;
+        });
+    }
+
+    /**
+     * The controller's decision on a pending request: {@code await} (operator approval needed), {@code approve}
+     * or {@code reject}.
+     */
+    public Request decide(long gameSessionId, long id, String decision, String message, String detail)
+            throws Exception {
+        return transaction(connection -> {
+            Request request = load(connection, gameSessionId, id, true);
+            switch (decision == null ? "" : decision) {
+                case "await" -> {
+                    if (!PENDING.equals(request.status())) {
+                        throw conflict("Only pending requests can wait for approval");
+                    }
+                    try (var query = connection.prepareStatement("UPDATE tc_game_requests SET"
+                            + " approvalrequired = ?, message = ?, updatedat = ? WHERE id = ?")) {
+                        query.setBoolean(1, true);
+                        query.setString(2, text(message, 512));
+                        query.setTimestamp(3, Timestamp.from(now()), utc());
+                        query.setLong(4, id);
+                        query.executeUpdate();
+                    }
+                }
+                case "approve" -> {
+                    if (!PENDING.equals(request.status())) {
+                        throw conflict("Only pending requests can be approved");
+                    }
+                    update(connection, id, APPROVED, message, detail, true);
+                }
+                case "reject" -> {
+                    if (!PENDING.equals(request.status()) && !APPROVED.equals(request.status())) {
+                        throw conflict("The request is no longer open");
+                    }
+                    update(connection, id, REJECTED, message, detail, true);
+                }
+                default -> throw new BadRequestException("Decision must be await, approve or reject");
+            }
+            return load(connection, gameSessionId, id, false);
+        });
+    }
+
+    /** Claims a pending or approved request for execution; an expired request can no longer be claimed. */
+    public Request claim(long gameSessionId, long id, long epoch) throws Exception {
+        return transaction(connection -> {
+            Request request = load(connection, gameSessionId, id, true);
+            if (!PENDING.equals(request.status()) && !APPROVED.equals(request.status())) {
+                throw conflict("The request is no longer open");
+            }
+            if (!Instant.parse(request.expiresAt()).isAfter(now())) {
+                update(connection, id, EXPIRED, "No one handled this request in time", null, false);
+                return load(connection, gameSessionId, id, false);
+            }
+            try (var query = connection.prepareStatement("UPDATE tc_game_requests SET status = ?, epoch = ?,"
+                    + " updatedat = ? WHERE id = ?")) {
+                query.setString(1, EXECUTING);
+                query.setLong(2, epoch);
+                query.setTimestamp(3, Timestamp.from(now()), utc());
+                query.setLong(4, id);
+                query.executeUpdate();
+            }
+            return load(connection, gameSessionId, id, false);
+        });
+    }
+
+    /** Records outcomes inside an effects transaction. */
+    List<Request> complete(Connection connection, long gameSessionId, List<Completion> completions) throws Exception {
+        List<Request> result = new ArrayList<>();
+        for (Completion completion : completions) {
+            if (completion == null || completion.id() == null || completion.status() == null) {
+                throw new BadRequestException("Invalid request outcome");
+            }
+            Request request = load(connection, gameSessionId, completion.id(), true);
+            boolean allowed = switch (completion.status()) {
+                case SUCCEEDED -> EXECUTING.equals(request.status());
+                case FAILED -> OPEN.contains(request.status());
+                case REJECTED -> PENDING.equals(request.status()) || APPROVED.equals(request.status());
+                default -> false;
+            };
+            if (!allowed) {
+                if (request.status().equals(completion.status())) {
+                    result.add(request);
+                    continue;
+                }
+                throw conflict("Request " + completion.id() + " cannot become " + completion.status()
+                        + " from " + request.status());
+            }
+            update(connection, completion.id(), completion.status(), completion.message(), completion.detail(),
+                    REJECTED.equals(completion.status()));
+            result.add(load(connection, gameSessionId, completion.id(), false));
+        }
+        return result;
+    }
+
+    /** Expires requests awaiting approval or execution past their deadline; returns the affected sessions. */
+    public Set<Long> expire() throws Exception {
+        return transaction(connection -> {
+            Set<Long> sessions = new LinkedHashSet<>();
+            List<Long> ids = new ArrayList<>();
+            try (var query = connection.prepareStatement("SELECT id,gamesessionid FROM tc_game_requests"
+                    + " WHERE status IN (?,?) AND expiresat <= ? FOR UPDATE")) {
+                query.setString(1, PENDING);
+                query.setString(2, APPROVED);
+                query.setTimestamp(3, Timestamp.from(now()), utc());
+                try (var rows = query.executeQuery()) {
+                    while (rows.next()) {
+                        ids.add(rows.getLong(1));
+                        sessions.add(rows.getLong(2));
+                    }
+                }
+            }
+            for (long id : ids) {
+                update(connection, id, EXPIRED, "No one handled this request in time", null, false);
+            }
+            return sessions;
+        });
+    }
+
+    /**
+     * Invalidates every open request when control of the game changes; history is kept. Runs inside the
+     * controller's transaction.
+     */
+    static Set<Long> invalidateOpen(Connection connection, Instant now, String reason) throws SQLException {
+        Set<Long> sessions = new LinkedHashSet<>();
+        try (var query = connection.prepareStatement("SELECT DISTINCT gamesessionid FROM tc_game_requests"
+                + " WHERE status IN ('pending','approved','executing')")) {
+            try (var rows = query.executeQuery()) {
+                while (rows.next()) {
+                    sessions.add(rows.getLong(1));
+                }
+            }
+        }
+        for (var change : Map.of("pending", EXPIRED, "approved", EXPIRED, "executing", FAILED).entrySet()) {
+            try (var query = connection.prepareStatement("UPDATE tc_game_requests SET status = ?, message = ?,"
+                    + " updatedat = ?, completedat = ? WHERE status = ?")) {
+                query.setString(1, change.getValue());
+                query.setString(2, reason);
+                query.setTimestamp(3, Timestamp.from(now), utc());
+                query.setTimestamp(4, Timestamp.from(now), utc());
+                query.setString(5, change.getKey());
+                query.executeUpdate();
+            }
+        }
+        return sessions;
+    }
+
+    /** The session each listed user is a member of; users that take part in no game are absent. */
+    public Map<Long, Long> sessionsOf(java.util.Collection<Long> userIds) throws Exception {
+        Map<Long, Long> result = new java.util.HashMap<>();
+        if (userIds.isEmpty()) {
+            return result;
+        }
+        try (var connection = dataSource.getConnection();
+             var query = connection.prepareStatement("SELECT userid,gamesessionid FROM tc_game_session_members")) {
+            try (var rows = query.executeQuery()) {
+                while (rows.next()) {
+                    if (userIds.contains(rows.getLong(1))) {
+                        result.put(rows.getLong(1), rows.getLong(2));
+                    }
+                }
+            }
+        }
+        return result;
+    }
+}
