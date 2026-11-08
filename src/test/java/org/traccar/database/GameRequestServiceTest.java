@@ -42,6 +42,7 @@ public class GameRequestServiceTest {
     private final ObjectMapper mapper = new ObjectMapper();
     private final MutableClock clock = new MutableClock();
     private JdbcDataSource source;
+    private GameSessionService sessions;
     private GameRequestService requests;
     private GameControllerService controller;
     private GameEffectsService effects;
@@ -110,7 +111,7 @@ public class GameRequestServiceTest {
                 + " instanceid VARCHAR(64), label VARCHAR(128), gamesessionid BIGINT, detail VARCHAR(512),"
                 + " occurredat TIMESTAMP(3) NOT NULL)");
 
-        var sessions = new GameSessionService(source, mapper,
+        sessions = new GameSessionService(source, mapper,
                 new GameCredentialCipher(Base64.getEncoder().encodeToString(new byte[32])));
         sessionId = sessions.create("Night", 4, mapper.readTree("{}")).id();
         sessions.updateResources(sessionId, 1, 900L, mapper.readTree("{}"), List.of(
@@ -273,7 +274,8 @@ public class GameRequestServiceTest {
                 () -> requests.submit(player, hunterPositions))), "nothing granted yet");
         assertThrows(ForbiddenException.class, () -> requests.submit(requests.membership(10), hunterPositions));
         assertThrows(BadRequestException.class, () -> jokers.change(sessionId,
-                new GameJokerService.Change(101L, "break", 1, null), "Operator"), "not available yet");
+                new GameJokerService.Change(101L, GameJokerService.FAKE_TIMETABLE, 1, null), "Operator"),
+                "not available yet");
         assertThrows(BadRequestException.class, () -> jokers.change(sessionId,
                 new GameJokerService.Change(999L, GameJokerService.HUNTER_POSITIONS, 1, null), "Operator"));
 
@@ -366,5 +368,101 @@ public class GameRequestServiceTest {
         assertEquals(0, hunterPositions(jokers, 101).reserved());
         assertEquals("overuse", jokers.ledger(sessionId, 0).stream()
                 .filter(entry -> entry.kind().contains("use")).findFirst().orElseThrow().kind());
+    }
+
+    private GameJokerService.Inventory breaks(GameJokerService jokers, long deviceId) throws Exception {
+        return jokers.own(sessionId, deviceId).inventories().stream()
+                .filter(item -> item.type().equals(GameJokerService.BREAK)).findFirst().orElseThrow();
+    }
+
+    private static String message(Throwable error) {
+        return ((WebApplicationException) error).getMessage();
+    }
+
+    @Test
+    void breaksNeedAConfiguredDurationAndNeverRevealASpeedhuntTarget() throws Exception {
+        var jokers = new GameJokerService(source);
+        var anna = requests.membership(20);
+        var ben = requests.membership(21);
+        var pause = new GameRequestService.Submission("jokerBreak", null, null, null);
+        var grant = new GameJokerService.Change(101L, GameJokerService.BREAK, 1, null);
+        assertEquals(409, status(assertThrows(WebApplicationException.class,
+                () -> jokers.change(sessionId, grant, "Operator"))), "no break duration configured yet");
+        sessions.updateConfig(sessionId, 1, null,
+                mapper.readTree("{\"game_settings\":{\"break_duration_minutes\":15}}"));
+        jokers.change(sessionId, grant, "Operator");
+        jokers.change(sessionId, new GameJokerService.Change(102L, GameJokerService.BREAK, 1, null), "Operator");
+        assertEquals(1, breaks(jokers, 101).available());
+        assertThrows(BadRequestException.class, () -> deliverJokers(List.of(new GameJokerService.Use(
+                101L, GameJokerService.BREAK, true, "Operator break")), null), "breaks start only by request");
+
+        // While any speedhunt runs, every participant gets the same answer, the target included.
+        publish("""
+                {"participants":[
+                  {"deviceId":101,"name":"Anna","role":"player","caught":false,
+                   "speedhunt":{"revision":3,"running":false,"live":false}},
+                  {"deviceId":102,"name":"Ben","role":"player","caught":false,
+                   "speedhunt":{"revision":1,"running":false,"live":true}}]}""");
+        String forAnna = message(assertThrows(WebApplicationException.class, () -> requests.submit(anna, pause)));
+        String forBen = message(assertThrows(WebApplicationException.class, () -> requests.submit(ben, pause)));
+        assertEquals(GameRequestService.BREAK_UNAVAILABLE, forAnna);
+        assertEquals(forAnna, forBen);
+        assertEquals(0, breaks(jokers, 101).reserved(), "a refused request reserves nothing");
+
+        publish("""
+                {"participants":[
+                  {"deviceId":101,"name":"Anna","role":"player","caught":false,
+                   "speedhunt":{"revision":3,"running":false,"live":false}},
+                  {"deviceId":102,"name":"Ben","role":"player","caught":false,
+                   "speedhunt":{"revision":1,"running":false,"live":false}}]}""");
+        var request = requests.submit(anna, pause);
+        assertEquals(101L, request.targetDeviceId());
+        assertEquals(1, breaks(jokers, 101).reserved());
+        assertEquals(409, status(assertThrows(WebApplicationException.class, () -> requests.submit(anna, pause))));
+
+        // The Tool starts the break when it executes the request: the joker is used with the published break.
+        requests.claim(sessionId, request.id(), epoch);
+        String endsAt = clock.now.plusSeconds(900).toString();
+        deliver(List.of(new GameRequestService.Completion(request.id(), "succeeded", "Break until 15:00", null)),
+                mapper.readTree("""
+                {"participants":[
+                  {"deviceId":101,"name":"Anna","role":"player","caught":false,
+                   "speedhunt":{"revision":3,"running":false,"live":false},
+                   "break":{"active":true,"startedAt":"%s","endsAt":"%s"}},
+                  {"deviceId":102,"name":"Ben","role":"player","caught":false,
+                   "speedhunt":{"revision":1,"running":false,"live":false},"break":{"active":false}}]}"""
+                        .formatted(clock.now.toString(), endsAt)));
+        var used = breaks(jokers, 101);
+        assertEquals(1, used.used());
+        assertEquals(0, used.available());
+
+        // No overlapping breaks, and no new speedhunt pings on a participant on a break.
+        jokers.change(sessionId, grant, "Operator");
+        assertEquals("You are already on a break",
+                message(assertThrows(WebApplicationException.class, () -> requests.submit(anna, pause))));
+        var hunter = requests.membership(10);
+        assertEquals("This participant is on a break",
+                message(assertThrows(WebApplicationException.class, () -> requests.submit(hunter, ping(101, 3)))));
+        assertEquals("This participant is on a break", message(assertThrows(WebApplicationException.class,
+                () -> requests.submit(hunter, new GameRequestService.Submission(
+                        "speedhuntLivePing", 101L, 3L, null)))));
+        assertEquals("pending", requests.submit(hunter, ping(102, 1)).status(), "others can still be hunted");
+
+        // The participant sees their own break and deadline; hunters see who is on a break.
+        var annaView = requests.status(anna).status();
+        assertTrue(annaView.get("break").get("active").asBoolean());
+        assertEquals(endsAt, annaView.get("break").get("endsAt").asText());
+        assertFalse(annaView.has("participants"));
+        assertFalse(requests.status(ben).status().get("break").get("active").asBoolean());
+        var hunterView = requests.status(hunter).status().get("participants");
+        assertTrue(hunterView.get(0).get("break").get("active").asBoolean());
+
+        // A break past its deadline no longer protects, even before the Tool publishes its end.
+        publish("""
+                {"participants":[
+                  {"deviceId":101,"name":"Anna","role":"player","caught":false,
+                   "speedhunt":{"revision":3,"running":false,"live":false},
+                   "break":{"active":true,"endsAt":"%s"}}]}""".formatted(clock.now.minusSeconds(1).toString()));
+        assertEquals("pending", requests.submit(anna, pause).status());
     }
 }

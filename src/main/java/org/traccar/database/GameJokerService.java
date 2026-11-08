@@ -6,6 +6,8 @@
  */
 package org.traccar.database;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.inject.Inject;
 import jakarta.inject.Singleton;
 import jakarta.ws.rs.BadRequestException;
@@ -33,6 +35,7 @@ import java.util.TimeZone;
  * Joker inventories of players and supporters, keyed by their real tracker. A use is reserved while a request
  * is open and consumed when its effect succeeds; any other end releases it. Operators grant and revoke unused
  * quantities; a confirmed operator relay may use a joker beyond the allocation. Every change is in the ledger.
+ * Break jokers can only be granted once the session's game settings configure a positive break duration.
  */
 @Singleton
 public class GameJokerService {
@@ -43,9 +46,13 @@ public class GameJokerService {
     public static final String BREAK = "break";
     public static final List<String> TYPES = List.of(HUNTER_POSITIONS, FAKE_TIMETABLE, FAKE_SPEEDHUNT, BREAK);
     /** Types that can be granted and used in this version. */
-    public static final Set<String> ENABLED = Set.of(HUNTER_POSITIONS);
+    public static final Set<String> ENABLED = Set.of(HUNTER_POSITIONS, BREAK);
     /** Request type of each joker type. */
-    public static final Map<String, String> REQUEST_TYPES = Map.of("jokerHunterPositions", HUNTER_POSITIONS);
+    public static final Map<String, String> REQUEST_TYPES = Map.of(
+            "jokerHunterPositions", HUNTER_POSITIONS, "jokerBreak", BREAK);
+    /** Types an operator action may use directly (relays); other types are used only through requests. */
+    private static final Set<String> OPERATOR_USES = Set.of(HUNTER_POSITIONS);
+    private static final ObjectMapper CONFIG_READER = new ObjectMapper();
 
     public static final String RESERVED = "reserved";
     public static final String CONSUMED = "consumed";
@@ -135,6 +142,34 @@ public class GameJokerService {
             }
         }
         return result;
+    }
+
+    /**
+     * The break duration in minutes configured in the session's game settings
+     * ({@code game_settings.break_duration_minutes}), or {@code null} when none is configured.
+     */
+    static Double breakMinutes(Connection connection, long gameSessionId) throws SQLException {
+        String config;
+        try (var query = connection.prepareStatement("SELECT config FROM tc_game_sessions WHERE id = ?")) {
+            query.setLong(1, gameSessionId);
+            try (var rows = query.executeQuery()) {
+                if (!rows.next()) {
+                    return null;
+                }
+                config = rows.getString(1);
+            }
+        }
+        JsonNode minutes;
+        try {
+            minutes = CONFIG_READER.readTree(config == null ? "{}" : config)
+                    .path("game_settings").path("break_duration_minutes");
+        } catch (Exception error) {
+            return null;
+        }
+        if (!minutes.isNumber() || !Double.isFinite(minutes.asDouble()) || minutes.asDouble() <= 0) {
+            return null;
+        }
+        return minutes.asDouble();
     }
 
     private static int[] counts(Connection connection, long gameSessionId, long deviceId, String type, boolean lock)
@@ -354,6 +389,10 @@ public class GameJokerService {
             if (!participants(connection, gameSessionId).contains(change.deviceId())) {
                 throw new BadRequestException("Jokers belong to players and supporters of this session");
             }
+            if (BREAK.equals(type) && change.quantity() > 0 && breakMinutes(connection, gameSessionId) == null) {
+                throw new WebApplicationException(
+                        "Set a positive break duration in the game settings before granting break jokers", 409);
+            }
             int[] counts = counts(connection, gameSessionId, change.deviceId(), type, true);
             int available = Math.max(0, counts[0] - counts[1] - counts[2]);
             if (change.quantity() < 0 && -change.quantity() > available) {
@@ -446,6 +485,9 @@ public class GameJokerService {
             throw new BadRequestException("Joker use needs a participant");
         }
         String type = type(use.type());
+        if (!OPERATOR_USES.contains(type)) {
+            throw new BadRequestException("Operator actions only use Get hunter positions jokers");
+        }
         if (!participants(connection, gameSessionId).contains(use.deviceId())) {
             throw new BadRequestException("Jokers belong to players and supporters of this session");
         }

@@ -4687,8 +4687,10 @@ paths:
           content: {}
         '409':
           description: >-
-            The game is not running, the speedhunt changed (stale revision), the participant is out, or another
-            request for the participant is still open
+            The game is not running, the speedhunt changed (stale revision), the participant is out or on a break
+            (speedhunt pings), another request for the participant is still open, no joker is available, or a
+            break cannot start: no break duration is configured, the requester is already on a break, or a
+            speedhunt runs (the same message for every participant, so it never reveals the target)
           content: {}
   /game-requests/{id}/cancel:
     parameters:
@@ -4924,7 +4926,9 @@ paths:
           description: Unknown participant or joker type, or a type not available yet
           content: {}
         '409':
-          description: Revoking more than the unused quantity
+          description: >-
+            Revoking more than the unused quantity, or granting break jokers before a positive
+            game_settings.break_duration_minutes is configured
           content: {}
         '423':
           description: The game controller lease is required, or another Tool instance holds it
@@ -6684,7 +6688,8 @@ components:
           type: [array, 'null']
           description: >-
             Operator joker uses (manual and live hunter relay). A use without an available joker needs
-            overAllocate and is recorded beyond the allocation; reserved uses are never taken.
+            overAllocate and is recorded beyond the allocation; reserved uses are never taken. Only Get hunter
+            positions jokers are used this way; breaks start only through a participant's request.
           items:
             type: object
             required: [deviceId, type]
@@ -6694,6 +6699,7 @@ components:
                 format: int64
               type:
                 type: string
+                enum: [hunterPositions]
               overAllocate:
                 type: [boolean, 'null']
               detail:
@@ -6820,7 +6826,7 @@ components:
         type:
           type: string
           enum: [speedhuntStaticPing, speedhuntLivePing, speedhuntStopLivePing, speedhuntTerminate,
-                 jokerHunterPositions]
+                 jokerHunterPositions, jokerBreak]
         requesterUserId:
           type: [integer, 'null']
           format: int64
@@ -6866,13 +6872,14 @@ components:
       type: object
       required: [type]
       description: >-
-        Hunters' speedhunt requests need targetDeviceId and baseRevision. Jokers (jokerHunterPositions) are always
-        for the requesting player or supporter and reserve one available joker.
+        Hunters' speedhunt requests need targetDeviceId and baseRevision. Jokers (jokerHunterPositions,
+        jokerBreak) are always for the requesting player or supporter and reserve one available joker; a break
+        lasts the duration configured in the session's game settings and is timed by the Tool.
       properties:
         type:
           type: string
           enum: [speedhuntStaticPing, speedhuntLivePing, speedhuntStopLivePing, speedhuntTerminate,
-                 jokerHunterPositions]
+                 jokerHunterPositions, jokerBreak]
         targetDeviceId:
           type: [integer, 'null']
           format: int64
@@ -6935,8 +6942,26 @@ components:
         status:
           type: object
           description: >-
-            speedhunt.active for everyone; participants (with per-participant speedhunt revision) and limits only
-            for hunters and spectators
+            speedhunt.active for everyone; participants (with per-participant speedhunt revision and break) and
+            limits only for hunters and spectators; players and supporters see only their own break
+          properties:
+            break:
+              $ref: '#/components/schemas/GameBreak'
+    GameBreak:
+      type: object
+      required: [active]
+      description: >-
+        A participant's break as published by the Tool. A break past endsAt no longer protects the participant,
+        even before the Tool has published its end; compare with serverTime.
+      properties:
+        active:
+          type: boolean
+        startedAt:
+          type: string
+          format: date-time
+        endsAt:
+          type: string
+          format: date-time
     GameJokerInventory:
       type: object
       required: [deviceId, type, granted, used, reserved, available, overAllocated]

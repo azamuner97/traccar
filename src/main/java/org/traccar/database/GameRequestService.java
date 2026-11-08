@@ -42,6 +42,9 @@ import java.util.TimeZone;
  * keeps at most one open request per participant, and expires requests awaiting approval or execution after
  * two minutes. The controlling Tool decides, claims and completes them; completions commit inside the effects
  * transaction. A change of control invalidates every open request and keeps its history.
+ * <p>
+ * Breaks are timed by the Tool and published in the status. A break request is refused while any speedhunt runs,
+ * with the same message whoever the speedhunt targets; speedhunt pings on a participant on a break are refused.
  */
 @Singleton
 public class GameRequestService {
@@ -61,6 +64,10 @@ public class GameRequestService {
     /** Joker requests players and supporters make for themselves. */
     public static final Set<String> JOKER_TYPES = GameJokerService.REQUEST_TYPES.keySet();
     public static final int EXPIRY_SECONDS = 120;
+    public static final String BREAK_REQUEST = "jokerBreak";
+    /** The same answer for every participant, so it never reveals whom a speedhunt targets. */
+    public static final String BREAK_UNAVAILABLE = "A break cannot start right now; try again later";
+    private static final Set<String> SPEEDHUNT_PINGS = Set.of("speedhuntStaticPing", "speedhuntLivePing");
     private static final int MAX_LIVE_MINUTES = 240;
 
     public record Membership(long gameSessionId, long userId, String role, Long assignedDeviceId) { }
@@ -197,6 +204,36 @@ public class GameRequestService {
         return null;
     }
 
+    /** Whether any participant's speedhunt runs (a run or a live ping), as published by the Tool. */
+    static boolean speedhuntRunning(JsonNode status) {
+        if (status == null || !status.path("participants").isArray()) {
+            return false;
+        }
+        for (JsonNode item : status.get("participants")) {
+            JsonNode speedhunt = item.path("speedhunt");
+            if (speedhunt.path("running").asBoolean(false) || speedhunt.path("live").asBoolean(false)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Whether the published status shows the participant on a break. The Tool ends breaks at their deadline; a
+     * break past its deadline no longer protects anyone, even before the Tool has published its end.
+     */
+    static boolean onBreak(JsonNode participant, Instant now) {
+        JsonNode pause = participant == null ? null : participant.path("break");
+        if (pause == null || !pause.path("active").asBoolean(false)) {
+            return false;
+        }
+        try {
+            return !pause.hasNonNull("endsAt") || Instant.parse(pause.get("endsAt").asText()).isAfter(now);
+        } catch (java.time.format.DateTimeParseException error) {
+            return true;
+        }
+    }
+
     /** Whether the controller lease is active and executes the given session. */
     private boolean executing(Connection connection, long gameSessionId) throws SQLException {
         try (var query = connection.prepareStatement(
@@ -244,8 +281,8 @@ public class GameRequestService {
     }
 
     /**
-     * The status a member may see. Hunters and spectators see the named speedhunt state; players and
-     * supporters only learn whether any speedhunt runs, never whom it targets.
+     * The status a member may see. Hunters and spectators see the named speedhunt state and who is on a break;
+     * players and supporters only learn whether any speedhunt runs, never whom it targets, and their own break.
      */
     public Status status(Membership member) throws Exception {
         return transaction(connection -> {
@@ -263,23 +300,21 @@ public class GameRequestService {
             }
             boolean active = executing(connection, member.gameSessionId());
             return new Status(member.gameSessionId(), member.role(), active, now().toString(), revision,
-                    filter(document, member.role(), active));
+                    filter(document, member.role(), active, member.assignedDeviceId()));
         });
     }
 
-    static JsonNode filter(JsonNode document, String role, boolean active) {
+    static JsonNode filter(JsonNode document, String role, boolean active, Long deviceId) {
         ObjectNode result = JsonNodeFactory.instance.objectNode();
-        boolean running = false;
-        if (document != null && document.path("participants").isArray()) {
-            for (JsonNode item : document.get("participants")) {
-                JsonNode speedhunt = item.path("speedhunt");
-                running |= speedhunt.path("running").asBoolean(false) || speedhunt.path("live").asBoolean(false);
-            }
-        }
-        result.putObject("speedhunt").put("active", active && running);
+        result.putObject("speedhunt").put("active", active && speedhuntRunning(document));
         if (("hunter".equals(role) || "spectator".equals(role)) && document != null) {
             result.set("participants", document.path("participants").deepCopy());
             result.set("limits", document.path("limits").deepCopy());
+        } else if (("player".equals(role) || "supporter".equals(role)) && deviceId != null) {
+            JsonNode own = participant(document, deviceId);
+            if (own != null && own.path("break").isObject()) {
+                result.set("break", own.get("break").deepCopy());
+            }
         }
         return result;
     }
@@ -387,8 +422,8 @@ public class GameRequestService {
                     targetLabel = rows.getString(1);
                 }
             }
-            JsonNode target = participant(statusDocument(connection, member.gameSessionId()),
-                    accepted.targetDeviceId());
+            JsonNode published = statusDocument(connection, member.gameSessionId());
+            JsonNode target = participant(published, accepted.targetDeviceId());
             if (target == null) {
                 throw conflict("The game status is not available yet; try again shortly");
             }
@@ -397,6 +432,20 @@ public class GameRequestService {
             }
             if (!joker && target.path("speedhunt").path("revision").asLong(-1) != accepted.baseRevision()) {
                 throw conflict("The speedhunt changed meanwhile; refresh and try again");
+            }
+            if (SPEEDHUNT_PINGS.contains(accepted.type()) && onBreak(target, now())) {
+                throw conflict("This participant is on a break");
+            }
+            if (BREAK_REQUEST.equals(accepted.type())) {
+                if (GameJokerService.breakMinutes(connection, member.gameSessionId()) == null) {
+                    throw conflict("Breaks are not set up for this game");
+                }
+                if (onBreak(target, now())) {
+                    throw conflict("You are already on a break");
+                }
+                if (speedhuntRunning(published)) {
+                    throw conflict(BREAK_UNAVAILABLE);
+                }
             }
             if (target.hasNonNull("name")) {
                 targetLabel = target.get("name").asText();

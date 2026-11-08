@@ -7,12 +7,15 @@ Docker profile with ``TRACCAR_GAME_SESSIONS_CREDENTIAL_KEY`` set in ``.env``.
 """
 
 import argparse
+import base64
 import hashlib
 import json
 import secrets
 import sys
 import tempfile
 import time
+import urllib.error
+import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from uuid import uuid4
@@ -338,7 +341,7 @@ def audit_jokers(session_id, tracker_id, mirror_id, hunter, player):
     change = f"/game-sessions/{session_id}/jokers/change"
     grant = {"deviceId": tracker_id, "type": "hunterPositions", "quantity": 1, "reason": "audit"}
     api.request("POST", change, grant, epoch=False, expected=423)
-    api.request("POST", change, {**grant, "type": "break"}, expected=400)
+    api.request("POST", change, {**grant, "type": "fakeTimetable"}, expected=400)
     api.request("POST", change, grant)
     api.request("GET", "/game-jokers", credentials=hunter, expected=403)
 
@@ -388,6 +391,159 @@ def audit_jokers(session_id, tracker_id, mirror_id, hunter, player):
     assert inventory()["reserved"] == 0
     kinds = [entry["kind"] for entry in api.request("GET", f"/game-sessions/{session_id}/jokers/ledger")]
     assert kinds[:7] == ["release", "reserve", "grant", "overuse", "use", "reserve", "grant"], kinds
+    api.request("POST", change, {**grant, "quantity": -1})
+
+
+BREAK_UNAVAILABLE = "A break cannot start right now; try again later"
+
+
+def refusal(path, body, credentials):
+    """The message of a 409 answer: the first line of the server's error text."""
+    message = urllib.request.Request(api.BASE + "/api" + path, data=json.dumps(body).encode(), method="POST",
+                                     headers={"Content-Type": "application/json", "Authorization": "Basic "
+                                              + base64.b64encode(":".join(credentials).encode()).decode()})
+    try:
+        urllib.request.urlopen(message, timeout=15)
+    except urllib.error.HTTPError as error:
+        assert error.code == 409, f"POST {path} returned {error.code}, expected 409"
+        return error.read().decode().splitlines()[0].split(": ", 1)[-1].strip()
+    raise AssertionError(f"POST {path} was accepted, expected 409")
+
+
+def run_break_through_tool(tool_source, session_id, tracker_id, settings_minutes):
+    """The Tool's request processor and break service approve and start the break."""
+    sys.path.insert(0, tool_source)
+    import requests
+    from traccar_game_manager.application.game_actions.breaks import BreakService
+    from traccar_game_manager.application.game_requests.processor import (
+        GameRequestProcessor, RequestCheck, RequestResult, SpeedhuntStatusTracker)
+    from traccar_game_manager.domain.game.settings import normalize_game_settings
+    from traccar_game_manager.infrastructure.traccar.effects import SessionEffects
+    from traccar_game_manager.infrastructure.traccar.game_requests import GameRequestGateway
+    from traccar_game_manager.infrastructure.traccar.game_sessions import GameSessionApi
+
+    class Transport:
+        get, post, put, delete = (staticmethod(requests.get), staticmethod(requests.post),
+                                  staticmethod(requests.put), staticmethod(requests.delete))
+
+    class Clock:
+        def now(self):
+            return datetime.now(timezone.utc)
+
+    client = GameSessionApi(api.BASE, api.EMAIL, api.PASSWORD, transport=Transport(),
+                            epoch_provider=lambda: api.CONTROLLER["epoch"])
+    gateway = GameRequestGateway(client, session_id, SessionEffects(client, session_id))
+    settings = normalize_game_settings({"break_duration_minutes": settings_minutes})
+    breaks = BreakService({}, clock=Clock())
+    tracker = SpeedhuntStatusTracker()
+    tracker.seed(gateway.published_status())
+
+    def status():
+        participant = {"deviceId": tracker_id, "name": "Anna", "role": "player", "caught": False,
+                       "speedhunt": {"running": False, "pings": 1, "live": False},
+                       "break": breaks.published(tracker_id)}
+        return tracker.build([participant]), tracker
+
+    class Actions:
+        def participant(self, device_id):
+            return {"id": device_id, "name": "Anna", "caught": False}
+
+        def check(self, kind, item, parameters):
+            return RequestCheck(error=breaks.activation_error(item["id"], settings=settings,
+                                                              speedhunt_running=False))
+
+        def execute(self, kind, item, parameters):
+            breaks.start(item["id"], settings=settings)
+            return RequestResult(True, "Your break runs for 15 min.")
+
+    processor = GameRequestProcessor(gateway, Actions(), settings=lambda: settings, status=status,
+                                     log=lambda _message: None)
+    processor.sync(gateway.list_open())
+    awaiting = processor.awaiting()
+    assert [item["type"] for item in awaiting] == ["jokerBreak"], awaiting
+    processor.approve(awaiting[0]["id"])
+    return breaks.published(tracker_id)
+
+
+def audit_breaks(session_id, tracker_id, hunter, player, tool_source=None):
+    """Break jokers: a configured duration, one refusal for everyone during speedhunts, the published break."""
+    change = f"/game-sessions/{session_id}/jokers/change"
+    effects = f"/game-sessions/{session_id}/effects"
+    grant = {"deviceId": tracker_id, "type": "break", "quantity": 1, "reason": "audit"}
+    api.request("POST", change, grant, expected=409)  # no break duration configured yet
+    stored = api.request("GET", f"/game-sessions/{session_id}")
+    api.request("PUT", f"/game-sessions/{session_id}/config", {
+        "expectedRevision": stored["configRevision"], "document": {"game_settings": {"break_duration_minutes": 15}}})
+    api.request("POST", change, {**grant, "quantity": 2})
+
+    def breaks():
+        own = api.request("GET", "/game-jokers", credentials=player)
+        return next(item for item in own["inventories"] if item["type"] == "break")
+
+    def publish(running=None, pause=None, revision=2):
+        participants = [{"deviceId": tracker_id, "name": "Anna", "role": "player", "caught": False,
+                         "speedhunt": {"revision": revision, "running": running == "own", "pings": 1,
+                                       "live": False},
+                         "break": pause or {"active": False}}]
+        if running == "other":
+            participants.append({"deviceId": tracker_id + 1_000_000, "name": "Other", "role": "supporter",
+                                 "caught": False, "speedhunt": {"revision": 1, "running": False, "live": True},
+                                 "break": {"active": False}})
+        api.request("POST", effects, {"deliveryId": "audit" + uuid4().hex, "status": {
+            "version": 1, "limits": {}, "participants": participants}})
+
+    pause = {"type": "jokerBreak"}
+    # While any speedhunt runs, the answer is the same whether it targets the requester or someone else.
+    publish(running="own")
+    on_self = refusal("/game-requests", pause, player)
+    publish(running="other")
+    on_other = refusal("/game-requests", pause, player)
+    assert on_self == on_other == BREAK_UNAVAILABLE, (on_self, on_other)
+    assert breaks()["reserved"] == 0, "a refused break reserves nothing"
+
+    publish()
+    request = api.request("POST", "/game-requests", pause, credentials=player)
+    assert request["targetDeviceId"] == tracker_id and request["type"] == "jokerBreak", request
+    assert breaks()["reserved"] == 1
+    if tool_source:
+        published = run_break_through_tool(tool_source, session_id, tracker_id, 15)
+        assert published["active"], published
+    else:
+        api.request("POST", f"/game-sessions/{session_id}/requests/{request['id']}/claim", {})
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+        published = {"active": True, "startedAt": now.isoformat().replace("+00:00", "Z"),
+                     "endsAt": (now + timedelta(minutes=15)).isoformat().replace("+00:00", "Z")}
+        api.request("POST", effects, {
+            "deliveryId": "audit" + uuid4().hex,
+            "requests": [{"id": request["id"], "status": "succeeded", "message": "Your break runs for 15 min."}],
+            "status": {"version": 1, "limits": {}, "participants": [
+                {"deviceId": tracker_id, "name": "Anna", "role": "player", "caught": False,
+                 "speedhunt": {"revision": 2, "running": False, "pings": 1, "live": False},
+                 "break": published}]}})
+    done = next(item for item in api.request("GET", "/game-requests", credentials=player)
+                if item["id"] == request["id"])
+    assert done["status"] == "succeeded", done
+    assert breaks()["used"] == 1 and breaks()["reserved"] == 0 and breaks()["available"] == 1, breaks()
+
+    # The participant sees their own break and its deadline; hunters see who is on a break.
+    own = api.request("GET", "/game-status", credentials=player)["status"]
+    assert own["break"]["active"] and own["break"]["endsAt"] == published["endsAt"], own
+    assert "participants" not in own
+    hunter_view = api.request("GET", "/game-status", credentials=hunter)["status"]["participants"][0]
+    assert hunter_view["break"]["active"], hunter_view
+    revision = hunter_view["speedhunt"]["revision"]
+    ping = {"type": "speedhuntStaticPing", "targetDeviceId": tracker_id, "baseRevision": revision}
+    assert refusal("/game-requests", ping, hunter) == "This participant is on a break"
+    assert refusal("/game-requests", pause, player) == "You are already on a break"
+
+    # The Tool publishes the end of the break: hunters may act on the participant again.
+    publish(revision=revision)
+    assert not api.request("GET", "/game-status", credentials=player)["status"]["break"]["active"]
+    resumed = api.request("POST", "/game-requests", ping, credentials=hunter)
+    api.request("POST", f"/game-requests/{resumed['id']}/cancel", {}, credentials=hunter)
+    kinds = [entry["kind"] for entry in api.request("GET", f"/game-sessions/{session_id}/jokers/ledger")
+             if entry["type"] == "break"]
+    assert kinds[:3] == ["use", "reserve", "grant"], kinds
     api.request("POST", change, {**grant, "quantity": -1})
 
 
@@ -465,6 +621,7 @@ def audit_requests(tool_source=None):
         assert api.request("GET", f"/game-sessions/{session_id}/requests?state=all")[0]["detail"] == "operator only"
 
         audit_jokers(session_id, tracker["id"], mirror["id"], hunter, player)
+        audit_breaks(session_id, tracker["id"], hunter, player, tool_source)
 
         revision = 2
         if tool_source:
@@ -511,7 +668,8 @@ def main(tool_source=None):
               "deletion, cascading deletion of saved data, controller lease with fenced game and standard "
               "endpoints, push fencing, drift reporting, takeover, expiry, and idempotent effects with "
               "latest-position and online status, hunters' requests with role-filtered status, stale "
-              "revisions, approval, claim, outcome, cancellation and invalidation on takeover"
+              "revisions, approval, claim, outcome, cancellation and invalidation on takeover, break jokers "
+              "with a configured duration, one refusal for everyone during speedhunts and the published break"
               + (", plus the Tool's repository round trip." if tool_source else "."))
     finally:
         api.delete_game_sessions()

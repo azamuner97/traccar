@@ -384,8 +384,9 @@ its history.
 The Tool publishes a status document with each effects delivery that changes
 it (`status`, stored in `tc_game_session_status`). `GET /api/game-status`
 returns the member's role-filtered view: hunters and spectators see each
-player's and supporter's speedhunt state with its revision; players and
-supporters only learn whether a speedhunt runs, never whom it targets.
+player's and supporter's speedhunt state with its revision and break; players
+and supporters only learn whether a speedhunt runs, never whom it targets, and
+their own break.
 Members' and administrators' WebSocket clients receive
 `{"invalidate": ["game-requests"]}` and `["game-status"]` when these change.
 
@@ -396,9 +397,9 @@ implementation plan stage 4), keyed by their real tracker:
 `tc_game_jokers` keeps the granted quantity and the uses (including uses beyond
 the allocation), `tc_game_joker_reservations` the uses held by open requests,
 and `tc_game_joker_ledger` every grant, revoke, reservation, release and use.
-New sessions start without jokers. In this version only "Get hunter positions"
-(`hunterPositions`) can be granted and used; the break and fake-ping jokers
-follow.
+New sessions start without jokers. In this version "Get hunter positions"
+(`hunterPositions`) and break (`break`) jokers can be granted and used; the
+fake-ping jokers follow.
 
 - Operators grant or revoke unused jokers with the fenced
   `POST /api/game-sessions/{id}/jokers/change`, and read the overview and
@@ -413,6 +414,35 @@ follow.
   below zero.
 - `caughtParticipants` in an effects delivery ends the participants' open
   requests and releases their reservations.
+
+### Breaks
+
+A break protects a player or supporter from the hunters for the duration set
+in the session's game settings (`game_settings.break_duration_minutes` in the
+stored configuration). Break jokers can only be granted (409 otherwise) while a
+positive duration is configured; revoking unused ones is always possible.
+Breaks start only through a participant's `jokerBreak` request: operator
+effects deliveries use only "Get hunter positions" jokers.
+
+- The server refuses a `jokerBreak` request (409) when no duration is
+  configured, when the requester is already on a break, and while any
+  speedhunt runs according to the published status. The last refusal has the
+  same message for every participant, so it never reveals whom a speedhunt
+  targets, and reserves nothing.
+- The Tool times breaks. It checks the request again, starts the break when it
+  runs the request, and publishes it with the outcome; the succeeded outcome
+  consumes the reserved joker. The break ends at its deadline (the Tool keeps
+  active breaks in its runtime, so a restart keeps the deadline) or at once
+  when the participant is caught.
+- The published status gives each participant `break` (`active`, `startedAt`,
+  `endsAt`). Hunters and spectators see every participant's break; a player
+  or supporter sees only their own (`status.break` of `GET /api/game-status`).
+  A break past `endsAt` no longer protects anyone, even before the Tool has
+  published its end.
+- Hunters' static and live ping requests on a participant on a break are
+  refused (409). During the break the Tool withholds the hunter destinations
+  from every position of that participant and keeps them out of proximity
+  circles and anonymous proximity notifications.
 
 Hunter relay snapshots carry the hunter position's own fix time, so a mirror
 shows its age; an older fix is stored without becoming latest.
