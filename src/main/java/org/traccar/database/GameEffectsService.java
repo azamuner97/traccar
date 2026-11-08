@@ -62,18 +62,27 @@ public class GameEffectsService {
                            NotificationInput notifications, List<PushInput> pushes,
                            List<GameSessionService.LogInput> logs,
                            List<GameRequestService.Completion> requests, JsonNode status,
-                           List<GameJokerService.Use> jokers, List<Long> caughtParticipants) {
+                           List<GameJokerService.Use> jokers, List<Long> caughtParticipants,
+                           List<GameJokerService.FakeSettlement> fakes) {
         public Delivery(String deliveryId, List<PositionInput> positions, RuntimeInput runtime,
                         NotificationInput notifications, List<PushInput> pushes,
                         List<GameSessionService.LogInput> logs) {
-            this(deliveryId, positions, runtime, notifications, pushes, logs, null, null, null, null);
+            this(deliveryId, positions, runtime, notifications, pushes, logs, null, null, null, null, null);
         }
 
         public Delivery(String deliveryId, List<PositionInput> positions, RuntimeInput runtime,
                         NotificationInput notifications, List<PushInput> pushes,
                         List<GameSessionService.LogInput> logs, List<GameRequestService.Completion> requests,
                         JsonNode status) {
-            this(deliveryId, positions, runtime, notifications, pushes, logs, requests, status, null, null);
+            this(deliveryId, positions, runtime, notifications, pushes, logs, requests, status, null, null, null);
+        }
+
+        public Delivery(String deliveryId, List<PositionInput> positions, RuntimeInput runtime,
+                        NotificationInput notifications, List<PushInput> pushes,
+                        List<GameSessionService.LogInput> logs, List<GameRequestService.Completion> requests,
+                        JsonNode status, List<GameJokerService.Use> jokers, List<Long> caughtParticipants) {
+            this(deliveryId, positions, runtime, notifications, pushes, logs, requests, status, jokers,
+                    caughtParticipants, null);
         }
     }
 
@@ -84,13 +93,17 @@ public class GameEffectsService {
     public record Outcome(String deliveryId, boolean replayed, long epoch, List<PositionOutcome> positions,
                           Long runtimeRevision, String generation, List<AlertOutcome> alerts,
                           List<PushOutcome> pushes, List<RequestOutcome> requests, Long statusRevision,
-                          List<GameJokerService.UseOutcome> jokers) { }
+                          List<GameJokerService.UseOutcome> jokers, List<GameJokerService.FakeOutcome> fakes) { }
 
     /** The committed outcome plus what the caller publishes after commit. */
+    /**
+     * The committed outcome plus what the caller publishes after commit. {@code jokerUsers} are the owners whose
+     * jokers changed: only they (and administrators) are told, so nobody else learns when a joker took effect.
+     */
     public record Applied(Outcome outcome, List<Position> latest, Set<Long> devices, Long notificationDevice,
                           Set<Long> notifiedRecipients, boolean sessionNotified, List<Long> queuedPushes,
                           boolean runtimeChanged, boolean requestsChanged, boolean statusChanged,
-                          boolean jokersChanged) { }
+                          Set<Long> jokerUsers) { }
 
     private final DataSource dataSource;
     private final ObjectMapper objectMapper;
@@ -119,7 +132,8 @@ public class GameEffectsService {
             throw new BadRequestException("Invalid delivery ID");
         }
         if (delivery.positions() != null && delivery.positions().size() > MAX_POSITIONS
-                || delivery.pushes() != null && delivery.pushes().size() > MAX_PUSHES) {
+                || delivery.pushes() != null && delivery.pushes().size() > MAX_PUSHES
+                || delivery.fakes() != null && delivery.fakes().size() > MAX_POSITIONS) {
             throw new BadRequestException("Delivery is too large");
         }
         List<GameNotificationService.Alert> alerts = new ArrayList<>();
@@ -300,7 +314,8 @@ public class GameEffectsService {
         return new Outcome(outcome.deliveryId(), true, outcome.epoch(), outcome.positions(),
                 outcome.runtimeRevision(), outcome.generation(), outcome.alerts(), pushes,
                 outcome.requests() == null ? List.of() : outcome.requests(), outcome.statusRevision(),
-                outcome.jokers() == null ? List.of() : outcome.jokers());
+                outcome.jokers() == null ? List.of() : outcome.jokers(),
+                outcome.fakes() == null ? List.of() : outcome.fakes());
     }
 
     private static boolean member(Connection connection, long gameSessionId, long userId) throws SQLException {
@@ -365,7 +380,7 @@ public class GameEffectsService {
                         throw new WebApplicationException("Delivery ID was already used for different effects", 409);
                     }
                     return new Applied(stored(connection, rows.getLong("id"), rows.getString("outcome")),
-                            List.of(), Set.of(), null, Set.of(), false, List.of(), false, false, false, false);
+                            List.of(), Set.of(), null, Set.of(), false, List.of(), false, false, false, Set.of());
                 }
             }
         }
@@ -498,22 +513,37 @@ public class GameEffectsService {
         for (var use : delivery.jokers() == null ? List.<GameJokerService.Use>of() : delivery.jokers()) {
             jokerOutcomes.add(GameJokerService.use(connection, gameSessionId, use, "Operator"));
         }
+        // Fakes delivered with this delivery's positions are used together with them; skipped ones released.
+        List<GameJokerService.FakeOutcome> fakeOutcomes = delivery.fakes() == null || delivery.fakes().isEmpty()
+                ? List.of() : GameJokerService.settleFakes(connection, gameSessionId, delivery.fakes());
         boolean caught = delivery.caughtParticipants() != null && !delivery.caughtParticipants().isEmpty();
         if (caught) {
             GameJokerService.participantsCaught(connection, gameSessionId, delivery.caughtParticipants(), now);
         }
 
+        // Trackers whose jokers changed with this delivery; their owners are told after commit.
+        Set<Long> jokerDevices = new LinkedHashSet<>();
+        jokerOutcomes.forEach(item -> jokerDevices.add(item.deviceId()));
+        if (caught) {
+            jokerDevices.addAll(delivery.caughtParticipants());
+        }
+        jokerDevices.addAll(GameJokerService.reservationDevices(connection, gameSessionId,
+                fakeOutcomes.stream().filter(item -> !"skipped".equals(item.status()))
+                        .map(GameJokerService.FakeOutcome::reservationId).toList()));
         List<RequestOutcome> requestOutcomes = new ArrayList<>();
         if (delivery.requests() != null && !delivery.requests().isEmpty()) {
             for (var request : requests.complete(connection, gameSessionId, delivery.requests())) {
                 requestOutcomes.add(new RequestOutcome(request.id(), request.status()));
+                if (GameRequestService.JOKER_TYPES.contains(request.type()) && request.targetDeviceId() != null) {
+                    jokerDevices.add(request.targetDeviceId());
+                }
             }
         }
         Long statusRevision = delivery.status() == null ? null
                 : requests.putStatus(connection, gameSessionId, delivery.status());
 
         Outcome outcome = new Outcome(delivery.deliveryId(), false, epoch, positionOutcomes, runtimeRevision,
-                generation, alertOutcomes, pushOutcomes, requestOutcomes, statusRevision, jokerOutcomes);
+                generation, alertOutcomes, pushOutcomes, requestOutcomes, statusRevision, jokerOutcomes, fakeOutcomes);
         try (var query = connection.prepareStatement("UPDATE tc_game_deliveries SET outcome = ? WHERE id = ?")) {
             query.setString(1, objectMapper.writeValueAsString(outcome));
             query.setLong(2, rowId);
@@ -521,6 +551,6 @@ public class GameEffectsService {
         }
         return new Applied(outcome, latest, devices, notificationDevice, notifiedRecipients, sessionNotified,
                 queued, runtimeRevision != null, !requestOutcomes.isEmpty() || caught, statusRevision != null,
-                !jokerOutcomes.isEmpty() || caught || !requestOutcomes.isEmpty());
+                GameJokerService.ownerUsers(connection, gameSessionId, jokerDevices));
     }
 }

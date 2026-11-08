@@ -43,6 +43,12 @@ public interface BroadcastInterface {
      */
     default void updateGameMembers(boolean local, Long gameSessionId, String resource) {}
 
+    /**
+     * Invalidates a game resource for administrators and the listed users only, e.g. "game-jokers" for the owners
+     * whose jokers changed, so nobody else learns when a joker (a fake ping, for example) took effect.
+     */
+    default void updateGameUsers(boolean local, java.util.Set<Long> userIds, String resource) {}
+
     default <T extends BaseModel> void invalidateObject(
             boolean local, Class<T> clazz, long id, ObjectOperation operation) throws Exception {}
 

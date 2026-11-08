@@ -4713,9 +4713,11 @@ paths:
         '409':
           description: >-
             The game is not running, the speedhunt changed (stale revision), the participant is out or on a break
-            (speedhunt pings), another request for the participant is still open, no joker is available, or a
-            break cannot start: no break duration is configured, the requester is already on a break, or a
-            speedhunt runs (the same message for every participant, so it never reveals the target)
+            (speedhunt pings), another request for the participant is still open, no joker is available, a
+            break cannot start (no break duration is configured, the requester is already on a break, or a
+            speedhunt runs: the same message for every participant, so it never reveals the target), or a
+            timetable fake cannot be planned (the ping does not reach hunters, is too close, falls inside the
+            requester's break, or already has a fake)
           content: {}
   /game-requests/{id}/cancel:
     parameters:
@@ -4873,7 +4875,9 @@ paths:
   /game-jokers:
     get:
       operationId: getGameJokers
-      summary: The signed-in player's or supporter's own jokers and open reservations
+      summary: >-
+        The signed-in player's or supporter's own jokers, open reservations and armed fake plans, and the
+        timetable pings a fake can replace
       tags:
         - Game Requests
       responses:
@@ -4882,9 +4886,40 @@ paths:
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/GameJokerOverview'
+                $ref: '#/components/schemas/GameJokerOwn'
         '403':
           description: Only players and supporters hold jokers
+          content: {}
+  /game-jokers/reservations/{id}/cancel:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+    post:
+      operationId: cancelGameJokerFake
+      summary: >-
+        Cancel the member's own armed fake; its joker returns. A timetable fake can be cancelled until 60
+        seconds before its ping.
+      tags:
+        - Game Requests
+      responses:
+        '200':
+          description: The released reservation
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GameJokerReservation'
+        '403':
+          description: Not the owner, or not a player or supporter
+          content: {}
+        '404':
+          description: Unknown reservation
+          content: {}
+        '409':
+          description: The fake is no longer armed, or its ping is too close
           content: {}
   /game-sessions/{id}/jokers:
     parameters:
@@ -6733,10 +6768,29 @@ components:
                 type: [string, 'null']
         caughtParticipants:
           type: [array, 'null']
-          description: Real trackers of newly caught participants; their open requests end and reservations are released
+          description: >-
+            Real trackers of newly caught participants; their open requests end and their reservations, armed
+            fakes included, are released
           items:
             type: integer
             format: int64
+        fakes:
+          type: [array, 'null']
+          description: >-
+            Armed timetable fakes: used when this delivery's positions give the hunters the fake, or released
+            when their ping was skipped or failed. A fake that is no longer armed is skipped.
+          items:
+            type: object
+            required: [reservationId, outcome]
+            properties:
+              reservationId:
+                type: integer
+                format: int64
+              outcome:
+                type: string
+                enum: [used, released]
+              detail:
+                type: [string, 'null']
         logs:
           type: [array, 'null']
           items:
@@ -6753,7 +6807,7 @@ components:
     GameEffectsOutcome:
       type: object
       required: [deliveryId, replayed, epoch, positions, runtimeRevision, generation, alerts, pushes, requests,
-                 statusRevision, jokers]
+                 statusRevision, jokers, fakes]
       properties:
         deliveryId:
           type: string
@@ -6838,6 +6892,18 @@ components:
                 type: string
               overAllocated:
                 type: boolean
+        fakes:
+          type: array
+          items:
+            type: object
+            required: [reservationId, status]
+            properties:
+              reservationId:
+                type: integer
+                format: int64
+              status:
+                type: string
+                enum: [consumed, released, skipped]
     GameRequest:
       type: object
       required: [id, gameSessionId, type, requesterUserId, requesterLabel, requesterRole, targetDeviceId,
@@ -6853,7 +6919,7 @@ components:
         type:
           type: string
           enum: [speedhuntStaticPing, speedhuntLivePing, speedhuntStopLivePing, speedhuntTerminate,
-                 jokerHunterPositions, jokerBreak]
+                 jokerHunterPositions, jokerBreak, jokerFakeTimetable]
         requesterUserId:
           type: [integer, 'null']
           format: int64
@@ -6900,13 +6966,16 @@ components:
       required: [type]
       description: >-
         Hunters' speedhunt requests need targetDeviceId and baseRevision. Jokers (jokerHunterPositions,
-        jokerBreak) are always for the requesting player or supporter and reserve one available joker; a break
-        lasts the duration configured in the session's game settings and is timed by the Tool.
+        jokerBreak, jokerFakeTimetable) are always for the requesting player or supporter and reserve one
+        available joker; a break lasts the duration configured in the session's game settings and is timed by
+        the Tool. A timetable fake names one of the requester's own upcoming timetable pings (entryId from
+        /game-jokers timetableEntries) and a coordinate; when the request succeeds the fake is armed (still
+        reserved) and its joker is used when the hunters receive the fake at that ping.
       properties:
         type:
           type: string
           enum: [speedhuntStaticPing, speedhuntLivePing, speedhuntStopLivePing, speedhuntTerminate,
-                 jokerHunterPositions, jokerBreak]
+                 jokerHunterPositions, jokerBreak, jokerFakeTimetable]
         targetDeviceId:
           type: [integer, 'null']
           format: int64
@@ -6922,6 +6991,20 @@ components:
               type: number
               exclusiveMinimum: 0
               maximum: 240
+            entryId:
+              type: integer
+              format: int64
+              description: jokerFakeTimetable only
+            latitude:
+              type: number
+              minimum: -90
+              maximum: 90
+              description: jokerFakeTimetable only
+            longitude:
+              type: number
+              minimum: -180
+              maximum: 180
+              description: jokerFakeTimetable only
     GameRequestDecision:
       type: object
       required: [decision]
@@ -6970,10 +7053,16 @@ components:
           type: object
           description: >-
             speedhunt.active for everyone; participants (with per-participant speedhunt revision and break) and
-            limits only for hunters and spectators; players and supporters see only their own break
+            limits only for hunters and spectators; players and supporters see only their own break and their
+            own armed fake plans, which nobody else ever sees
           properties:
             break:
               $ref: '#/components/schemas/GameBreak'
+            fakes:
+              type: array
+              description: The member's own armed fakes (players and supporters only)
+              items:
+                $ref: '#/components/schemas/GameJokerFakePlan'
     GameBreak:
       type: object
       required: [active]
@@ -7016,7 +7105,10 @@ components:
           description: Uses beyond the granted quantity
     GameJokerReservation:
       type: object
-      required: [id, deviceId, type, requestId, status, createdAt]
+      required: [id, deviceId, type, requestId, status, createdAt, armed, plan]
+      description: >-
+        A use held by an open request, or an armed fake (no request, armed true). Plans are visible only to
+        their owner and the operators.
       properties:
         id:
           type: integer
@@ -7032,8 +7124,67 @@ components:
         status:
           type: string
         createdAt:
+          type: [string, 'null']
+          format: date-time
+        armed:
+          type: boolean
+        plan:
+          $ref: '#/components/schemas/GameJokerFakePlan'
+    GameJokerFakePlan:
+      type: object
+      description: A fake's plan; empty for other jokers
+      properties:
+        reservationId:
+          type: integer
+          format: int64
+        type:
+          type: string
+        entryId:
+          type: integer
+          format: int64
+          description: The timetable entry a timetable fake replaces for the hunters
+        scheduledAt:
           type: string
           format: date-time
+        latitude:
+          type: number
+        longitude:
+          type: number
+        requestId:
+          type: integer
+          format: int64
+        armedAt:
+          type: string
+          format: date-time
+    GameJokerOwn:
+      type: object
+      required: [inventories, reservations, timetableEntries]
+      properties:
+        inventories:
+          type: array
+          items:
+            $ref: '#/components/schemas/GameJokerInventory'
+        reservations:
+          type: array
+          items:
+            $ref: '#/components/schemas/GameJokerReservation'
+        timetableEntries:
+          type: array
+          description: >-
+            The member's own active timetable pings at least 60 seconds ahead that reach the hunters (blank or a
+            target code with hunters); taken when a fake is already requested or armed for it
+          items:
+            type: object
+            required: [entryId, scheduledAt, taken]
+            properties:
+              entryId:
+                type: integer
+                format: int64
+              scheduledAt:
+                type: string
+                format: date-time
+              taken:
+                type: boolean
     GameJokerOverview:
       type: object
       required: [inventories, reservations]
@@ -7060,7 +7211,7 @@ components:
           type: string
         kind:
           type: string
-          enum: [grant, revoke, reserve, release, use, overuse]
+          enum: [grant, revoke, reserve, arm, release, use, overuse]
         quantity:
           type: integer
         requestId:

@@ -762,6 +762,8 @@ public class GameSessionService {
                     }
                 }
             }
+            // Fakes armed on a ping that disappeared or no longer reaches the hunters are released.
+            GameJokerService.timetableChanged(connection, id);
             touch(connection, id);
             return new Published(revision, structureChanged, activeEntries(connection, id));
         });

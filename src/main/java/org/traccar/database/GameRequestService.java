@@ -65,6 +65,7 @@ public class GameRequestService {
     public static final Set<String> JOKER_TYPES = GameJokerService.REQUEST_TYPES.keySet();
     public static final int EXPIRY_SECONDS = 120;
     public static final String BREAK_REQUEST = "jokerBreak";
+    public static final String FAKE_TIMETABLE_REQUEST = "jokerFakeTimetable";
     /** The same answer for every participant, so it never reveals whom a speedhunt targets. */
     public static final String BREAK_UNAVAILABLE = "A break cannot start right now; try again later";
     private static final Set<String> SPEEDHUNT_PINGS = Set.of("speedhuntStaticPing", "speedhuntLivePing");
@@ -299,8 +300,14 @@ public class GameRequestService {
                 }
             }
             boolean active = executing(connection, member.gameSessionId());
-            return new Status(member.gameSessionId(), member.role(), active, now().toString(), revision,
-                    filter(document, member.role(), active, member.assignedDeviceId()));
+            JsonNode filtered = filter(document, member.role(), active, member.assignedDeviceId());
+            if (("player".equals(member.role()) || "supporter".equals(member.role()))
+                    && member.assignedDeviceId() != null) {
+                // Owners see their own armed fake plans; nobody else ever does.
+                ((ObjectNode) filtered).set("fakes",
+                        GameJokerService.ownFakes(connection, member.gameSessionId(), member.assignedDeviceId()));
+            }
+            return new Status(member.gameSessionId(), member.role(), active, now().toString(), revision, filtered);
         });
     }
 
@@ -360,8 +367,28 @@ public class GameRequestService {
 
     // --- member requests ----------------------------------------------------------------------------------
 
-    private JsonNode parameters(Submission submission) {
+    private static double coordinate(JsonNode input, String name, double limit) {
+        JsonNode value = input == null ? null : input.get(name);
+        if (value == null || !value.isNumber() || !Double.isFinite(value.asDouble())
+                || Math.abs(value.asDouble()) > limit) {
+            throw new BadRequestException("A fake needs a valid " + name);
+        }
+        return value.asDouble();
+    }
+
+    private ObjectNode parameters(Submission submission) {
         ObjectNode result = JsonNodeFactory.instance.objectNode();
+        if (FAKE_TIMETABLE_REQUEST.equals(submission.type())) {
+            JsonNode input = submission.parameters();
+            JsonNode entry = input == null ? null : input.get("entryId");
+            if (entry == null || !entry.canConvertToLong() || entry.asLong() <= 0) {
+                throw new BadRequestException("Choose one of your upcoming timetable pings");
+            }
+            result.put("entryId", entry.asLong());
+            result.put("latitude", coordinate(input, "latitude", 90));
+            result.put("longitude", coordinate(input, "longitude", 180));
+            return result;
+        }
         if ("speedhuntLivePing".equals(submission.type()) && submission.parameters() != null
                 && submission.parameters().has("durationMinutes")
                 && !submission.parameters().get("durationMinutes").isNull()) {
@@ -400,7 +427,7 @@ public class GameRequestService {
             }
         }
         final Submission accepted = submission;
-        JsonNode parameters = parameters(accepted);
+        ObjectNode parameters = parameters(accepted);
         return transaction(connection -> {
             try (var query = connection.prepareStatement(
                     "SELECT id FROM tc_game_sessions WHERE id = ? FOR UPDATE")) {
@@ -446,6 +473,20 @@ public class GameRequestService {
                 if (speedhuntRunning(published)) {
                     throw conflict(BREAK_UNAVAILABLE);
                 }
+            }
+            if (FAKE_TIMETABLE_REQUEST.equals(accepted.type())) {
+                Instant scheduled = fakeTimetableEntry(connection, member.gameSessionId(), accepted.targetDeviceId(),
+                        parameters.get("entryId").asLong());
+                JsonNode pause = target.path("break");
+                if (onBreak(target, now()) && pause.hasNonNull("endsAt")
+                        && !Instant.parse(pause.get("endsAt").asText()).isBefore(scheduled)) {
+                    throw conflict("This ping falls inside your break");
+                }
+                if (GameJokerService.timetableFakeTaken(connection, member.gameSessionId(),
+                        parameters.get("entryId").asLong())) {
+                    throw conflict("This ping already has a fake");
+                }
+                parameters.put("scheduledAt", scheduled.toString());
             }
             if (target.hasNonNull("name")) {
                 targetLabel = target.get("name").asText();
@@ -499,12 +540,42 @@ public class GameRequestService {
                 }
             }
             if (joker) {
-                GameJokerService.reserve(connection, member.gameSessionId(), accepted.targetDeviceId(),
-                        GameJokerService.REQUEST_TYPES.get(accepted.type()), id,
-                        userLabel(connection, member.userId()));
+                String jokerType = GameJokerService.REQUEST_TYPES.get(accepted.type());
+                // A fake's reservation carries its plan, which stays private to its owner and the operators.
+                GameJokerService.reserve(connection, member.gameSessionId(), accepted.targetDeviceId(), jokerType, id,
+                        userLabel(connection, member.userId()),
+                        GameJokerService.FAKE_TYPES.contains(jokerType) ? parameters : null);
             }
             return memberView(load(connection, member.gameSessionId(), id, false));
         });
+    }
+
+    /**
+     * The scheduled time of a timetable entry a fake may replace: the owner's own active entry that reaches hunters
+     * (blank or a target code with hunters) and is at least the cutoff ahead.
+     */
+    private Instant fakeTimetableEntry(Connection connection, long gameSessionId, long deviceId, long entryId)
+            throws SQLException {
+        String owner = GameJokerService.deviceName(connection, deviceId);
+        try (var query = connection.prepareStatement("SELECT scheduledat,participant,content,active"
+                + " FROM tc_game_timetable_entries WHERE id = ? AND gamesessionid = ?")) {
+            query.setLong(1, entryId);
+            query.setLong(2, gameSessionId);
+            try (var rows = query.executeQuery()) {
+                if (!rows.next() || !rows.getBoolean("active") || owner == null
+                        || !owner.equals(rows.getString("participant"))) {
+                    throw new BadRequestException("Choose one of your upcoming timetable pings");
+                }
+                if (!GameJokerService.fakeEligible(rows.getString("content"))) {
+                    throw conflict("This ping does not reach the hunters, so it cannot carry a fake");
+                }
+                Instant scheduled = rows.getTimestamp("scheduledat", utc()).toInstant();
+                if (!scheduled.isAfter(now().plusSeconds(GameJokerService.FAKE_TIMETABLE_CUTOFF_SECONDS))) {
+                    throw conflict("This ping is too close to carry a fake");
+                }
+                return scheduled;
+            }
+        }
     }
 
     /** Hunters and spectators see every speedhunt request of their session; others only their own. */
@@ -677,6 +748,16 @@ public class GameRequestService {
                 }
                 throw conflict("Request " + completion.id() + " cannot become " + completion.status()
                         + " from " + request.status());
+            }
+            if (SUCCEEDED.equals(completion.status()) && FAKE_TIMETABLE_REQUEST.equals(request.type())) {
+                // Checked again right before the fake is armed: the timetable may have changed meanwhile. A refusal
+                // is a 400, so the Tool records the request as failed and the joker returns.
+                try {
+                    fakeTimetableEntry(connection, gameSessionId, request.targetDeviceId(),
+                            request.parameters().path("entryId").asLong(0));
+                } catch (WebApplicationException error) {
+                    throw new BadRequestException("The fake cannot be armed: " + error.getMessage());
+                }
             }
             update(connection, completion.id(), completion.status(), completion.message(), completion.detail(),
                     REJECTED.equals(completion.status()));

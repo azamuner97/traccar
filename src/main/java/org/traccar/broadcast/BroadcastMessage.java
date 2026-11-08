@@ -43,6 +43,25 @@ public class BroadcastMessage {
     private String gameMembersResource;
     private Long gameMembersSessionId;
 
+    private String gameUsersResource;
+    private java.util.Set<Long> gameUsersIds;
+
+    public String getGameUsersResource() {
+        return gameUsersResource;
+    }
+
+    public void setGameUsersResource(String gameUsersResource) {
+        this.gameUsersResource = gameUsersResource;
+    }
+
+    public java.util.Set<Long> getGameUsersIds() {
+        return gameUsersIds;
+    }
+
+    public void setGameUsersIds(java.util.Set<Long> gameUsersIds) {
+        this.gameUsersIds = gameUsersIds;
+    }
+
     public String getGameMembersResource() {
         return gameMembersResource;
     }

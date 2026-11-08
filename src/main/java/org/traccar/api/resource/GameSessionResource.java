@@ -310,8 +310,9 @@ public class GameSessionResource extends BaseResource {
         if (applied.statusChanged()) {
             connectionManager.updateGameMembers(true, id, GameStatusResource.INVALIDATION);
         }
-        if (applied.jokersChanged()) {
-            connectionManager.updateGameMembers(true, id, GameJokerResource.INVALIDATION);
+        if (!applied.jokerUsers().isEmpty()) {
+            // Only the owners concerned (and operators): a fake's use must not be visible to anyone else.
+            connectionManager.updateGameUsers(true, applied.jokerUsers(), GameJokerResource.INVALIDATION);
         }
         return applied.outcome();
     }
@@ -388,7 +389,8 @@ public class GameSessionResource extends BaseResource {
         var user = permissionsService.getUser(getUserId());
         String actor = user.getName() == null || user.getName().isBlank() ? user.getEmail() : user.getName();
         var result = jokers.change(id, change, actor);
-        connectionManager.updateGameMembers(true, id, GameJokerResource.INVALIDATION);
+        connectionManager.updateGameUsers(true, jokers.owners(id, java.util.List.of(result.deviceId())),
+                GameJokerResource.INVALIDATION);
         return result;
     }
 }

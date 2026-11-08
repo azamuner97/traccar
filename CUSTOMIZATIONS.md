@@ -398,8 +398,8 @@ implementation plan stage 4), keyed by their real tracker:
 the allocation), `tc_game_joker_reservations` the uses held by open requests,
 and `tc_game_joker_ledger` every grant, revoke, reservation, release and use.
 New sessions start without jokers. In this version "Get hunter positions"
-(`hunterPositions`) and break (`break`) jokers can be granted and used; the
-fake-ping jokers follow.
+(`hunterPositions`), break (`break`) and timetable fake (`fakeTimetable`)
+jokers can be granted and used; the speedhunt fake follows.
 
 - Operators grant or revoke unused jokers with the fenced
   `POST /api/game-sessions/{id}/jokers/change`, and read the overview and
@@ -446,6 +446,44 @@ effects deliveries use only "Get hunter positions" jokers.
 
 Hunter relay snapshots carry the hunter position's own fix time, so a mirror
 shows its age; an older fix is stored without becoming latest.
+
+### Timetable fakes
+
+A player or supporter requests `jokerFakeTimetable` with `parameters`
+`entryId`, `latitude` and `longitude`. `GET /api/game-jokers` lists their
+`timetableEntries`: their own active entries (the timetable column is the
+assigned tracker's device name) at least 60 seconds ahead whose cell sends the
+real position to hunters (blank, `2H`, `2P2H`, `2S2H`, `2P2S2H`). The server
+refuses other entries, entries inside the requester's published break, and an
+entry that already has a fake (409), adds `scheduledAt` to the parameters and
+reserves one joker with the plan in the reservation's `details`.
+
+- When the Tool records the request as succeeded, the server checks the entry
+  again (a 400 makes the Tool record a failure, which returns the joker) and
+  *arms* the fake instead of using the joker: the reservation keeps its status
+  `reserved`, loses its request (moved into the plan) and the ledger records
+  `arm`. Armed fakes are listed with `armed` and their `plan`.
+- The Tool delivers the ping: hunter destinations get the fake, the cell's other
+  audiences the real position, in one effects delivery whose `fakes` reports
+  the reservation `used`. Pings that do not reach hunters report it `released`.
+  A fake that is no longer armed is `skipped`.
+- Owners cancel an armed fake with
+  `POST /api/game-jokers/reservations/{id}/cancel` until 60 seconds before its
+  ping. Publishing a timetable releases armed fakes whose entry disappeared or
+  no longer reaches hunters, and reporting a catch releases the participant's
+  armed fakes.
+- Plans are private: owners see theirs in `/api/game-jokers` and as
+  `status.fakes` in `/api/game-status`; operators in the overview. Hunters and
+  spectators never see fake requests, plans or markers; the delivered positions
+  carry the same payload as real pings.
+- `{"invalidate": ["game-jokers"]}` reaches only the owners whose jokers
+  changed and administrators (`updateGameUsers`), never the other members, so
+  the moment a fake is used, armed, released or cancelled is not visible to
+  hunters.
+- Known limit: owners can cancel until 60 seconds before the ping and the Tool
+  refreshes its armed fakes every 2 seconds. If those refreshes stall for more
+  than a minute, the Tool may still send a cancelled fake; the server then
+  ignores its use (`skipped`), so the joker is not used twice and nothing leaks.
 
 ### Mirror-only hunter access
 

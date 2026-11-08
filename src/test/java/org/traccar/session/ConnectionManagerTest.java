@@ -181,4 +181,24 @@ public class ConnectionManagerTest {
         verify(secondListener, never()).onUpdateGameNotifications();
     }
 
+    @Test
+    public void testJokerChangesReachOnlyTheirOwnersAndAdministrators() throws Exception {
+        // User 1 owns the joker, user 2 (a hunter) does not; neither is an administrator.
+        when(storage.getObject(eq(User.class), any(Request.class))).thenReturn(new User());
+
+        connectionManager.updateGameUsers(true, java.util.Set.of(1L), "game-jokers");
+        verify(broadcastService).updateGameUsers(true, java.util.Set.of(1L), "game-jokers");
+        verify(listener).onUpdateGameAdmin("game-jokers");
+        verify(secondListener, never()).onUpdateGameAdmin(any());
+
+        reset(listener, secondListener, broadcastService);
+        User administrator = new User();
+        administrator.setAdministrator(true);
+        when(storage.getObject(eq(User.class), any(Request.class))).thenReturn(administrator);
+        connectionManager.updateGameUsers(false, java.util.Set.of(), "game-jokers");
+        verifyNoInteractions(broadcastService);
+        verify(listener).onUpdateGameAdmin("game-jokers");
+        verify(secondListener).onUpdateGameAdmin("game-jokers");
+    }
+
 }

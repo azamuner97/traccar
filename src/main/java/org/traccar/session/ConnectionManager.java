@@ -581,6 +581,28 @@ public class ConnectionManager implements BroadcastInterface {
         }
     }
 
+    @Override
+    public synchronized void updateGameUsers(boolean local, Set<Long> userIds, String resource) {
+        if (local) {
+            broadcastService.updateGameUsers(true, userIds, resource);
+        }
+        try {
+            for (var entry : listeners.entrySet()) {
+                boolean recipient = userIds.contains(entry.getKey());
+                if (!recipient) {
+                    User user = storage.getObject(User.class, new Request(
+                            new Columns.Include("administrator"), new Condition.Equals("id", entry.getKey())));
+                    recipient = user != null && user.getAdministrator();
+                }
+                if (recipient) {
+                    entry.getValue().forEach(listener -> listener.onUpdateGameAdmin(resource));
+                }
+            }
+        } catch (Exception error) {
+            LOGGER.warn("Game user invalidation failed", error);
+        }
+    }
+
     public interface UpdateListener {
         /** Sends {@code {"invalidate": [resource]}} for a game resource. */
         default void onUpdateGameAdmin(String resource) { }
