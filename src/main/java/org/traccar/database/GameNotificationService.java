@@ -340,7 +340,7 @@ public class GameNotificationService {
                 rows.getTimestamp("createdat", calendar).toInstant().toString(), rows.getString("recipientlabel"));
     }
 
-    private static String recipientLabel(Connection connection, Long userId) throws SQLException {
+    static String recipientLabel(Connection connection, Long userId) throws SQLException {
         if (userId == null) {
             return null;
         }
@@ -365,73 +365,79 @@ public class GameNotificationService {
         try (var connection = dataSource.getConnection()) {
             connection.setAutoCommit(false);
             try {
-                var attributes = lockDevice(connection, deviceId);
-                if (!expected.equals(attributes.get(GENERATION_ATTRIBUTE))) {
-                    throw new WebApplicationException("Notification generation changed", 409);
-                }
-                try (var query = connection.prepareStatement(
-                        "SELECT * FROM tc_game_notifications WHERE sessiondeviceid = ? AND alertid = ?")) {
-                    query.setLong(1, deviceId);
-                    query.setString(2, alert.id());
-                    try (var rows = query.executeQuery()) {
-                        if (rows.next()) {
-                            Entry existing = entry(rows);
-                            Alert stored = new Alert(existing.id(), existing.type(), existing.audience(),
-                                    existing.occurredAt(), existing.timeZone(), existing.message(),
-                                    existing.recipientUserId(), existing.sourceDeviceId());
-                            if (!stored.equals(alert)) {
-                                throw new WebApplicationException("Conflicting notification ID", 409);
-                            }
-                            connection.commit();
-                            return new Creation(2, expected, existing, false);
-                        }
-                    }
-                }
-                long gameSessionId = GameSessionService.gameSessionIdForDevice(connection, deviceId);
-                String label = recipientLabel(connection, alert.recipientUserId());
-                Instant created = Instant.now().truncatedTo(ChronoUnit.MILLIS);
-                try (var query = connection.prepareStatement("INSERT INTO tc_game_notifications "
-                        + "(alertid,sessiondeviceid,generation,type,audience,occurredat,timezone,message,"
-                        + "recipientuserid,sourcedeviceid,createdat,gamesessionid,recipientlabel)"
-                        + " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                        Statement.RETURN_GENERATED_KEYS)) {
-                    query.setString(1, alert.id());
-                    query.setLong(2, deviceId);
-                    query.setString(3, expected);
-                    query.setString(4, alert.type());
-                    query.setString(5, alert.audience());
-                    query.setTimestamp(6, Timestamp.from(Instant.parse(alert.occurredAt())), utc());
-                    query.setString(7, alert.timeZone());
-                    query.setString(8, alert.message());
-                    if (alert.recipientUserId() == null) {
-                        query.setNull(9, Types.INTEGER);
-                    } else {
-                        query.setLong(9, alert.recipientUserId());
-                    }
-                    if (alert.sourceDeviceId() == null) {
-                        query.setNull(10, Types.INTEGER);
-                    } else {
-                        query.setLong(10, alert.sourceDeviceId());
-                    }
-                    query.setTimestamp(11, Timestamp.from(created), utc());
-                    query.setLong(12, gameSessionId);
-                    if (label == null) {
-                        query.setNull(13, Types.VARCHAR);
-                    } else {
-                        query.setString(13, label);
-                    }
-                    query.executeUpdate();
-                }
+                Creation result = create(connection, deviceId, expected, alert);
                 connection.commit();
-                return new Creation(2, expected, new Entry(alert.id(), alert.type(), alert.audience(),
-                        alert.occurredAt(), alert.timeZone(), alert.message(),
-                        alert.recipientUserId(), alert.sourceDeviceId(),
-                        deviceId, expected, created.toString(), label), true);
+                return result;
             } catch (Exception error) {
                 connection.rollback();
                 throw error;
             }
         }
+    }
+
+    /** Archives a validated alert inside a caller's transaction; an identical repeat is not created again. */
+    Creation create(Connection connection, long deviceId, String expected, Alert alert) throws Exception {
+        generation(expected);
+        var attributes = lockDevice(connection, deviceId);
+        if (!expected.equals(attributes.get(GENERATION_ATTRIBUTE))) {
+            throw new WebApplicationException("Notification generation changed", 409);
+        }
+        try (var query = connection.prepareStatement(
+                "SELECT * FROM tc_game_notifications WHERE sessiondeviceid = ? AND alertid = ?")) {
+            query.setLong(1, deviceId);
+            query.setString(2, alert.id());
+            try (var rows = query.executeQuery()) {
+                if (rows.next()) {
+                    Entry existing = entry(rows);
+                    Alert stored = new Alert(existing.id(), existing.type(), existing.audience(),
+                            existing.occurredAt(), existing.timeZone(), existing.message(),
+                            existing.recipientUserId(), existing.sourceDeviceId());
+                    if (!stored.equals(alert)) {
+                        throw new WebApplicationException("Conflicting notification ID", 409);
+                    }
+                    return new Creation(2, expected, existing, false);
+                }
+            }
+        }
+        long gameSessionId = GameSessionService.gameSessionIdForDevice(connection, deviceId);
+        String label = recipientLabel(connection, alert.recipientUserId());
+        Instant created = Instant.now().truncatedTo(ChronoUnit.MILLIS);
+        try (var query = connection.prepareStatement("INSERT INTO tc_game_notifications "
+                + "(alertid,sessiondeviceid,generation,type,audience,occurredat,timezone,message,"
+                + "recipientuserid,sourcedeviceid,createdat,gamesessionid,recipientlabel)"
+                + " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                Statement.RETURN_GENERATED_KEYS)) {
+            query.setString(1, alert.id());
+            query.setLong(2, deviceId);
+            query.setString(3, expected);
+            query.setString(4, alert.type());
+            query.setString(5, alert.audience());
+            query.setTimestamp(6, Timestamp.from(Instant.parse(alert.occurredAt())), utc());
+            query.setString(7, alert.timeZone());
+            query.setString(8, alert.message());
+            if (alert.recipientUserId() == null) {
+                query.setNull(9, Types.INTEGER);
+            } else {
+                query.setLong(9, alert.recipientUserId());
+            }
+            if (alert.sourceDeviceId() == null) {
+                query.setNull(10, Types.INTEGER);
+            } else {
+                query.setLong(10, alert.sourceDeviceId());
+            }
+            query.setTimestamp(11, Timestamp.from(created), utc());
+            query.setLong(12, gameSessionId);
+            if (label == null) {
+                query.setNull(13, Types.VARCHAR);
+            } else {
+                query.setString(13, label);
+            }
+            query.executeUpdate();
+        }
+        return new Creation(2, expected, new Entry(alert.id(), alert.type(), alert.audience(),
+                alert.occurredAt(), alert.timeZone(), alert.message(),
+                alert.recipientUserId(), alert.sourceDeviceId(),
+                deviceId, expected, created.toString(), label), true);
     }
 
     public Page list(long deviceId, String expected, String cursor, int requestedLimit, ReadAccess access)

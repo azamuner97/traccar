@@ -34,6 +34,9 @@ public interface BroadcastInterface {
 
     default void updateGameNotifications(boolean local, long deviceId, Long recipientUserId) {}
 
+    /** Invalidates an administrator-only game resource ("game-sessions" or "game-controller"). */
+    default void updateGameAdmin(boolean local, String resource) {}
+
     default <T extends BaseModel> void invalidateObject(
             boolean local, Class<T> clazz, long id, ObjectOperation operation) throws Exception {}
 

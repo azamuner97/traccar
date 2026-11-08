@@ -8,10 +8,14 @@ Docker profile with ``TRACCAR_GAME_SESSIONS_CREDENTIAL_KEY`` set in ``.env``.
 
 import argparse
 import hashlib
+import json
 import secrets
 import sys
 import tempfile
+import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from uuid import uuid4
 
 import game_notification_integration as api
 
@@ -30,7 +34,7 @@ def create_user(name, email, password, administrator):
 def audit_http(user_credentials, device_ids):
     """Admin-only access, revisions, encryption at rest, timetable identity, history retention."""
     api.request("GET", "/game-sessions", credentials=user_credentials, expected=403)
-    assert api.request("GET", "/game-sessions/capabilities")["apiVersion"] == 1
+    assert api.request("GET", "/game-sessions/capabilities")["apiVersion"] == 2
     session = api.request("POST", "/game-sessions", {
         "name": api.PREFIX + "-http", "schemaVersion": 4, "config": {"game_settings": {"pings": 4}}})
     session_id = session["id"]
@@ -103,7 +107,8 @@ def audit_tool(tool_source):
 
     server = {"web_url": api.BASE, "client_url": "http://localhost:5056",
               "username": api.EMAIL, "password": api.PASSWORD}
-    client = GameSessionApi(api.BASE, api.EMAIL, api.PASSWORD, transport=Transport())
+    client = GameSessionApi(api.BASE, api.EMAIL, api.PASSWORD, transport=Transport(),
+                            epoch_provider=lambda: api.CONTROLLER["epoch"])
     client.check_compatible()
     jobs = ServerJobQueue()
     with tempfile.TemporaryDirectory() as tmp:
@@ -139,6 +144,140 @@ def audit_tool(tool_source):
         jobs.close(5)
 
 
+def stored_device(device_id):
+    return api.request("GET", f"/devices/{device_id}")
+
+
+def outcome_pushes(session_id, delivery):
+    return api.request("POST", f"/game-sessions/{session_id}/effects", delivery)["pushes"]
+
+
+def audit_controller(user_id, user_login, user_credentials):
+    """Lease, fencing of game and standard endpoints, drift, takeover, effects and expiry."""
+    lease = api.request("GET", "/game-controller")
+    assert lease["active"] and lease["epoch"] == api.CONTROLLER["epoch"]
+    epoch = api.CONTROLLER["epoch"]
+    other = "audit-other-" + uuid4().hex[:16]
+    api.request("POST", "/game-controller/acquire", {"instanceId": other, "label": "Other PC"},
+                epoch=False, expected=423)
+
+    session = api.request("POST", "/game-sessions", {"name": api.PREFIX + "-controller", "schemaVersion": 4,
+                                                     "config": {}}, epoch=False)
+    session_id = session["id"]
+    api.GAME_SESSION_IDS.append(session_id)
+    state = api.request("POST", "/devices", {"name": api.PREFIX + "-ctl-state", "uniqueId": api.PREFIX + "-ctl-state",
+                                             "attributes": {"traccarToolGameState": True}})
+    mirror = api.request("POST", "/devices", {"name": api.PREFIX + "-ctl-mirror",
+                                              "uniqueId": api.PREFIX + "-ctl-mirror",
+                                              "attributes": {"traccarToolMirror": True}})
+    real = api.request("POST", "/devices", {"name": api.PREFIX + "-ctl-real", "uniqueId": api.PREFIX + "-ctl-real"})
+    devices = [mirror["id"], real["id"], state["id"]]
+    try:
+        # Execution writes need the epoch; configuration of a non-executing session does not.
+        api.request("PUT", f"/game-sessions/{session_id}/resources", {
+            "expectedRevision": 1, "sessionDeviceId": state["id"],
+            "resources": {"devices": {"real": {"real-1": real["id"]},
+                                      "mirroring": {"player_1_to_hunters": mirror["id"]}}},
+            "members": [{"userId": user_id, "role": "player", "number": 1, "assignedDeviceId": real["id"],
+                         "login": user_login}]}, epoch=False, expected=423)
+        api.request("PUT", f"/game-sessions/{session_id}/resources", {
+            "expectedRevision": 1, "sessionDeviceId": state["id"],
+            "resources": {"devices": {"real": {"real-1": real["id"]},
+                                      "mirroring": {"player_1_to_hunters": mirror["id"]}}},
+            "members": [{"userId": user_id, "role": "player", "number": 1, "assignedDeviceId": real["id"],
+                         "login": user_login}]})
+        api.request("PUT", f"/game-sessions/{session_id}/config",
+                    {"expectedRevision": 1, "document": {"game_settings": {}}}, epoch=False)
+        api.request("PUT", "/game-controller/session", {"gameSessionId": session_id})
+        api.request("PUT", f"/game-sessions/{session_id}/config",
+                    {"expectedRevision": 2, "document": {"game_settings": {"x": 1}}}, epoch=False, expected=423)
+
+        # Standard mutations of game-owned resources need the epoch while a lease is held.
+        renamed = {**mirror, "name": mirror["name"] + "-renamed"}
+        api.request("PUT", f"/devices/{mirror['id']}", renamed, epoch=False, expected=423)
+        api.request("PUT", f"/devices/{mirror['id']}", renamed)
+        api.request("DELETE", f"/positions?deviceId={mirror['id']}&from=2020-01-01T00:00:00Z"
+                    "&to=2030-01-01T00:00:00Z", epoch=False, expected=423)
+        api.request("POST", "/permissions", {"userId": user_id, "deviceId": real["id"]}, epoch=False, expected=423)
+        # Members update their own account (push tokens, preferences) while a Tool controls the game.
+        own = api.request("GET", f"/users/{user_id}", credentials=user_credentials)
+        updated = api.request("PUT", f"/users/{user_id}", {**own, "attributes": {
+            **(own.get("attributes") or {}), "notificationTokens": "audit-token"}}, credentials=user_credentials)
+        assert updated["attributes"]["notificationTokens"] == "audit-token"
+        # A request carrying a wrong epoch is refused whatever it changes.
+        api.request("POST", "/groups", {"name": api.PREFIX + "-stale"}, epoch=epoch + 1000, expected=423)
+        # Pushes that reach members of the executing session, also sends without userId.
+        message = {"subject": "Audit", "digest": "Audit", "body": "Audit", "priority": False}
+        api.request("POST", f"/notifications/send/traccar?userId={user_id}", message, epoch=False, expected=423)
+        api.request("POST", "/notifications/send/traccar", message, epoch=False, expected=423)
+
+        # Effects: mirror positions become latest and the device shows as online; repeats are not applied.
+        delivery = {"deliveryId": "audit" + uuid4().hex, "positions": [
+            {"deviceId": mirror["id"], "latitude": 47.1, "longitude": 8.5},
+            {"uniqueId": api.PREFIX + "-ctl-state", "latitude": 0, "longitude": 0,
+             "attributes": {"traccarToolCaught": "1"}}],
+            "pushes": [{"userId": user_id, "subject": "Audit", "message": "Speedhunt started"}]}
+        first = api.request("POST", f"/game-sessions/{session_id}/effects", delivery)
+        assert not first["replayed"] and all(item["latest"] for item in first["positions"])
+        device = stored_device(mirror["id"])
+        assert device["positionId"] == first["positions"][0]["positionId"] and device["status"] == "online"
+        position = api.request("GET", f"/positions?id={device['positionId']}")[0]
+        assert position["attributes"]["activity"] == "still" and position["protocol"] == "osmand"
+        replay = api.request("POST", f"/game-sessions/{session_id}/effects", delivery)
+        assert replay["replayed"] and replay["positions"] == first["positions"]
+        assert api.sql(f"SELECT COUNT(*) FROM tc_positions WHERE deviceid={mirror['id']}") == "1"
+        deadline = time.monotonic() + 15
+        while outcome_pushes(session_id, delivery)[0]["status"] in ("queued", "attempting"):
+            assert time.monotonic() < deadline, "Outbox push was not attempted"
+            time.sleep(0.5)
+        assert outcome_pushes(session_id, delivery)[0]["status"] in ("sent", "failed")
+        older = (datetime.now(timezone.utc) - timedelta(minutes=5)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        late = api.request("POST", f"/game-sessions/{session_id}/effects", {
+            "deliveryId": "audit" + uuid4().hex,
+            "positions": [{"deviceId": mirror["id"], "latitude": 47.2, "longitude": 8.6, "fixTime": older}]})
+        assert not late["positions"][0]["latest"]
+        assert stored_device(mirror["id"])["positionId"] == first["positions"][0]["positionId"]
+        api.request("POST", f"/game-sessions/{session_id}/effects", {
+            "deliveryId": "audit" + uuid4().hex,
+            "positions": [{"deviceId": real["id"], "latitude": 1, "longitude": 1}]}, expected=400)
+        api.request("POST", f"/game-sessions/{session_id}/effects", delivery, epoch=False, expected=423)
+
+        # Takeover: the previous holder's delayed requests are refused.
+        api.request("PUT", "/game-controller/session", {"gameSessionId": None})
+        takeover = api.request("POST", "/game-controller/takeover", {"instanceId": other, "label": "Other PC"},
+                               epoch=False)
+        assert takeover["lease"]["epoch"] == epoch + 1
+        api.request("PUT", f"/game-sessions/{session_id}/runtime",
+                    {"expectedRevision": 1, "document": {}}, epoch=epoch, expected=423)
+        api.request("POST", "/game-controller/renew", {"instanceId": api.CONTROLLER["instance"]},
+                    epoch=epoch, expected=423)
+        api.request("POST", "/game-controller/release", {}, epoch=epoch + 1)
+
+        # Without a lease administrators may edit game resources; the next acquisition reports it.
+        api.request("PUT", f"/devices/{mirror['id']}", {**renamed, "name": mirror["name"]}, epoch=False)
+        acquired = api.acquire_controller()
+        assert acquired["lease"]["epoch"] == epoch + 2
+        assert any(item["detail"] == f"PUT /api/devices/{mirror['id']}" for item in acquired["drift"]), \
+            acquired["drift"]
+
+        # Expiry from the stored deadline: stop renewing, wait, and the epoch is refused.
+        stop, api.CONTROLLER["stop"] = api.CONTROLLER["stop"], None
+        stop.set()
+        expiring = api.CONTROLLER["epoch"]
+        time.sleep(api.request("GET", "/game-controller")["leaseSeconds"] + 2)
+        assert api.request("GET", "/game-controller")["state"] == "expired"
+        api.request("PUT", f"/game-sessions/{session_id}/runtime",
+                    {"expectedRevision": 1, "document": {}}, epoch=expiring, expected=423)
+        assert api.acquire_controller()["lease"]["epoch"] == expiring + 1
+        events = [item["event"] for item in api.request("GET", "/game-controller/history?limit=20")["items"]]
+        for event in ("expired", "acquired", "takeover", "takenOver", "released", "executing",
+                      "stoppedExecuting", "unfencedEdit"):
+            assert event in events, (event, events)
+    finally:
+        for device_id in devices:
+            api.request("DELETE", f"/devices/{device_id}", expected=204)
+
+
 def main(tool_source=None):
     api.wait_for_server()
     admin_id = create_user(api.PREFIX, api.EMAIL, api.PASSWORD, True)
@@ -146,15 +285,20 @@ def main(tool_source=None):
     user_password = secrets.token_hex(24)
     user_id = create_user(api.PREFIX + "-user", user_email, user_password, False)
     try:
+        api.acquire_controller()
         audit_http((user_email, user_password), [])
+        audit_controller(user_id, api.PREFIX + "-user", (user_email, user_password))
         if tool_source:
             audit_tool(tool_source)
         print("MySQL/HTTP game-session audit passed: admin-only access, revision conflicts and idempotent retries, "
               "credential encryption at rest, stable timetable entry IDs, notification history after device "
-              "deletion, and cascading deletion of saved data"
+              "deletion, cascading deletion of saved data, controller lease with fenced game and standard "
+              "endpoints, push fencing, drift reporting, takeover, expiry, and idempotent effects with "
+              "latest-position and online status"
               + (", plus the Tool's repository round trip." if tool_source else "."))
     finally:
         api.delete_game_sessions()
+        api.release_controller()
         api.sql(f"DELETE FROM tc_users WHERE id={user_id} AND email=" + api.literal(user_email) + ";")
         api.sql(f"DELETE FROM tc_users WHERE id={admin_id} AND email=" + api.literal(api.EMAIL) + ";")
 

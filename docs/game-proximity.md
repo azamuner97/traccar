@@ -30,7 +30,9 @@ are omitted so local browser expiry cannot remove independently authorized acces
 The session device must be registered with a central game session
 (`PUT /api/game-sessions/{id}/resources` with its `sessionDeviceId`); writes for an
 unregistered session device return 409. Proximity rows carry the game-session ID
-and are still deleted with the session device.
+and are still deleted with the session device. Writes also need the current game
+controller epoch in `X-Game-Controller-Epoch` (423 otherwise); see
+"Game controller and effects" in `CUSTOMIZATIONS.md`.
 
 Identical revisions are idempotent; obsolete/conflicting revisions and generations
 return 409. Invalid snapshots return 400 and identity/scope violations return 403.

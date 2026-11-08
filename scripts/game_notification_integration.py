@@ -46,10 +46,20 @@ def sql(statement):
     return result.stdout.strip()
 
 
-def request(method, path, body=None, *, credentials=(EMAIL, PASSWORD), expected=200, opener=None):
+# The audit holds the game controller lease like a Tool instance; fenced admin
+# requests carry its epoch.
+EPOCH_HEADER = "X-Game-Controller-Epoch"
+CONTROLLER = {"epoch": None, "instance": "audit-" + uuid4().hex[:24], "stop": None}
+
+
+def request(method, path, body=None, *, credentials=(EMAIL, PASSWORD), expected=200, opener=None, epoch=None):
     headers = {"Accept": "application/json"} if path.startswith("/reports/") else {}
     if credentials:
         headers["Authorization"] = "Basic " + base64.b64encode(":".join(credentials).encode()).decode()
+    if epoch is None and credentials == (EMAIL, PASSWORD):
+        epoch = CONTROLLER["epoch"]
+    if epoch is not None and epoch is not False:
+        headers[EPOCH_HEADER] = str(epoch)
     if isinstance(body, dict):
         headers["Content-Type"] = "application/json"
         body = json.dumps(body).encode()
@@ -66,6 +76,69 @@ def request(method, path, body=None, *, credentials=(EMAIL, PASSWORD), expected=
         return json.loads(data)
     except json.JSONDecodeError:
         return data.decode()
+
+
+def acquire_controller():
+    """Acquire the lease (never by force) and keep renewing it in the background."""
+    try:
+        result = request("POST", "/game-controller/acquire",
+                         {"instanceId": CONTROLLER["instance"], "label": PREFIX}, epoch=False)
+    except AssertionError as error:
+        raise RuntimeError("Another Tool instance controls the development server. Release control in "
+                           "Tool (start window) before running the audit.") from error
+    CONTROLLER["epoch"] = result["lease"]["epoch"]
+    if CONTROLLER["stop"] is None:
+        stop = threading.Event()
+        CONTROLLER["stop"] = stop
+
+        def renew():
+            while not stop.wait(5):
+                epoch = CONTROLLER["epoch"]
+                if epoch is None:
+                    continue
+                try:
+                    request("POST", "/game-controller/renew", {"instanceId": CONTROLLER["instance"]}, epoch=epoch)
+                except (OSError, AssertionError, http.client.HTTPException):
+                    pass
+        threading.Thread(target=renew, daemon=True).start()
+    return result
+
+
+def release_controller():
+    stop, CONTROLLER["stop"] = CONTROLLER["stop"], None
+    if stop is not None:
+        stop.set()
+    epoch, CONTROLLER["epoch"] = CONTROLLER["epoch"], None
+    if epoch is not None:
+        try:
+            request("POST", "/game-controller/release", {}, epoch=epoch)
+        except (OSError, AssertionError, http.client.HTTPException):
+            pass
+
+
+class FencedRequests:
+    """``requests``-compatible transport for Tool code that carries the audit's epoch."""
+
+    def _kwargs(self, kwargs):
+        if CONTROLLER["epoch"] is not None:
+            kwargs["headers"] = {**(kwargs.get("headers") or {}), EPOCH_HEADER: str(CONTROLLER["epoch"])}
+        return kwargs
+
+    def get(self, url, **kwargs):
+        import requests
+        return requests.get(url, **self._kwargs(kwargs))
+
+    def post(self, url, **kwargs):
+        import requests
+        return requests.post(url, **self._kwargs(kwargs))
+
+    def put(self, url, **kwargs):
+        import requests
+        return requests.put(url, **self._kwargs(kwargs))
+
+    def delete(self, url, **kwargs):
+        import requests
+        return requests.delete(url, **self._kwargs(kwargs))
 
 
 GAME_SESSION_IDS = []
@@ -176,6 +249,8 @@ def audit_geofence_monitoring(session_id, source_ids, generated_users, sockets, 
 
         received = []
         with requests.Session() as transport:
+            if CONTROLLER["epoch"] is not None:
+                transport.headers[EPOCH_HEADER] = str(CONTROLLER["epoch"])
             client = TraccarClient(BASE, "http://localhost:5056", EMAIL, PASSWORD, transport=transport)
             service = MonitoringService(
                 client, SystemClock(), Scheduler(), stream_enabled=False,
@@ -271,6 +346,7 @@ def main(tool_source=None):
     admin_id = int(sql("SELECT id FROM tc_users WHERE email=" + literal(EMAIL) + ";"))
     user_ids.append(admin_id)
     try:
+        acquire_controller()
         request("GET", "/health", credentials=None)
         request("GET", "/game-notifications?sessionDeviceId=1", credentials=None, expected=401)
         for suffix in ("session", "other-session"):
@@ -325,7 +401,8 @@ def main(tool_source=None):
                 credentials=credentials, expected=403 if role == "unrelated" else 200)
             request("GET", "/game-notifications?sessionDeviceId=" + str(device_ids[1]),
                 credentials=credentials, expected=403)
-            request("POST", endpoint, {}, credentials=credentials, expected=403)
+            # Writes are fenced before authorization: without the controller lease they are refused (423).
+            request("POST", endpoint, {}, credentials=credentials, expected=423)
             if role != "unrelated":
                 generated[key] = credentials
                 cookies = http.cookiejar.CookieJar()
@@ -503,6 +580,11 @@ def main(tool_source=None):
         subprocess.run(["docker", "compose", "--profile", "full", "restart", "traccar"],
             check=True, capture_output=True)
         wait_for_server()
+        # A server restart ends the lease; the old epoch is refused until control is resumed.
+        stale = CONTROLLER["epoch"]
+        request("PUT", f"/game-sessions/{GAME_SESSION_IDS[0]}/runtime",
+                {"expectedRevision": 1, "document": {}}, epoch=stale, expected=423)
+        assert acquire_controller()["lease"]["epoch"] == stale + 1
         recovered = request("GET", "/game-notifications?" + urllib.parse.urlencode({
             "sessionDeviceId": session_id, "generation": generation, "limit": 500}), credentials=generated["player"])
         assert recovered["generation"] == generation and len(recovered["items"]) == 212
@@ -573,6 +655,7 @@ def main(tool_source=None):
         for user_id in user_ids[1:]:
             request("DELETE", "/users/" + str(user_id), expected=204)
         delete_game_sessions()
+        release_controller()
         # Exact test admin ID/email, never a broad production/user cleanup.
         try:
             request("DELETE", "/users/" + str(admin_id), expected=204)

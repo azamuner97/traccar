@@ -148,6 +148,11 @@ public class AsyncSocket implements Session.Listener.AutoDemanding, ConnectionMa
     }
 
     @Override
+    public void onUpdateGameAdmin(String resource) {
+        sendData(Map.of(KEY_INVALIDATE, List.of(resource)));
+    }
+
+    @Override
     public void onUpdateGameProximity() {
         sendData(Map.of(KEY_INVALIDATE, List.of("game-proximity")));
     }

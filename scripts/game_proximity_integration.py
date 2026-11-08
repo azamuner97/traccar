@@ -30,7 +30,8 @@ def audit_tool_delivery(session_device, users, devices, credentials, tool_source
     from traccar_game_manager.infrastructure.traccar.client import TraccarClient
     from traccar_game_manager.ui.live_session.window import LiveSessionWindow
 
-    client = TraccarClient(api.BASE, "http://localhost:5056", api.EMAIL, api.PASSWORD, transport=requests)
+    client = TraccarClient(api.BASE, "http://localhost:5056", api.EMAIL, api.PASSWORD,
+                           transport=api.FencedRequests())
     pushes, warnings, events, checkpoints = [], [], [], []
 
     class CapturedPushGateway:
@@ -165,6 +166,7 @@ def main(tool_source=None, skip_restart=False):
     admin_id = int(api.sql("SELECT id FROM tc_users WHERE email=" + api.literal(api.EMAIL)))
     device_ids, user_ids, sockets = [], [], []
     try:
+        api.acquire_controller()
         session = api.request("POST", "/devices", {"name": api.PREFIX + "-session",
                               "uniqueId": "traccar-tool-state-" + hashlib.sha256(api.PREFIX.encode()).hexdigest()[:24],
                               "attributes": {"traccarToolGameState": True}})
@@ -255,7 +257,8 @@ def main(tool_source=None, skip_restart=False):
             api.request("GET", endpoint, credentials=credentials[key], expected=403)
         for key in ("first", "second", "supporter"):
             api.request("GET", endpoint + "/circles", credentials=credentials[key], expected=403)
-            api.request("PUT", endpoint, value, credentials=credentials[key], expected=403)
+            # Fenced before authorization: participants never hold the controller lease.
+            api.request("PUT", endpoint, value, credentials=credentials[key], expected=423)
         api.request("GET", f"/game-proximity/session/{other['id']}/circles", credentials=credentials["hunter"], expected=403)
         api.request("GET", endpoint, credentials=None, expected=401)
         api.request("PUT", endpoint, {**value, "generation": str(uuid4())}, expected=409)
@@ -328,6 +331,7 @@ def main(tool_source=None, skip_restart=False):
             subprocess.run(["docker", "compose", "--profile", "full", "restart", "traccar"], check=True,
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             api.wait_for_server()
+            api.acquire_controller()
             assert api.request("GET", endpoint)["grants"] == []
             assert api.request("GET", endpoint)["circles"] == []
         revision = api.request("GET", endpoint)["revision"] + 1
@@ -351,6 +355,7 @@ def main(tool_source=None, skip_restart=False):
         for user_id in user_ids:
             api.request("DELETE", f"/users/{user_id}", expected=204)
         api.delete_game_sessions()
+        api.release_controller()
         try:
             api.request("DELETE", f"/users/{admin_id}", expected=204)
         finally:

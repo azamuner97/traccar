@@ -21,14 +21,25 @@ import jakarta.ws.rs.Produces;
 import jakarta.ws.rs.QueryParam;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
+import jakarta.ws.rs.HeaderParam;
 import org.traccar.api.BaseResource;
+import org.traccar.database.GameControllerService;
+import org.traccar.database.GameEffectsService;
+import org.traccar.database.GamePushOutbox;
 import org.traccar.database.GameSessionService;
+import org.traccar.model.Device;
+import org.traccar.session.ConnectionManager;
+import org.traccar.session.cache.CacheManager;
 
+import java.util.Date;
 import java.util.List;
 
 /**
  * Central game-session storage. Operators are Traccar administrators in this version, so every endpoint
- * requires administrator access. Controller fencing is added in a later stage.
+ * requires administrator access. Writes that change what a session list or settings view shows notify
+ * administrators' WebSocket clients ({@value #INVALIDATION}); runtime saves and effects do not.
+ * {@code GameControllerFilter} fences writes with the controller lease: runtime, resources, timetable progress
+ * and effects always, and every write of the executing session.
  */
 @Path("game-sessions")
 @Produces(MediaType.APPLICATION_JSON)
@@ -46,8 +57,27 @@ public class GameSessionResource extends BaseResource {
     public record ProgressUpdate(List<GameSessionService.Progress> entries) { }
     public record LogAppend(List<GameSessionService.LogInput> entries) { }
 
+    public static final String INVALIDATION = "game-sessions";
+
     @Inject
     private GameSessionService service;
+
+    @Inject
+    private GameEffectsService effects;
+
+    @Inject
+    private GamePushOutbox outbox;
+
+    @Inject
+    private ConnectionManager connectionManager;
+
+    @Inject
+    private CacheManager cacheManager;
+
+    private <T> T changed(T result) {
+        connectionManager.updateGameAdmin(true, INVALIDATION);
+        return result;
+    }
 
     private void checkOperator() throws Exception {
         try {
@@ -83,7 +113,7 @@ public class GameSessionResource extends BaseResource {
         if (request == null || request.schemaVersion() == null) {
             throw new BadRequestException("name, schemaVersion and config are required");
         }
-        return service.create(request.name(), request.schemaVersion(), request.config());
+        return changed(service.create(request.name(), request.schemaVersion(), request.config()));
     }
 
     @GET
@@ -98,7 +128,7 @@ public class GameSessionResource extends BaseResource {
     public Response delete(@PathParam("id") long id) throws Exception {
         checkOperator();
         service.delete(id);
-        return Response.noContent().build();
+        return changed(Response.noContent().build());
     }
 
     @PUT
@@ -108,7 +138,7 @@ public class GameSessionResource extends BaseResource {
         if (request == null) {
             throw new BadRequestException("Rename request is required");
         }
-        return service.rename(id, expected(request.expectedRevision()), request.name());
+        return changed(service.rename(id, expected(request.expectedRevision()), request.name()));
     }
 
     @PUT
@@ -119,8 +149,8 @@ public class GameSessionResource extends BaseResource {
         if (request == null) {
             throw new BadRequestException("Configuration update is required");
         }
-        return service.updateConfig(id, expected(request.expectedRevision()), request.schemaVersion(),
-                request.document());
+        return changed(service.updateConfig(id, expected(request.expectedRevision()), request.schemaVersion(),
+                request.document()));
     }
 
     @PUT
@@ -131,8 +161,8 @@ public class GameSessionResource extends BaseResource {
         if (request == null) {
             throw new BadRequestException("Resource update is required");
         }
-        return service.updateResources(id, expected(request.expectedRevision()), request.sessionDeviceId(),
-                request.resources(), request.members());
+        return changed(service.updateResources(id, expected(request.expectedRevision()),
+                request.sessionDeviceId(), request.resources(), request.members()));
     }
 
     @PUT
@@ -143,6 +173,7 @@ public class GameSessionResource extends BaseResource {
         if (request == null) {
             throw new BadRequestException("Runtime update is required");
         }
+        // Runtime saves follow every game action; they change nothing an administrator list shows.
         return service.updateRuntime(id, expected(request.expectedRevision()), request.document());
     }
 
@@ -161,7 +192,7 @@ public class GameSessionResource extends BaseResource {
         if (request == null) {
             throw new BadRequestException("Credentials update is required");
         }
-        return service.updateCredentials(id, expected(request.expectedRevision()), request.document());
+        return changed(service.updateCredentials(id, expected(request.expectedRevision()), request.document()));
     }
 
     @GET
@@ -179,7 +210,8 @@ public class GameSessionResource extends BaseResource {
         if (request == null) {
             throw new BadRequestException("Geofence plan update is required");
         }
-        return service.updateGeofencePlans(id, expected(request.expectedRevision()), request.document());
+        return changed(service.updateGeofencePlans(id, expected(request.expectedRevision()),
+                request.document()));
     }
 
     @GET
@@ -197,8 +229,8 @@ public class GameSessionResource extends BaseResource {
         if (request == null) {
             throw new BadRequestException("Timetable is required");
         }
-        return service.publishTimetable(id, expected(request.expectedRevision()), request.columns(),
-                request.source(), request.entries());
+        return changed(service.publishTimetable(id, expected(request.expectedRevision()), request.columns(),
+                request.source(), request.entries()));
     }
 
     @PUT
@@ -224,5 +256,46 @@ public class GameSessionResource extends BaseResource {
         checkOperator();
         service.appendLogs(id, request == null ? null : request.entries());
         return Response.noContent().build();
+    }
+
+    /**
+     * Applies one fenced, idempotent game operation. After commit, latest positions reach the cache and
+     * WebSocket subscribers like tracker uploads, destination devices show as online with a new last-update
+     * time, archived notifications are announced, and queued pushes are sent from the outbox.
+     */
+    @POST
+    @Path("{id}/effects")
+    public GameEffectsService.Outcome applyEffects(
+            @PathParam("id") long id, @HeaderParam(GameControllerService.EPOCH_HEADER) String header,
+            GameEffectsService.Delivery delivery) throws Exception {
+        checkOperator();
+        Long epoch = GameControllerService.parseEpoch(header);
+        if (epoch == null) {
+            throw GameControllerService.locked("Effects require the game controller lease");
+        }
+        var alerts = effects.validate(delivery);
+        for (var alert : alerts) {
+            new GameNotificationTargets(storage, permissionsService).check(
+                    getUserId(), delivery.notifications().sessionDeviceId(), alert);
+        }
+        var applied = effects.apply(id, epoch, delivery, alerts);
+        Date now = new Date();
+        for (long deviceId : applied.devices()) {
+            connectionManager.updateDevice(deviceId, Device.STATUS_ONLINE, now);
+        }
+        for (var position : applied.latest()) {
+            cacheManager.updatePosition(position);
+            connectionManager.updatePosition(true, position);
+        }
+        if (applied.notificationDevice() != null) {
+            if (applied.sessionNotified()) {
+                connectionManager.updateGameNotifications(true, applied.notificationDevice(), null);
+            }
+            for (long recipient : applied.notifiedRecipients()) {
+                connectionManager.updateGameNotifications(true, applied.notificationDevice(), recipient);
+            }
+        }
+        outbox.dispatch(applied.queuedPushes());
+        return applied.outcome();
     }
 }

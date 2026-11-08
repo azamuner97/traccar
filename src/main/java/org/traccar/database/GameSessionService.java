@@ -46,7 +46,7 @@ import java.util.TimeZone;
 @Singleton
 public class GameSessionService {
 
-    public static final int API_VERSION = 1;
+    public static final int API_VERSION = 2;
     private static final int MAX_DOCUMENT_LENGTH = 8 * 1024 * 1024;
     private static final int MAX_LOG_BATCH = 500;
     private static final int MAX_LOG_MESSAGE = 16384;
@@ -397,6 +397,12 @@ public class GameSessionService {
         String serialized = json(runtime, "Runtime");
         return transaction(connection -> writeDocument(
                 connection, id, "runtime", "runtime", expectedRevision, serialized));
+    }
+
+    /** Runtime write inside a caller's transaction (effects deliveries). */
+    Revision updateRuntime(Connection connection, long id, long expectedRevision, JsonNode runtime)
+            throws Exception {
+        return writeDocument(connection, id, "runtime", "runtime", expectedRevision, json(runtime, "Runtime"));
     }
 
     private static Member member(Member value) {
@@ -786,6 +792,17 @@ public class GameSessionService {
     }
 
     public void appendLogs(long id, List<LogInput> entries) throws Exception {
+        if (entries == null || entries.isEmpty()) {
+            throw new BadRequestException("Invalid log batch");
+        }
+        transaction(connection -> {
+            appendLogs(connection, id, entries);
+            return null;
+        });
+    }
+
+    /** Appends logs inside a caller's transaction. */
+    void appendLogs(Connection connection, long id, List<LogInput> entries) throws Exception {
         if (entries == null || entries.isEmpty() || entries.size() > MAX_LOG_BATCH) {
             throw new BadRequestException("Invalid log batch");
         }
@@ -797,21 +814,18 @@ public class GameSessionService {
             }
             times.add(instant(entry.occurredAt(), "log time"));
         }
-        transaction(connection -> {
-            lock(connection, id);
-            try (var query = connection.prepareStatement("INSERT INTO tc_game_session_logs"
-                    + " (gamesessionid,category,occurredat,message) VALUES (?,?,?,?)")) {
-                for (int index = 0; index < entries.size(); index++) {
-                    query.setLong(1, id);
-                    query.setString(2, entries.get(index).category());
-                    query.setTimestamp(3, Timestamp.from(times.get(index)), utc());
-                    query.setString(4, entries.get(index).message());
-                    query.addBatch();
-                }
-                query.executeBatch();
+        lock(connection, id);
+        try (var query = connection.prepareStatement("INSERT INTO tc_game_session_logs"
+                + " (gamesessionid,category,occurredat,message) VALUES (?,?,?,?)")) {
+            for (int index = 0; index < entries.size(); index++) {
+                query.setLong(1, id);
+                query.setString(2, entries.get(index).category());
+                query.setTimestamp(3, Timestamp.from(times.get(index)), utc());
+                query.setString(4, entries.get(index).message());
+                query.addBatch();
             }
-            return null;
-        });
+            query.executeBatch();
+        }
     }
 
     public LogPage listLogs(long id, String cursor, int requestedLimit) throws Exception {
@@ -844,6 +858,132 @@ public class GameSessionService {
             }
             return new LogPage(items, next, more);
         });
+    }
+
+    /** Traccar resources that belong to any stored session, from the stored resource mappings. */
+    public record Owned(Set<Long> devices, Set<Long> groups, Set<Long> users, Set<Long> geofences) {
+        public boolean any() {
+            return !devices.isEmpty() || !groups.isEmpty() || !users.isEmpty() || !geofences.isEmpty();
+        }
+    }
+
+    private static void numbers(JsonNode node, Set<Long> target) {
+        if (node == null) {
+            return;
+        }
+        if (node.isIntegralNumber() && node.asLong() > 0) {
+            target.add(node.asLong());
+        } else if (node.isContainerNode()) {
+            node.forEach(child -> numbers(child, target));
+        }
+    }
+
+    private static void ids(JsonNode node, Set<Long> target) {
+        if (node == null) {
+            return;
+        }
+        if (node.isObject()) {
+            JsonNode id = node.get("id");
+            if (id != null && id.isIntegralNumber() && id.asLong() > 0) {
+                target.add(id.asLong());
+            }
+        }
+        if (node.isContainerNode()) {
+            node.forEach(child -> ids(child, target));
+        }
+    }
+
+    private static void keys(JsonNode node, Set<Long> target) {
+        if (node != null && node.isObject()) {
+            node.fieldNames().forEachRemaining(key -> {
+                if (key.matches("[1-9][0-9]{0,17}")) {
+                    target.add(Long.parseLong(key));
+                }
+            });
+        }
+    }
+
+    /** Collects the game-owned resources of every stored session. */
+    public Owned owned() throws Exception {
+        Set<Long> devices = new HashSet<>();
+        Set<Long> groups = new HashSet<>();
+        Set<Long> users = new HashSet<>();
+        Set<Long> geofences = new HashSet<>();
+        try (var connection = dataSource.getConnection()) {
+            try (var query = connection.prepareStatement(
+                    "SELECT sessiondeviceid,resources,config FROM tc_game_sessions")) {
+                try (var rows = query.executeQuery()) {
+                    while (rows.next()) {
+                        Long sessionDevice = nullableLong(rows, "sessiondeviceid");
+                        if (sessionDevice != null) {
+                            devices.add(sessionDevice);
+                        }
+                        JsonNode resources = parse(rows.getString("resources"));
+                        numbers(resources.get("devices"), devices);
+                        ids(resources.get("groups"), groups);
+                        numbers(resources.get("users"), users);
+                        JsonNode pending = resources.get("pending_cleanup");
+                        if (pending != null) {
+                            keys(pending.get("groups"), groups);
+                            keys(pending.get("users"), users);
+                        }
+                        ids(parse(rows.getString("config")).get("geofences"), geofences);
+                    }
+                }
+            }
+            try (var query = connection.prepareStatement(
+                    "SELECT userid,assigneddeviceid FROM tc_game_session_members")) {
+                try (var rows = query.executeQuery()) {
+                    while (rows.next()) {
+                        users.add(rows.getLong("userid"));
+                        Long assigned = nullableLong(rows, "assigneddeviceid");
+                        if (assigned != null) {
+                            devices.add(assigned);
+                        }
+                    }
+                }
+            }
+        }
+        return new Owned(devices, groups, users, geofences);
+    }
+
+    /** Generated users that are members of one stored session. */
+    public Set<Long> memberUserIds(long id) throws Exception {
+        Set<Long> result = new HashSet<>();
+        try (var connection = dataSource.getConnection();
+             var query = connection.prepareStatement(
+                     "SELECT userid FROM tc_game_session_members WHERE gamesessionid = ?")) {
+            query.setLong(1, id);
+            try (var rows = query.executeQuery()) {
+                while (rows.next()) {
+                    result.add(rows.getLong(1));
+                }
+            }
+        }
+        return result;
+    }
+
+    /** Devices an effects delivery may write: the session's mirrors and its game-state device. */
+    Map<Long, Boolean> effectDevices(Connection connection, long id) throws Exception {
+        Map<Long, Boolean> result = new HashMap<>();
+        try (var query = connection.prepareStatement(
+                "SELECT sessiondeviceid,resources FROM tc_game_sessions WHERE id = ?")) {
+            query.setLong(1, id);
+            try (var rows = query.executeQuery()) {
+                if (!rows.next()) {
+                    throw new NotFoundException("Game session not found");
+                }
+                JsonNode devices = parse(rows.getString("resources")).get("devices");
+                Set<Long> mirrors = new HashSet<>();
+                numbers(devices == null ? null : devices.get("mirroring"), mirrors);
+                mirrors.forEach(mirror -> result.put(mirror, false));
+                Long sessionDevice = nullableLong(rows, "sessiondeviceid");
+                if (sessionDevice != null) {
+                    result.put(sessionDevice, true);
+                }
+            }
+        }
+        return result;
     }
 
     /** Deletes saved session data. Managed Traccar resources are cleaned up separately by Tool. */

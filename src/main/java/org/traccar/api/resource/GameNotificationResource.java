@@ -52,69 +52,6 @@ public class GameNotificationResource extends BaseResource {
         }
     }
 
-    private void checkTarget(GameNotificationService.Alert alert, long sessionDeviceId) throws Exception {
-        try {
-            User recipient = storage.getObject(User.class, new Request(
-                    new Columns.All(), new Condition.Equals("id", alert.recipientUserId())));
-            String role = recipient == null ? null : String.valueOf(
-                    recipient.getAttributes().get("traccarToolUserRole"));
-            if (recipient == null || recipient.getAdministrator()
-                    || !("player".equals(role) || "supporter".equals(role) || "hunter".equals(role))
-                    || !GameNotificationService.canReceive(recipient, sessionDeviceId)
-                    || !Long.toString(alert.sourceDeviceId()).equals(String.valueOf(
-                            recipient.getAttributes().get(GameNotificationService.ASSIGNED_DEVICE_ATTRIBUTE)))) {
-                throw new SecurityException("Notification recipient does not match the source device");
-            }
-            Device permittedSource = storage.getObject(Device.class, new Request(
-                    new Columns.Include("id"),
-                    new Condition.And(
-                            new Condition.Equals("id", alert.sourceDeviceId()),
-                            new Condition.Permission(User.class, recipient.getId(), Device.class))));
-            if (permittedSource == null) {
-                throw new SecurityException("Notification recipient cannot access the source device");
-            }
-        } catch (SecurityException error) {
-            throw new ForbiddenException(error.getMessage());
-        }
-    }
-
-    private void checkLiveRecipient(GameNotificationService.Alert alert, long sessionDeviceId) throws Exception {
-        try {
-            User recipient = storage.getObject(User.class, new Request(
-                    new Columns.All(), new Condition.Equals("id", alert.recipientUserId())));
-            String role = recipient == null ? null : String.valueOf(
-                    recipient.getAttributes().get("traccarToolUserRole"));
-            if (!GameNotificationService.canReceive(recipient, sessionDeviceId)
-                    || !GameNotificationService.liveRecipientAudience(role).equals(alert.audience())
-                    || alert.sourceDeviceId().equals(GameNotificationService.assignedDeviceId(recipient))) {
-                throw new SecurityException("Live notification recipient is not eligible");
-            }
-            permissionsService.checkPermission(Device.class, getUserId(), alert.sourceDeviceId());
-            Device source = storage.getObject(Device.class, new Request(
-                    new Columns.All(), new Condition.Equals("id", alert.sourceDeviceId())));
-            if (source == null || Boolean.TRUE.equals(source.getAttributes().get("traccarToolMirror"))) {
-                throw new SecurityException("Live notification source is not a real device");
-            }
-            var owners = storage.getObjects(User.class, new Request(new Columns.All())).stream()
-                    .filter(user -> GameNotificationService.canReceive(user, sessionDeviceId))
-                    .filter(user -> "player".equals(user.getAttributes().get("traccarToolUserRole"))
-                            || "supporter".equals(user.getAttributes().get("traccarToolUserRole")))
-                    .filter(user -> alert.sourceDeviceId().equals(GameNotificationService.assignedDeviceId(user)))
-                    .toList();
-            if (owners.size() != 1) {
-                throw new SecurityException("Live notification source has no unique participant in this session");
-            }
-            Device permittedSource = storage.getObject(Device.class, new Request(new Columns.Include("id"),
-                    new Condition.And(new Condition.Equals("id", alert.sourceDeviceId()),
-                            new Condition.Permission(User.class, owners.getFirst().getId(), Device.class))));
-            if (permittedSource == null) {
-                throw new SecurityException("Live notification source owner cannot access the device");
-            }
-        } catch (SecurityException error) {
-            throw new ForbiddenException(error.getMessage());
-        }
-    }
-
     @GET
     public GameNotificationService.Page list(
             @QueryParam("sessionDeviceId") long deviceId, @QueryParam("generation") String generation,
@@ -163,11 +100,8 @@ public class GameNotificationResource extends BaseResource {
         }
         checkWrite(request.sessionDeviceId());
         var alert = GameNotificationService.validate(request.alert());
-        if ("user".equals(alert.audience())) {
-            checkTarget(alert, request.sessionDeviceId());
-        } else if (GameNotificationService.isLiveRecipientAlert(alert)) {
-            checkLiveRecipient(alert, request.sessionDeviceId());
-        }
+        new GameNotificationTargets(storage, permissionsService).check(
+                getUserId(), request.sessionDeviceId(), alert);
         var result = service.create(request.sessionDeviceId(), request.generation(), alert);
         if (result.created()) {
             connectionManager.updateGameNotifications(true, request.sessionDeviceId(), alert.recipientUserId());

@@ -1,0 +1,96 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<databaseChangeLog xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+  xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-3.4.xsd">
+
+  <!-- Controller ownership, fenced effects and the push outbox (implementation plan, stage 2). -->
+  <changeSet author="traccar-tool" id="game-controller-1">
+    <!-- One server-wide lease row (id 1). The epoch only ever increases, also across restarts. -->
+    <createTable tableName="tc_game_controller">
+      <column name="id" type="INT"><constraints primaryKey="true" nullable="false" /></column>
+      <column name="epoch" type="BIGINT"><constraints nullable="false" /></column>
+      <column name="state" type="VARCHAR(16)"><constraints nullable="false" /></column>
+      <column name="userid" type="INT" />
+      <column name="userlabel" type="VARCHAR(128)" />
+      <column name="instanceid" type="VARCHAR(64)" />
+      <column name="label" type="VARCHAR(128)" />
+      <column name="gamesessionid" type="BIGINT" />
+      <column name="acquiredat" type="TIMESTAMP(3)" />
+      <column name="renewedat" type="TIMESTAMP(3)" />
+      <column name="expiresat" type="TIMESTAMP(3)" />
+      <column name="endedat" type="TIMESTAMP(3)" />
+    </createTable>
+    <addForeignKeyConstraint baseTableName="tc_game_controller" baseColumnNames="userid"
+      referencedTableName="tc_users" referencedColumnNames="id" constraintName="fk_game_controller_user" onDelete="SET NULL" />
+    <addForeignKeyConstraint baseTableName="tc_game_controller" baseColumnNames="gamesessionid"
+      referencedTableName="tc_game_sessions" referencedColumnNames="id" constraintName="fk_game_controller_session" onDelete="SET NULL" />
+    <insert tableName="tc_game_controller">
+      <column name="id" valueNumeric="1" />
+      <column name="epoch" valueNumeric="0" />
+      <column name="state" value="free" />
+    </insert>
+
+    <!-- Acquisitions, releases, expiries, takeovers, restarts, execution changes and unfenced admin edits. -->
+    <createTable tableName="tc_game_controller_history">
+      <column name="id" type="BIGINT" autoIncrement="true"><constraints primaryKey="true" nullable="false" /></column>
+      <column name="epoch" type="BIGINT"><constraints nullable="false" /></column>
+      <column name="event" type="VARCHAR(32)"><constraints nullable="false" /></column>
+      <column name="userid" type="INT" />
+      <column name="userlabel" type="VARCHAR(128)" />
+      <column name="instanceid" type="VARCHAR(64)" />
+      <column name="label" type="VARCHAR(128)" />
+      <column name="gamesessionid" type="BIGINT" />
+      <column name="detail" type="VARCHAR(512)" />
+      <column name="occurredat" type="TIMESTAMP(3)"><constraints nullable="false" /></column>
+    </createTable>
+    <createIndex tableName="tc_game_controller_history" indexName="idx_game_controller_history_event">
+      <column name="event" />
+      <column name="id" />
+    </createIndex>
+    <addForeignKeyConstraint baseTableName="tc_game_controller_history" baseColumnNames="userid"
+      referencedTableName="tc_users" referencedColumnNames="id" constraintName="fk_game_controller_history_user" onDelete="SET NULL" />
+    <addForeignKeyConstraint baseTableName="tc_game_controller_history" baseColumnNames="gamesessionid"
+      referencedTableName="tc_game_sessions" referencedColumnNames="id" constraintName="fk_game_controller_history_session" onDelete="SET NULL" />
+
+    <!-- One row per applied effects delivery; repeating a delivery ID returns the stored outcome. -->
+    <createTable tableName="tc_game_deliveries">
+      <column name="id" type="BIGINT" autoIncrement="true"><constraints primaryKey="true" nullable="false" /></column>
+      <column name="gamesessionid" type="BIGINT"><constraints nullable="false" /></column>
+      <column name="deliveryid" type="VARCHAR(64)"><constraints nullable="false" /></column>
+      <column name="epoch" type="BIGINT"><constraints nullable="false" /></column>
+      <column name="requesthash" type="VARCHAR(64)"><constraints nullable="false" /></column>
+      <column name="outcome" type="CLOB"><constraints nullable="false" /></column>
+      <column name="createdat" type="TIMESTAMP(3)"><constraints nullable="false" /></column>
+    </createTable>
+    <addUniqueConstraint tableName="tc_game_deliveries" columnNames="deliveryid" constraintName="uq_game_deliveries_delivery" />
+    <addForeignKeyConstraint baseTableName="tc_game_deliveries" baseColumnNames="gamesessionid"
+      referencedTableName="tc_game_sessions" referencedColumnNames="id" constraintName="fk_game_deliveries_session" onDelete="CASCADE" />
+
+    <!-- Pushes queued by deliveries and sent after commit, one attempt per recipient. -->
+    <createTable tableName="tc_game_push_outbox">
+      <column name="id" type="BIGINT" autoIncrement="true"><constraints primaryKey="true" nullable="false" /></column>
+      <column name="deliveryrowid" type="BIGINT"><constraints nullable="false" /></column>
+      <column name="gamesessionid" type="BIGINT"><constraints nullable="false" /></column>
+      <column name="userid" type="INT" />
+      <column name="recipientlabel" type="VARCHAR(128)" />
+      <column name="notificator" type="VARCHAR(64)"><constraints nullable="false" /></column>
+      <column name="subject" type="VARCHAR(512)"><constraints nullable="false" /></column>
+      <column name="message" type="VARCHAR(8192)"><constraints nullable="false" /></column>
+      <column name="status" type="VARCHAR(16)"><constraints nullable="false" /></column>
+      <column name="detail" type="VARCHAR(512)" />
+      <column name="createdat" type="TIMESTAMP(3)"><constraints nullable="false" /></column>
+      <column name="attemptedat" type="TIMESTAMP(3)" />
+      <column name="completedat" type="TIMESTAMP(3)" />
+    </createTable>
+    <createIndex tableName="tc_game_push_outbox" indexName="idx_game_push_outbox_status">
+      <column name="status" />
+      <column name="id" />
+    </createIndex>
+    <addForeignKeyConstraint baseTableName="tc_game_push_outbox" baseColumnNames="deliveryrowid"
+      referencedTableName="tc_game_deliveries" referencedColumnNames="id" constraintName="fk_game_push_outbox_delivery" onDelete="CASCADE" />
+    <addForeignKeyConstraint baseTableName="tc_game_push_outbox" baseColumnNames="gamesessionid"
+      referencedTableName="tc_game_sessions" referencedColumnNames="id" constraintName="fk_game_push_outbox_session" onDelete="CASCADE" />
+    <addForeignKeyConstraint baseTableName="tc_game_push_outbox" baseColumnNames="userid"
+      referencedTableName="tc_users" referencedColumnNames="id" constraintName="fk_game_push_outbox_user" onDelete="SET NULL" />
+  </changeSet>
+</databaseChangeLog>

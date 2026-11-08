@@ -2328,4 +2328,21 @@ public final class Keys {
             "gameSessions.credentialKey",
             List.of(KeyType.CONFIG));
 
+    /**
+     * Duration of the server-wide game controller lease in seconds. Tool renews it every
+     * {@code gameController.renewSeconds}; a lease that is not renewed in time expires.
+     */
+    public static final ConfigKey<Integer> GAME_CONTROLLER_LEASE_SECONDS = new IntegerConfigKey(
+            "gameController.leaseSeconds",
+            List.of(KeyType.CONFIG),
+            30);
+
+    /**
+     * Interval in seconds at which Tool renews the game controller lease.
+     */
+    public static final ConfigKey<Integer> GAME_CONTROLLER_RENEW_SECONDS = new IntegerConfigKey(
+            "gameController.renewSeconds",
+            List.of(KeyType.CONFIG),
+            5);
+
 }

@@ -22,6 +22,7 @@ import static org.mockito.Mockito.*;
 public class GameSessionResourceTest {
 
     private final GameSessionService service = mock(GameSessionService.class);
+    private final org.traccar.session.ConnectionManager sockets = mock(org.traccar.session.ConnectionManager.class);
 
     private void inject(Object object, Class<?> type, String name, Object value) throws Exception {
         var field = type.getDeclaredField(name);
@@ -45,6 +46,7 @@ public class GameSessionResourceTest {
         inject(resource, BaseResource.class, "storage", storage);
         inject(resource, BaseResource.class, "permissionsService", new PermissionsService(storage));
         inject(resource, GameSessionResource.class, "service", service);
+        inject(resource, GameSessionResource.class, "connectionManager", sockets);
         return resource;
     }
 
@@ -78,5 +80,16 @@ public class GameSessionResourceTest {
                 .revision());
         when(service.list()).thenReturn(List.of());
         assertTrue(resource.list().isEmpty());
+    }
+
+    @Test
+    void onlyListRelevantWritesNotifyAdministrators() throws Exception {
+        var resource = resource(true);
+        resource.updateRuntime(5, new GameSessionResource.DocumentUpdate(1L, null,
+                com.fasterxml.jackson.databind.node.JsonNodeFactory.instance.objectNode()));
+        verify(sockets, never()).updateGameAdmin(anyBoolean(), anyString());
+        resource.updateConfig(5, new GameSessionResource.DocumentUpdate(1L, 4,
+                com.fasterxml.jackson.databind.node.JsonNodeFactory.instance.objectNode()));
+        verify(sockets).updateGameAdmin(true, GameSessionResource.INVALIDATION);
     }
 }

@@ -537,7 +537,26 @@ public class ConnectionManager implements BroadcastInterface {
         }
     }
 
+    @Override
+    public synchronized void updateGameAdmin(boolean local, String resource) {
+        if (local) {
+            broadcastService.updateGameAdmin(true, resource);
+        }
+        for (var entry : listeners.entrySet()) {
+            try {
+                User user = storage.getObject(User.class, new Request(
+                        new Columns.Include("administrator"), new Condition.Equals("id", entry.getKey())));
+                if (user != null && user.getAdministrator()) {
+                    entry.getValue().forEach(listener -> listener.onUpdateGameAdmin(resource));
+                }
+            } catch (StorageException error) {
+                LOGGER.warn("Game invalidation failed", error);
+            }
+        }
+    }
+
     public interface UpdateListener {
+        default void onUpdateGameAdmin(String resource) { }
         default void onUpdateGameProximity() { }
         default void onUpdateDeviceAccess() { }
         void onKeepalive();

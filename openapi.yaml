@@ -87,6 +87,16 @@ tags:
     description: Game notification journal
   - name: Game Proximity
     description: Participant proximity access and circles
+  - name: Game Controller
+    description: >-
+      Server-wide controller lease for Traccar Tool (administrators only). Fenced requests carry the current
+      controllerEpoch in the X-Game-Controller-Epoch header and are refused with 423 otherwise. Fenced are the
+      game-session runtime, resources, timetable progress and effects, every write of the executing session,
+      writes to /game-notifications and /game-proximity, and - while a lease is held - standard mutations
+      (devices, groups, users, permissions, geofences, DELETE /positions) of resources in any stored session's
+      resource mapping, and /notifications/send/* reaching members of the executing session. Users may always
+      update their own account. A request that carries the header must carry the current epoch, whatever it
+      changes.
 paths:
   /audit:
     get:
@@ -3981,6 +3991,7 @@ paths:
           content: {}
   /game-sessions/{id}:
     parameters:
+      - $ref: '#/components/parameters/GameControllerEpoch'
       - $ref: '#/components/parameters/GameSessionId'
     get:
       operationId: getGameSession
@@ -4003,6 +4014,9 @@ paths:
       tags:
         - Game Sessions
       responses:
+        '423':
+          description: The game controller lease is required, or another Tool instance holds it
+          content: {}
         '204':
           description: Deleted
           content: {}
@@ -4011,6 +4025,7 @@ paths:
           content: {}
   /game-sessions/{id}/name:
     parameters:
+      - $ref: '#/components/parameters/GameControllerEpoch'
       - $ref: '#/components/parameters/GameSessionId'
     put:
       operationId: putGameSessionName
@@ -4024,6 +4039,9 @@ paths:
             schema:
               $ref: '#/components/schemas/GameSessionRename'
       responses:
+        '423':
+          description: The game controller lease is required, or another Tool instance holds it
+          content: {}
         '200':
           description: New configuration revision
           content:
@@ -4035,6 +4053,7 @@ paths:
           content: {}
   /game-sessions/{id}/config:
     parameters:
+      - $ref: '#/components/parameters/GameControllerEpoch'
       - $ref: '#/components/parameters/GameSessionId'
     put:
       operationId: putGameSessionConfig
@@ -4048,6 +4067,9 @@ paths:
             schema:
               $ref: '#/components/schemas/GameSessionDocumentUpdate'
       responses:
+        '423':
+          description: The game controller lease is required, or another Tool instance holds it
+          content: {}
         '200':
           description: New revision; an identical retry of the last write returns the current revision
           content:
@@ -4059,6 +4081,7 @@ paths:
           content: {}
   /game-sessions/{id}/resources:
     parameters:
+      - $ref: '#/components/parameters/GameControllerEpoch'
       - $ref: '#/components/parameters/GameSessionId'
     put:
       operationId: putGameSessionResources
@@ -4072,6 +4095,9 @@ paths:
             schema:
               $ref: '#/components/schemas/GameSessionResourcesUpdate'
       responses:
+        '423':
+          description: The game controller lease is required, or another Tool instance holds it
+          content: {}
         '200':
           description: New revision
           content:
@@ -4086,6 +4112,7 @@ paths:
           content: {}
   /game-sessions/{id}/runtime:
     parameters:
+      - $ref: '#/components/parameters/GameControllerEpoch'
       - $ref: '#/components/parameters/GameSessionId'
     put:
       operationId: putGameSessionRuntime
@@ -4099,6 +4126,9 @@ paths:
             schema:
               $ref: '#/components/schemas/GameSessionDocumentUpdate'
       responses:
+        '423':
+          description: The game controller lease is required, or another Tool instance holds it
+          content: {}
         '200':
           description: New revision
           content:
@@ -4110,6 +4140,7 @@ paths:
           content: {}
   /game-sessions/{id}/credentials:
     parameters:
+      - $ref: '#/components/parameters/GameControllerEpoch'
       - $ref: '#/components/parameters/GameSessionId'
     get:
       operationId: getGameSessionCredentials
@@ -4138,6 +4169,9 @@ paths:
             schema:
               $ref: '#/components/schemas/GameSessionDocumentUpdate'
       responses:
+        '423':
+          description: The game controller lease is required, or another Tool instance holds it
+          content: {}
         '200':
           description: New revision
           content:
@@ -4152,6 +4186,7 @@ paths:
           content: {}
   /game-sessions/{id}/geofence-plans:
     parameters:
+      - $ref: '#/components/parameters/GameControllerEpoch'
       - $ref: '#/components/parameters/GameSessionId'
     get:
       operationId: getGameSessionGeofencePlans
@@ -4177,6 +4212,9 @@ paths:
             schema:
               $ref: '#/components/schemas/GameSessionDocumentUpdate'
       responses:
+        '423':
+          description: The game controller lease is required, or another Tool instance holds it
+          content: {}
         '200':
           description: New revision
           content:
@@ -4188,6 +4226,7 @@ paths:
           content: {}
   /game-sessions/{id}/timetable:
     parameters:
+      - $ref: '#/components/parameters/GameControllerEpoch'
       - $ref: '#/components/parameters/GameSessionId'
     get:
       operationId: getGameSessionTimetable
@@ -4213,6 +4252,9 @@ paths:
             schema:
               $ref: '#/components/schemas/GameTimetablePublish'
       responses:
+        '423':
+          description: The game controller lease is required, or another Tool instance holds it
+          content: {}
         '200':
           description: Published timetable
           content:
@@ -4224,6 +4266,7 @@ paths:
           content: {}
   /game-sessions/{id}/timetable/progress:
     parameters:
+      - $ref: '#/components/parameters/GameControllerEpoch'
       - $ref: '#/components/parameters/GameSessionId'
     put:
       operationId: putGameSessionTimetableProgress
@@ -4237,6 +4280,9 @@ paths:
             schema:
               $ref: '#/components/schemas/GameTimetableProgressUpdate'
       responses:
+        '423':
+          description: The game controller lease is required, or another Tool instance holds it
+          content: {}
         '204':
           description: Recorded
           content: {}
@@ -4245,6 +4291,7 @@ paths:
           content: {}
   /game-sessions/{id}/logs:
     parameters:
+      - $ref: '#/components/parameters/GameControllerEpoch'
       - $ref: '#/components/parameters/GameSessionId'
     get:
       operationId: getGameSessionLogs
@@ -4282,10 +4329,15 @@ paths:
             schema:
               $ref: '#/components/schemas/GameSessionLogAppend'
       responses:
+        '423':
+          description: The game controller lease is required, or another Tool instance holds it
+          content: {}
         '204':
           description: Appended
           content: {}
   /game-notifications:
+    parameters:
+      - $ref: '#/components/parameters/GameControllerEpoch'
     get:
       operationId: getGameNotifications
       summary: Fetch the active notification history of a session device visible to the current user
@@ -4334,6 +4386,9 @@ paths:
             schema:
               $ref: '#/components/schemas/GameNotificationCreate'
       responses:
+        '423':
+          description: The game controller lease is required, or another Tool instance holds it
+          content: {}
         '200':
           description: Stored or existing identical record
           content:
@@ -4344,6 +4399,8 @@ paths:
           description: Stale generation, conflicting ID, or unregistered session device
           content: {}
   /game-notifications/history:
+    parameters:
+      - $ref: '#/components/parameters/GameControllerEpoch'
     get:
       operationId: getGameNotificationHistory
       summary: Fetch the full notification history of a game session, including records kept after cleanup
@@ -4377,6 +4434,8 @@ paths:
           description: Administrator access required
           content: {}
   /game-notifications/session/{id}:
+    parameters:
+      - $ref: '#/components/parameters/GameControllerEpoch'
     post:
       operationId: postGameNotificationSession
       summary: Initialize the notification generation of a session device (idempotent)
@@ -4390,6 +4449,9 @@ paths:
             type: integer
             format: int64
       responses:
+        '423':
+          description: The game controller lease is required, or another Tool instance holds it
+          content: {}
         '200':
           description: OK
           content:
@@ -4397,6 +4459,8 @@ paths:
               schema:
                 $ref: '#/components/schemas/GameNotificationState'
   /game-notifications/session/{id}/reset:
+    parameters:
+      - $ref: '#/components/parameters/GameControllerEpoch'
     post:
       operationId: postGameNotificationSessionReset
       summary: Replace the notification generation and clear its active history
@@ -4416,6 +4480,9 @@ paths:
             schema:
               $ref: '#/components/schemas/GameNotificationReset'
       responses:
+        '423':
+          description: The game controller lease is required, or another Tool instance holds it
+          content: {}
         '200':
           description: OK
           content:
@@ -4427,6 +4494,7 @@ paths:
           content: {}
   /game-proximity/session/{id}:
     parameters:
+      - $ref: '#/components/parameters/GameControllerEpoch'
       - name: id
         in: path
         required: true
@@ -4458,6 +4526,9 @@ paths:
             schema:
               $ref: '#/components/schemas/GameProximitySnapshot'
       responses:
+        '423':
+          description: The game controller lease is required, or another Tool instance holds it
+          content: {}
         '200':
           description: Stored snapshot
           content:
@@ -4468,6 +4539,8 @@ paths:
           description: Generation or revision conflict, or unregistered session device
           content: {}
   /game-proximity/session/{id}/circles:
+    parameters:
+      - $ref: '#/components/parameters/GameControllerEpoch'
     get:
       operationId: getGameProximityCircles
       summary: Fetch anonymous proximity circles for generated hunters and spectators
@@ -4490,6 +4563,8 @@ paths:
                 items:
                   $ref: '#/components/schemas/GameProximityPublicCircle'
   /game-proximity/session/{id}/access:
+    parameters:
+      - $ref: '#/components/parameters/GameControllerEpoch'
     get:
       operationId: getGameProximityAccess
       summary: Fetch the current participant's temporary device access
@@ -4519,6 +4594,191 @@ paths:
                     expiresAt:
                       type: string
                       format: date-time
+  /game-sessions/{id}/effects:
+    parameters:
+      - $ref: '#/components/parameters/GameSessionId'
+      - $ref: '#/components/parameters/GameControllerEpoch'
+    post:
+      operationId: postGameSessionEffects
+      summary: Apply one fenced, idempotent game operation
+      description: >-
+        Writes positions to this session's mirrors and game-state device, the related runtime change, archived
+        game notifications, queued pushes and log entries in one transaction. Repeating a deliveryId returns the
+        stored outcome (replayed true) without applying anything again; a different request under a used
+        deliveryId is a conflict. Latest positions reach WebSocket subscribers like tracker uploads, and the
+        destination devices show as online. Pushes are sent after commit, one attempt per recipient.
+      tags:
+        - Game Sessions
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GameEffectsDelivery'
+      responses:
+        '200':
+          description: Outcome of the delivery
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GameEffectsOutcome'
+        '400':
+          description: Invalid delivery, e.g. a destination that is not a mirror or the game-state device
+          content: {}
+        '409':
+          description: Revision or generation conflict, or the deliveryId was used for different effects
+          content: {}
+        '423':
+          description: The game controller lease is required, or another Tool instance holds it
+          content: {}
+  /game-controller:
+    get:
+      operationId: getGameController
+      summary: Fetch the controller lease
+      tags:
+        - Game Controller
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GameControllerLease'
+  /game-controller/acquire:
+    post:
+      operationId: acquireGameController
+      summary: Acquire a free or expired controller lease
+      description: Repeating the call from the instance that holds the active lease returns it unchanged.
+      tags:
+        - Game Controller
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GameControllerInstance'
+      responses:
+        '200':
+          description: Acquired lease and unfenced administrator edits since the previous acquisition
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GameControllerAcquisition'
+        '423':
+          description: Another Tool instance holds the lease
+          content: {}
+  /game-controller/takeover:
+    post:
+      operationId: takeOverGameController
+      summary: Forced takeover with a new controller epoch
+      tags:
+        - Game Controller
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GameControllerInstance'
+      responses:
+        '200':
+          description: Acquired lease
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GameControllerAcquisition'
+  /game-controller/renew:
+    parameters:
+      - $ref: '#/components/parameters/GameControllerEpoch'
+    post:
+      operationId: renewGameController
+      summary: Renew the lease held with the given epoch
+      tags:
+        - Game Controller
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GameControllerInstance'
+      responses:
+        '200':
+          description: Renewed lease
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GameControllerLease'
+        '423':
+          description: The lease expired, was taken over or ended with a server restart
+          content: {}
+  /game-controller/release:
+    parameters:
+      - $ref: '#/components/parameters/GameControllerEpoch'
+    post:
+      operationId: releaseGameController
+      summary: Release the lease; releasing an ended lease is a no-op
+      tags:
+        - Game Controller
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        '200':
+          description: Lease after the release
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GameControllerLease'
+  /game-controller/session:
+    parameters:
+      - $ref: '#/components/parameters/GameControllerEpoch'
+    put:
+      operationId: putGameControllerSession
+      summary: Set the stored session the controller executes (null stops execution)
+      tags:
+        - Game Controller
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GameControllerSession'
+      responses:
+        '200':
+          description: Updated lease
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GameControllerLease'
+        '423':
+          description: The game controller lease is required, or another Tool instance holds it
+          content: {}
+  /game-controller/history:
+    get:
+      operationId: getGameControllerHistory
+      summary: Acquisitions, releases, expiries, takeovers, restarts, execution changes and unfenced edits
+      tags:
+        - Game Controller
+      parameters:
+        - name: before
+          in: query
+          description: Cursor returned as nextCursor by the previous page (newest first)
+          schema:
+            type: string
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GameControllerHistoryPage'
 components:
   schemas:
     Position:
@@ -5899,7 +6159,303 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/GameProximityCircle'
+    GameControllerHolder:
+      type: object
+      required: [userId, userLabel, instanceId, label]
+      properties:
+        userId:
+          type: [integer, 'null']
+          format: int64
+        userLabel:
+          type: [string, 'null']
+        instanceId:
+          type: string
+        label:
+          type: [string, 'null']
+    GameControllerLease:
+      type: object
+      required: [epoch, state, active, holder, gameSessionId, acquiredAt, renewedAt, expiresAt, serverTime,
+                 leaseSeconds, renewSeconds]
+      properties:
+        epoch:
+          type: integer
+          format: int64
+          description: controllerEpoch of the latest acquisition; it only increases, also across restarts
+        state:
+          type: string
+          enum: [free, active, expired, released, restarted]
+        active:
+          type: boolean
+        holder:
+          oneOf:
+            - $ref: '#/components/schemas/GameControllerHolder'
+            - type: 'null'
+        gameSessionId:
+          type: [integer, 'null']
+          format: int64
+          description: Session the active controller executes
+        acquiredAt:
+          type: [string, 'null']
+          format: date-time
+        renewedAt:
+          type: [string, 'null']
+          format: date-time
+        expiresAt:
+          type: [string, 'null']
+          format: date-time
+        serverTime:
+          type: string
+          format: date-time
+        leaseSeconds:
+          type: integer
+        renewSeconds:
+          type: integer
+    GameControllerHistoryEntry:
+      type: object
+      required: [id, epoch, event, userId, userLabel, instanceId, label, gameSessionId, detail, occurredAt]
+      properties:
+        id:
+          type: integer
+          format: int64
+        epoch:
+          type: integer
+          format: int64
+        event:
+          type: string
+          enum: [acquired, takeover, takenOver, released, expired, serverRestart, executing, stoppedExecuting,
+                 unfencedEdit]
+        userId:
+          type: [integer, 'null']
+          format: int64
+        userLabel:
+          type: [string, 'null']
+        instanceId:
+          type: [string, 'null']
+        label:
+          type: [string, 'null']
+        gameSessionId:
+          type: [integer, 'null']
+          format: int64
+        detail:
+          type: [string, 'null']
+        occurredAt:
+          type: string
+          format: date-time
+    GameControllerAcquisition:
+      type: object
+      required: [lease, acquired, drift]
+      properties:
+        lease:
+          $ref: '#/components/schemas/GameControllerLease'
+        acquired:
+          type: boolean
+          description: False when the calling instance already held the active lease
+        drift:
+          type: array
+          description: Administrator edits of game-owned resources made while no lease was held
+          items:
+            $ref: '#/components/schemas/GameControllerHistoryEntry'
+    GameControllerHistoryPage:
+      type: object
+      required: [items, nextCursor, hasMore]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/GameControllerHistoryEntry'
+        nextCursor:
+          type: [string, 'null']
+        hasMore:
+          type: boolean
+    GameControllerInstance:
+      type: object
+      required: [instanceId]
+      properties:
+        instanceId:
+          type: string
+          pattern: '^[A-Za-z0-9_-]{8,64}$'
+        label:
+          type: [string, 'null']
+          maxLength: 128
+    GameControllerSession:
+      type: object
+      required: [gameSessionId]
+      properties:
+        gameSessionId:
+          type: [integer, 'null']
+          format: int64
+    GameEffectsPosition:
+      type: object
+      required: [latitude, longitude]
+      description: One destination; give deviceId or uniqueId of a mirror or the game-state device
+      properties:
+        deviceId:
+          type: [integer, 'null']
+          format: int64
+        uniqueId:
+          type: [string, 'null']
+        latitude:
+          type: number
+          minimum: -90
+          maximum: 90
+        longitude:
+          type: number
+          minimum: -180
+          maximum: 180
+        fixTime:
+          type: [string, 'null']
+          format: date-time
+          description: Defaults to the delivery time; an older fix is stored but does not become latest
+        attributes:
+          type: [object, 'null']
+          additionalProperties:
+            type: [string, number, boolean]
+    GameEffectsPush:
+      type: object
+      required: [userId, message]
+      properties:
+        userId:
+          type: integer
+          format: int64
+        subject:
+          type: [string, 'null']
+          maxLength: 512
+        message:
+          type: string
+          maxLength: 8192
+        notificator:
+          type: [string, 'null']
+          description: Defaults to traccar
+        alertId:
+          type: [string, 'null']
+          description: Queued only if this delivery archived that alert for the first time
+    GameEffectsDelivery:
+      type: object
+      required: [deliveryId]
+      properties:
+        deliveryId:
+          type: string
+          pattern: '^[A-Za-z0-9_-]{8,64}$'
+        positions:
+          type: [array, 'null']
+          maxItems: 200
+          items:
+            $ref: '#/components/schemas/GameEffectsPosition'
+        runtime:
+          oneOf:
+            - type: 'null'
+            - type: object
+              required: [expectedRevision, document]
+              properties:
+                expectedRevision:
+                  type: integer
+                  format: int64
+                document:
+                  type: object
+        notifications:
+          oneOf:
+            - type: 'null'
+            - type: object
+              required: [sessionDeviceId, generation, alerts]
+              properties:
+                sessionDeviceId:
+                  type: integer
+                  format: int64
+                generation:
+                  type: string
+                alerts:
+                  type: array
+                  minItems: 1
+                  maxItems: 100
+                  items:
+                    $ref: '#/components/schemas/GameNotificationAlert'
+        pushes:
+          type: [array, 'null']
+          maxItems: 500
+          items:
+            $ref: '#/components/schemas/GameEffectsPush'
+        logs:
+          type: [array, 'null']
+          items:
+            type: object
+            required: [category, occurredAt, message]
+            properties:
+              category:
+                type: string
+              occurredAt:
+                type: string
+                format: date-time
+              message:
+                type: string
+    GameEffectsOutcome:
+      type: object
+      required: [deliveryId, replayed, epoch, positions, runtimeRevision, generation, alerts, pushes]
+      properties:
+        deliveryId:
+          type: string
+        replayed:
+          type: boolean
+        epoch:
+          type: integer
+          format: int64
+        positions:
+          type: array
+          items:
+            type: object
+            required: [deviceId, positionId, latest, fixTime]
+            properties:
+              deviceId:
+                type: integer
+                format: int64
+              positionId:
+                type: integer
+                format: int64
+              latest:
+                type: boolean
+              fixTime:
+                type: string
+                format: date-time
+        runtimeRevision:
+          type: [integer, 'null']
+          format: int64
+        generation:
+          type: [string, 'null']
+        alerts:
+          type: array
+          items:
+            type: object
+            required: [alertId, created]
+            properties:
+              alertId:
+                type: string
+              created:
+                type: boolean
+        pushes:
+          type: array
+          items:
+            type: object
+            required: [id, userId, status, detail]
+            properties:
+              id:
+                type: [integer, 'null']
+                format: int64
+              userId:
+                type: [integer, 'null']
+                format: int64
+              status:
+                type: string
+                enum: [queued, attempting, sent, failed, uncertain, skipped, rejected]
+              detail:
+                type: [string, 'null']
   parameters:
+    GameControllerEpoch:
+      name: X-Game-Controller-Epoch
+      in: header
+      required: false
+      description: controllerEpoch of the lease held by the calling Tool instance
+      schema:
+        type: integer
+        format: int64
     GameSessionId:
       name: id
       in: path

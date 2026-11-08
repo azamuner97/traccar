@@ -45,6 +45,7 @@ import org.slf4j.LoggerFactory;
 import org.traccar.BaseProtocol;
 import org.traccar.LifecycleObject;
 import org.traccar.api.CorsResponseFilter;
+import org.traccar.api.GameControllerFilter;
 import org.traccar.protocol.OsmAndProtocol;
 import org.traccar.api.DateParameterConverterProvider;
 import org.traccar.api.MediaFilter;
@@ -193,6 +194,7 @@ public class WebServer implements LifecycleObject {
                 ObjectMapperContextResolver.class,
                 DateParameterConverterProvider.class,
                 SecurityRequestFilter.class,
+                GameControllerFilter.class,
                 CorsResponseFilter.class,
                 ResourceErrorHandler.class,
                 StreamWriter.class);
@@ -201,6 +203,13 @@ public class WebServer implements LifecycleObject {
             LOGGER.warn("Failed to load API resources");
         }
         servletHandler.addServlet(new ServletHolder(new ServletContainer(resourceConfig)), "/api/*");
+        servletHandler.addFilter((request, response, chain) -> {
+            try {
+                chain.doFilter(request, response);
+            } finally {
+                GameControllerFilter.releaseFrom(request);
+            }
+        }, "/api/*", EnumSet.of(DispatcherType.REQUEST));
     }
 
     private void initSessionConfig(ServletContextHandler servletHandler) {

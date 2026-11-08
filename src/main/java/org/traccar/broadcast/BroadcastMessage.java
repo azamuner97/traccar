@@ -40,6 +40,16 @@ public class BroadcastMessage {
         this.gameProximityUserIds = gameProximityUserIds;
     }
 
+    private String gameAdminResource;
+
+    public String getGameAdminResource() {
+        return gameAdminResource;
+    }
+
+    public void setGameAdminResource(String gameAdminResource) {
+        this.gameAdminResource = gameAdminResource;
+    }
+
     private Long gameNotificationsDeviceId;
     private Long gameNotificationsRecipientUserId;
 

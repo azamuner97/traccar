@@ -297,6 +297,68 @@ It creates and removes a temporary administrator and non-administrator and runs
 the Tool's own server repository against the live API. The notification and
 proximity audits register their fixture session devices with game sessions.
 
+## Game controller and effects
+
+One Traccar Tool instance controls the game server-wide at a time
+(`changelog-game-controller.xml`, implementation plan stage 2). The lease is
+bound to the operator and a unique app instance and lasts
+`gameController.leaseSeconds` (default 30), renewed every
+`gameController.renewSeconds` (default 5). Every acquisition gets a larger
+`controllerEpoch`, stored in `tc_game_controller` so it keeps increasing across
+restarts. `/api/game-controller` acquires, renews, releases and force-takes
+over the lease, sets the session the controller executes, and lists the history
+(`tc_game_controller_history`: acquisitions, releases, expiries, takeovers,
+server restarts, execution changes and unfenced administrator edits). A server
+restart ends an active lease, so Tool must resume explicitly. The API version
+is 2.
+
+Fenced requests carry the epoch in `X-Game-Controller-Epoch` and are refused
+with HTTP 423 otherwise (`GameControllerFilter`):
+
+- game-session runtime, resources, timetable progress and effects, and every
+  write of the executing session; configuration of a session that is not
+  executing needs only its revision check;
+- writes to `/api/game-notifications` and `/api/game-proximity`;
+- while a lease is held, standard mutations (devices, groups, users,
+  permissions, geofences, `DELETE /api/positions`) of resources in any stored
+  session's resource mapping, and `/api/notifications/send/*` reaching a member
+  of the executing session, also without `userId`. While no lease is held,
+  administrators may make them; each is recorded and reported to Tool on its
+  next acquisition. Users may always update their own account, so participants
+  can register push tokens and save preferences during a game;
+- any request that carries an epoch must carry the current one.
+
+A fenced request holds an in-process fence shared until its response;
+acquisition, release and takeover take it exclusively, so a request that passed
+the check completes before control changes hands. Only one server instance may
+use the database. Tracker-endpoint uploads are not fenced (confirmed decision
+8): Tool writes mirrors only through effects.
+
+`POST /api/game-sessions/{id}/effects` applies one game operation in one
+transaction under a durable `deliveryId` (`tc_game_deliveries`): positions for
+the session's mirrors and game-state device, the runtime change, archived game
+notifications, queued pushes and log entries. Repeating a delivery ID returns
+the stored outcome without applying it again. Positions use the uniform mirror
+payload (protocol `osmand`, accuracy/speed/course 0, activity `still`) plus the
+caller's scalar attributes; the fix time defaults to the delivery time, and a
+position older than the device's latest is stored without becoming latest.
+After commit the latest positions reach the cache and WebSocket subscribers
+like `PostProcessHandler`, and the destination devices show as online with a
+new last-update time, as for tracker uploads. These positions skip filters and
+event handlers.
+
+Pushes are queued in `tc_game_push_outbox` and sent after commit, one attempt
+per recipient, only to members of the session and, when they name an alert,
+only if this delivery archived it first. Each row ends `sent` or `failed`;
+after a restart, unattempted rows are sent and rows interrupted during their
+attempt become `uncertain` and are never retried.
+
+Administrators' WebSocket clients receive `{"invalidate": ["game-sessions"]}`
+when a session is created, renamed or deleted or its configuration, resources,
+credentials, geofence plans or timetable change (not on runtime saves or
+effects, which follow every game action), and `["game-controller"]` when the
+lease changes.
+
 ## Multi-participant replay
 
 The replay page accepts individual devices, nested groups, or all devices
