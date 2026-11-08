@@ -143,6 +143,19 @@ public class GameNotificationResource extends BaseResource {
                         String.valueOf(user.getAttributes().get("traccarToolUserRole"))));
     }
 
+    @GET
+    @Path("history")
+    public GameNotificationService.HistoryPage history(
+            @QueryParam("gameSessionId") long gameSessionId,
+            @QueryParam("after") String after, @QueryParam("limit") int limit) throws Exception {
+        try {
+            permissionsService.checkAdmin(getUserId());
+        } catch (SecurityException error) {
+            throw new ForbiddenException(error.getMessage());
+        }
+        return service.history(gameSessionId, after, limit);
+    }
+
     @POST
     public GameNotificationService.Creation create(CreateRequest request) throws Exception {
         if (request == null) {

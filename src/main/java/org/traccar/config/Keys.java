@@ -2319,4 +2319,13 @@ public final class Keys {
             "broadcast.secondary",
             List.of(KeyType.CONFIG));
 
+    /**
+     * Base64-encoded 256-bit AES key that encrypts generated game-account passwords stored with central game
+     * sessions. Supply it through the configuration file or the GAME_SESSIONS_CREDENTIAL_KEY environment variable;
+     * it is never stored in the database. Without it, credential reads and writes fail with a clear error.
+     */
+    public static final ConfigKey<String> GAME_SESSIONS_CREDENTIAL_KEY = new StringConfigKey(
+            "gameSessions.credentialKey",
+            List.of(KeyType.CONFIG));
+
 }

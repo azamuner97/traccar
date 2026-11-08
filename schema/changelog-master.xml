@@ -44,4 +44,5 @@
   <include file="changelog-game-notifications-targeting.xml" relativeToChangelogFile="true" />
 
     <include file="changelog-game-proximity.xml" relativeToChangelogFile="true" />
+  <include file="changelog-game-sessions.xml" relativeToChangelogFile="true" />
 </databaseChangeLog>

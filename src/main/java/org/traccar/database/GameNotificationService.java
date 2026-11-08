@@ -72,10 +72,12 @@ public class GameNotificationService {
     @JsonInclude(JsonInclude.Include.NON_NULL)
     public record Entry(String id, String type, String audience, String occurredAt, String timeZone,
                         String message, Long recipientUserId, Long sourceDeviceId,
-                        long gameStateDeviceId, String generation, String createdAt) { }
+                        long gameStateDeviceId, String generation, String createdAt, String recipientLabel) { }
     public record State(int version, long sessionDeviceId, String generation, String resetAt) { }
     public record Page(int version, long sessionDeviceId, String generation, String resetAt,
                        Long personalSourceDeviceId, List<Entry> items, String nextCursor, boolean hasMore) { }
+    /** Operator history of one game session across generations, including records detached by cleanup. */
+    public record HistoryPage(long gameSessionId, List<Entry> items, String nextCursor, boolean hasMore) { }
     public record Creation(int version, String generation, Entry item, boolean created) { }
     public record ReadAccess(long userId, Long sourceDeviceId, String role) { }
 
@@ -335,7 +337,26 @@ public class GameNotificationService {
                 rows.getTimestamp("occurredat", calendar).toInstant().toString(), rows.getString("timezone"),
                 rows.getString("message"), recipientUserId, sourceDeviceId,
                 rows.getLong("sessiondeviceid"), rows.getString("generation"),
-                rows.getTimestamp("createdat", calendar).toInstant().toString());
+                rows.getTimestamp("createdat", calendar).toInstant().toString(), rows.getString("recipientlabel"));
+    }
+
+    private static String recipientLabel(Connection connection, Long userId) throws SQLException {
+        if (userId == null) {
+            return null;
+        }
+        try (var query = connection.prepareStatement("SELECT name,email FROM tc_users WHERE id = ?")) {
+            query.setLong(1, userId);
+            try (var rows = query.executeQuery()) {
+                if (!rows.next()) {
+                    return null;
+                }
+                String label = rows.getString("name");
+                if (label == null || label.isBlank()) {
+                    label = rows.getString("email");
+                }
+                return label == null ? null : label.length() > 128 ? label.substring(0, 128) : label;
+            }
+        }
     }
 
     public Creation create(long deviceId, String expected, Alert input) throws Exception {
@@ -366,10 +387,13 @@ public class GameNotificationService {
                         }
                     }
                 }
+                long gameSessionId = GameSessionService.gameSessionIdForDevice(connection, deviceId);
+                String label = recipientLabel(connection, alert.recipientUserId());
                 Instant created = Instant.now().truncatedTo(ChronoUnit.MILLIS);
                 try (var query = connection.prepareStatement("INSERT INTO tc_game_notifications "
                         + "(alertid,sessiondeviceid,generation,type,audience,occurredat,timezone,message,"
-                        + "recipientuserid,sourcedeviceid,createdat) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                        + "recipientuserid,sourcedeviceid,createdat,gamesessionid,recipientlabel)"
+                        + " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
                         Statement.RETURN_GENERATED_KEYS)) {
                     query.setString(1, alert.id());
                     query.setLong(2, deviceId);
@@ -390,13 +414,19 @@ public class GameNotificationService {
                         query.setLong(10, alert.sourceDeviceId());
                     }
                     query.setTimestamp(11, Timestamp.from(created), utc());
+                    query.setLong(12, gameSessionId);
+                    if (label == null) {
+                        query.setNull(13, Types.VARCHAR);
+                    } else {
+                        query.setString(13, label);
+                    }
                     query.executeUpdate();
                 }
                 connection.commit();
                 return new Creation(2, expected, new Entry(alert.id(), alert.type(), alert.audience(),
                         alert.occurredAt(), alert.timeZone(), alert.message(),
                         alert.recipientUserId(), alert.sourceDeviceId(),
-                        deviceId, expected, created.toString()), true);
+                        deviceId, expected, created.toString(), label), true);
             } catch (Exception error) {
                 connection.rollback();
                 throw error;
@@ -476,6 +506,44 @@ public class GameNotificationService {
                 connection.rollback();
                 throw error;
             }
+        }
+    }
+
+    public HistoryPage history(long gameSessionId, String cursor, int requestedLimit) throws Exception {
+        int limit = requestedLimit == 0 ? 100 : requestedLimit;
+        if (limit < 1 || limit > 500 || cursor != null && !cursor.matches("[0-9]{1,19}")) {
+            throw new BadRequestException("Invalid notification pagination");
+        }
+        long after = cursor == null ? 0 : Long.parseLong(cursor);
+        try (var connection = dataSource.getConnection()) {
+            try (var query = connection.prepareStatement("SELECT id FROM tc_game_sessions WHERE id = ?")) {
+                query.setLong(1, gameSessionId);
+                try (var rows = query.executeQuery()) {
+                    if (!rows.next()) {
+                        throw new NotFoundException("Game session not found");
+                    }
+                }
+            }
+            List<Entry> items = new ArrayList<>();
+            boolean more = false;
+            String next = Long.toString(after);
+            try (var query = connection.prepareStatement("SELECT * FROM tc_game_notifications"
+                    + " WHERE gamesessionid = ? AND id > ? ORDER BY id ASC")) {
+                query.setLong(1, gameSessionId);
+                query.setLong(2, after);
+                query.setMaxRows(limit + 1);
+                try (var rows = query.executeQuery()) {
+                    while (rows.next()) {
+                        if (items.size() == limit) {
+                            more = true;
+                            break;
+                        }
+                        items.add(entry(rows));
+                        next = Long.toString(rows.getLong("id"));
+                    }
+                }
+            }
+            return new HistoryPage(gameSessionId, items, next, more);
         }
     }
 }

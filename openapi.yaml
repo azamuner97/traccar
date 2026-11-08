@@ -81,6 +81,12 @@ tags:
     description: Password reset flow
   - name: Stream
     description: Live video streaming
+  - name: Game Sessions
+    description: Central game-session storage for Traccar Tool (administrators only)
+  - name: Game Notifications
+    description: Game notification journal
+  - name: Game Proximity
+    description: Participant proximity access and circles
 paths:
   /audit:
     get:
@@ -3915,6 +3921,604 @@ paths:
         '401':
           description: Unauthorized
           content: {}
+  /game-sessions/capabilities:
+    get:
+      operationId: getGameSessionCapabilities
+      summary: Fetch the game-session API version (administrators only)
+      tags:
+        - Game Sessions
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GameSessionCapabilities'
+        '403':
+          description: Administrator access required
+          content: {}
+  /game-sessions:
+    get:
+      operationId: getGameSessions
+      summary: List stored game sessions (administrators only)
+      tags:
+        - Game Sessions
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/GameSessionSummary'
+        '403':
+          description: Administrator access required
+          content: {}
+    post:
+      operationId: postGameSession
+      summary: Create a game session with an immutable ID
+      tags:
+        - Game Sessions
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GameSessionCreate'
+      responses:
+        '200':
+          description: Created session
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GameSession'
+        '400':
+          description: Invalid name, schema version or configuration
+          content: {}
+        '409':
+          description: A game session with this name already exists
+          content: {}
+  /game-sessions/{id}:
+    parameters:
+      - $ref: '#/components/parameters/GameSessionId'
+    get:
+      operationId: getGameSession
+      summary: Fetch a game session with configuration, resource mapping, runtime and membership
+      tags:
+        - Game Sessions
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GameSession'
+        '404':
+          description: Game session not found
+          content: {}
+    delete:
+      operationId: deleteGameSession
+      summary: Delete saved game-session data; managed Traccar resources are not touched
+      tags:
+        - Game Sessions
+      responses:
+        '204':
+          description: Deleted
+          content: {}
+        '404':
+          description: Game session not found
+          content: {}
+  /game-sessions/{id}/name:
+    parameters:
+      - $ref: '#/components/parameters/GameSessionId'
+    put:
+      operationId: putGameSessionName
+      summary: Rename a game session; its ID and Traccar resource names do not change
+      tags:
+        - Game Sessions
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GameSessionRename'
+      responses:
+        '200':
+          description: New configuration revision
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GameSessionRevision'
+        '409':
+          description: Revision conflict or duplicate name
+          content: {}
+  /game-sessions/{id}/config:
+    parameters:
+      - $ref: '#/components/parameters/GameSessionId'
+    put:
+      operationId: putGameSessionConfig
+      summary: Replace the configuration document if it still has the expected revision
+      tags:
+        - Game Sessions
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GameSessionDocumentUpdate'
+      responses:
+        '200':
+          description: New revision; an identical retry of the last write returns the current revision
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GameSessionRevision'
+        '409':
+          description: Revision conflict
+          content: {}
+  /game-sessions/{id}/resources:
+    parameters:
+      - $ref: '#/components/parameters/GameSessionId'
+    put:
+      operationId: putGameSessionResources
+      summary: Replace the Traccar resource mapping, session device and membership
+      tags:
+        - Game Sessions
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GameSessionResourcesUpdate'
+      responses:
+        '200':
+          description: New revision
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GameSessionRevision'
+        '400':
+          description: Invalid member or session device
+          content: {}
+        '409':
+          description: Revision conflict, or a user or session device already belongs to another session
+          content: {}
+  /game-sessions/{id}/runtime:
+    parameters:
+      - $ref: '#/components/parameters/GameSessionId'
+    put:
+      operationId: putGameSessionRuntime
+      summary: Replace the Tool runtime checkpoint if it still has the expected revision
+      tags:
+        - Game Sessions
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GameSessionDocumentUpdate'
+      responses:
+        '200':
+          description: New revision
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GameSessionRevision'
+        '409':
+          description: Revision conflict
+          content: {}
+  /game-sessions/{id}/credentials:
+    parameters:
+      - $ref: '#/components/parameters/GameSessionId'
+    get:
+      operationId: getGameSessionCredentials
+      summary: Fetch decrypted generated-account passwords
+      tags:
+        - Game Sessions
+      responses:
+        '200':
+          description: Credentials document; revision 0 when none are stored
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GameSessionDocument'
+        '503':
+          description: The credential key is missing or does not match the stored data
+          content: {}
+    put:
+      operationId: putGameSessionCredentials
+      summary: Replace the encrypted generated-account passwords
+      tags:
+        - Game Sessions
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GameSessionDocumentUpdate'
+      responses:
+        '200':
+          description: New revision
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GameSessionRevision'
+        '409':
+          description: Revision conflict
+          content: {}
+        '503':
+          description: The credential key is missing
+          content: {}
+  /game-sessions/{id}/geofence-plans:
+    parameters:
+      - $ref: '#/components/parameters/GameSessionId'
+    get:
+      operationId: getGameSessionGeofencePlans
+      summary: Fetch the geofence planner document with geometry
+      tags:
+        - Game Sessions
+      responses:
+        '200':
+          description: Plan document; revision 0 when none is stored
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GameSessionDocument'
+    put:
+      operationId: putGameSessionGeofencePlans
+      summary: Replace the geofence planner document
+      tags:
+        - Game Sessions
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GameSessionDocumentUpdate'
+      responses:
+        '200':
+          description: New revision
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GameSessionRevision'
+        '409':
+          description: Revision conflict
+          content: {}
+  /game-sessions/{id}/timetable:
+    parameters:
+      - $ref: '#/components/parameters/GameSessionId'
+    get:
+      operationId: getGameSessionTimetable
+      summary: Fetch the committed timetable with its active entries
+      tags:
+        - Game Sessions
+      responses:
+        '200':
+          description: Timetable; revision 0 when none is published
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GameTimetable'
+    put:
+      operationId: putGameSessionTimetable
+      summary: Publish a parsed timetable; entries matching by time and participant keep their IDs
+      tags:
+        - Game Sessions
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GameTimetablePublish'
+      responses:
+        '200':
+          description: Published timetable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GameTimetablePublished'
+        '409':
+          description: Revision conflict
+          content: {}
+  /game-sessions/{id}/timetable/progress:
+    parameters:
+      - $ref: '#/components/parameters/GameSessionId'
+    put:
+      operationId: putGameSessionTimetableProgress
+      summary: Record execution outcomes of timetable entries
+      tags:
+        - Game Sessions
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GameTimetableProgressUpdate'
+      responses:
+        '204':
+          description: Recorded
+          content: {}
+        '400':
+          description: Unknown entry or status
+          content: {}
+  /game-sessions/{id}/logs:
+    parameters:
+      - $ref: '#/components/parameters/GameSessionId'
+    get:
+      operationId: getGameSessionLogs
+      summary: Fetch session log entries in order
+      tags:
+        - Game Sessions
+      parameters:
+        - name: after
+          in: query
+          description: Cursor returned as nextCursor by the previous page
+          schema:
+            type: string
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 1000
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GameSessionLogPage'
+    post:
+      operationId: postGameSessionLogs
+      summary: Append session log entries
+      tags:
+        - Game Sessions
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GameSessionLogAppend'
+      responses:
+        '204':
+          description: Appended
+          content: {}
+  /game-notifications:
+    get:
+      operationId: getGameNotifications
+      summary: Fetch the active notification history of a session device visible to the current user
+      tags:
+        - Game Notifications
+      parameters:
+        - name: sessionDeviceId
+          in: query
+          required: true
+          schema:
+            type: integer
+            format: int64
+        - name: generation
+          in: query
+          schema:
+            type: string
+        - name: after
+          in: query
+          schema:
+            type: string
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GameNotificationPage'
+        '409':
+          description: Notification generation changed
+          content: {}
+    post:
+      operationId: postGameNotification
+      summary: Archive a game notification for a session device registered with a game session
+      tags:
+        - Game Notifications
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GameNotificationCreate'
+      responses:
+        '200':
+          description: Stored or existing identical record
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GameNotificationCreation'
+        '409':
+          description: Stale generation, conflicting ID, or unregistered session device
+          content: {}
+  /game-notifications/history:
+    get:
+      operationId: getGameNotificationHistory
+      summary: Fetch the full notification history of a game session, including records kept after cleanup
+      tags:
+        - Game Notifications
+      parameters:
+        - name: gameSessionId
+          in: query
+          required: true
+          schema:
+            type: integer
+            format: int64
+        - name: after
+          in: query
+          schema:
+            type: string
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 500
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GameNotificationHistoryPage'
+        '403':
+          description: Administrator access required
+          content: {}
+  /game-notifications/session/{id}:
+    post:
+      operationId: postGameNotificationSession
+      summary: Initialize the notification generation of a session device (idempotent)
+      tags:
+        - Game Notifications
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GameNotificationState'
+  /game-notifications/session/{id}/reset:
+    post:
+      operationId: postGameNotificationSessionReset
+      summary: Replace the notification generation and clear its active history
+      tags:
+        - Game Notifications
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GameNotificationReset'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GameNotificationState'
+        '409':
+          description: Notification generation changed
+          content: {}
+  /game-proximity/session/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        description: Hidden session device ID
+        schema:
+          type: integer
+          format: int64
+    get:
+      operationId: getGameProximity
+      summary: Fetch the proximity snapshot of a session device
+      tags:
+        - Game Proximity
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GameProximitySnapshot'
+    put:
+      operationId: putGameProximity
+      summary: Replace the proximity snapshot of a session device registered with a game session
+      tags:
+        - Game Proximity
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GameProximitySnapshot'
+      responses:
+        '200':
+          description: Stored snapshot
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GameProximitySnapshot'
+        '409':
+          description: Generation or revision conflict, or unregistered session device
+          content: {}
+  /game-proximity/session/{id}/circles:
+    get:
+      operationId: getGameProximityCircles
+      summary: Fetch anonymous proximity circles for generated hunters and spectators
+      tags:
+        - Game Proximity
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/GameProximityPublicCircle'
+  /game-proximity/session/{id}/access:
+    get:
+      operationId: getGameProximityAccess
+      summary: Fetch the current participant's temporary device access
+      tags:
+        - Game Proximity
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  required: [deviceId, expiresAt]
+                  properties:
+                    deviceId:
+                      type: integer
+                      format: int64
+                    expiresAt:
+                      type: string
+                      format: date-time
 components:
   schemas:
     Position:
@@ -4784,6 +5388,526 @@ components:
           type: object
           properties: {}
           description: Additional action attributes
+    GameSessionCapabilities:
+      type: object
+      required: [apiVersion]
+      properties:
+        apiVersion:
+          type: integer
+          description: Game-session API version; mismatched Tool builds stop before acquiring control or writing data
+    GameSessionSummary:
+      type: object
+      required: [id, name, schemaVersion, sessionDeviceId, configRevision, resourcesRevision, runtimeRevision, createdAt, updatedAt]
+      properties:
+        id:
+          type: integer
+          format: int64
+          description: Immutable game-session ID
+        name:
+          type: string
+          maxLength: 128
+        schemaVersion:
+          type: integer
+        sessionDeviceId:
+          type: [integer, 'null']
+          format: int64
+          description: Hidden game-state device, once device setup created it
+        configRevision:
+          type: integer
+          format: int64
+        resourcesRevision:
+          type: integer
+          format: int64
+        runtimeRevision:
+          type: integer
+          format: int64
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    GameSessionMember:
+      type: object
+      required: [userId, role, number, assignedDeviceId, login]
+      properties:
+        userId:
+          type: integer
+          format: int64
+        role:
+          type: string
+          enum: [player, supporter, hunter, spectator]
+        number:
+          type: [integer, 'null']
+          minimum: 1
+        assignedDeviceId:
+          type: [integer, 'null']
+          format: int64
+        login:
+          type: string
+          maxLength: 128
+    GameSession:
+      type: object
+      required: [id, name, schemaVersion, sessionDeviceId, configRevision, config, resourcesRevision, resources, runtimeRevision, runtime, members, createdAt, updatedAt]
+      properties:
+        id:
+          type: integer
+          format: int64
+        name:
+          type: string
+        schemaVersion:
+          type: integer
+        sessionDeviceId:
+          type: [integer, 'null']
+          format: int64
+        configRevision:
+          type: integer
+          format: int64
+        config:
+          type: object
+          description: Session configuration owned by the operator
+        resourcesRevision:
+          type: integer
+          format: int64
+        resources:
+          type: object
+          description: Mapping of game-owned Traccar resources
+        runtimeRevision:
+          type: integer
+          format: int64
+        runtime:
+          type: object
+          description: Tool runtime checkpoint
+        members:
+          type: array
+          items:
+            $ref: '#/components/schemas/GameSessionMember'
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    GameSessionCreate:
+      type: object
+      required: [name, schemaVersion, config]
+      properties:
+        name:
+          type: string
+          maxLength: 128
+        schemaVersion:
+          type: integer
+          minimum: 1
+        config:
+          type: object
+    GameSessionRename:
+      type: object
+      required: [expectedRevision, name]
+      properties:
+        expectedRevision:
+          type: integer
+          format: int64
+          description: Configuration revision the rename is based on
+        name:
+          type: string
+          maxLength: 128
+    GameSessionDocumentUpdate:
+      type: object
+      required: [expectedRevision, document]
+      properties:
+        expectedRevision:
+          type: integer
+          format: int64
+          minimum: 0
+        schemaVersion:
+          type: [integer, 'null']
+          description: Only used for configuration updates
+        document:
+          type: object
+    GameSessionResourcesUpdate:
+      type: object
+      required: [expectedRevision, sessionDeviceId, resources, members]
+      properties:
+        expectedRevision:
+          type: integer
+          format: int64
+          minimum: 0
+        sessionDeviceId:
+          type: [integer, 'null']
+          format: int64
+        resources:
+          type: object
+        members:
+          type: array
+          items:
+            $ref: '#/components/schemas/GameSessionMember'
+    GameSessionRevision:
+      type: object
+      required: [revision]
+      properties:
+        revision:
+          type: integer
+          format: int64
+    GameSessionDocument:
+      type: object
+      required: [revision, document]
+      properties:
+        revision:
+          type: integer
+          format: int64
+        document:
+          type: object
+    GameTimetableEntry:
+      type: object
+      required: [id, scheduledAt, participant, content, status, statusAt]
+      properties:
+        id:
+          type: integer
+          format: int64
+          description: Stable entry ID, kept while time and participant stay the same
+        scheduledAt:
+          type: string
+          format: date-time
+        participant:
+          type: string
+          maxLength: 128
+        content:
+          type: string
+          maxLength: 512
+          description: Timetable cell value
+        status:
+          type: string
+          enum: [scheduled, sent, skipped, failed]
+        statusAt:
+          type: [string, 'null']
+          format: date-time
+    GameTimetable:
+      type: object
+      required: [revision, columns, source, entries]
+      properties:
+        revision:
+          type: integer
+          format: int64
+        columns:
+          type: array
+          items:
+            type: string
+        source:
+          type: object
+          description: Metadata about the published workbook, without file contents
+        entries:
+          type: array
+          items:
+            $ref: '#/components/schemas/GameTimetableEntry'
+    GameTimetableEntryInput:
+      type: object
+      required: [scheduledAt, participant, content]
+      properties:
+        scheduledAt:
+          type: string
+          format: date-time
+        participant:
+          type: string
+          maxLength: 128
+        content:
+          type: string
+          maxLength: 512
+    GameTimetablePublish:
+      type: object
+      required: [expectedRevision, columns, source, entries]
+      properties:
+        expectedRevision:
+          type: integer
+          format: int64
+          minimum: 0
+        columns:
+          type: array
+          minItems: 1
+          items:
+            type: string
+        source:
+          type: object
+        entries:
+          type: array
+          items:
+            $ref: '#/components/schemas/GameTimetableEntryInput'
+    GameTimetablePublished:
+      type: object
+      required: [revision, structureChanged, entries]
+      properties:
+        revision:
+          type: integer
+          format: int64
+        structureChanged:
+          type: boolean
+          description: Columns or scheduled times changed
+        entries:
+          type: array
+          items:
+            $ref: '#/components/schemas/GameTimetableEntry'
+    GameTimetableProgressUpdate:
+      type: object
+      required: [entries]
+      properties:
+        entries:
+          type: array
+          items:
+            type: object
+            required: [id, status]
+            properties:
+              id:
+                type: integer
+                format: int64
+              status:
+                type: string
+                enum: [scheduled, sent, skipped, failed]
+    GameSessionLogEntry:
+      type: object
+      required: [id, category, occurredAt, message]
+      properties:
+        id:
+          type: integer
+          format: int64
+        category:
+          type: string
+          pattern: '^[A-Za-z0-9_-]{1,32}$'
+        occurredAt:
+          type: string
+          format: date-time
+        message:
+          type: string
+    GameSessionLogPage:
+      type: object
+      required: [items, nextCursor, hasMore]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/GameSessionLogEntry'
+        nextCursor:
+          type: string
+        hasMore:
+          type: boolean
+    GameSessionLogAppend:
+      type: object
+      required: [entries]
+      properties:
+        entries:
+          type: array
+          minItems: 1
+          maxItems: 500
+          items:
+            type: object
+            required: [category, occurredAt, message]
+            properties:
+              category:
+                type: string
+                pattern: '^[A-Za-z0-9_-]{1,32}$'
+              occurredAt:
+                type: string
+                format: date-time
+              message:
+                type: string
+                maxLength: 16384
+    GameNotificationAlert:
+      type: object
+      required: [id, type, audience, occurredAt, timeZone, message]
+      properties:
+        id:
+          type: string
+          pattern: '^[A-Za-z0-9_-]{1,64}$'
+        type:
+          type: string
+        audience:
+          type: string
+        occurredAt:
+          type: string
+          format: date-time
+        timeZone:
+          type: string
+        message:
+          type: string
+        recipientUserId:
+          type: integer
+          format: int64
+        sourceDeviceId:
+          type: integer
+          format: int64
+    GameNotificationEntry:
+      allOf:
+        - $ref: '#/components/schemas/GameNotificationAlert'
+        - type: object
+          required: [gameStateDeviceId, generation, createdAt]
+          properties:
+            gameStateDeviceId:
+              type: integer
+              format: int64
+              description: 0 once whole-session cleanup deleted the session device
+            generation:
+              type: string
+            createdAt:
+              type: string
+              format: date-time
+            recipientLabel:
+              type: string
+              description: Recipient name kept for operator history after the account is deleted
+    GameNotificationPage:
+      type: object
+      required: [version, sessionDeviceId, generation, resetAt, items, nextCursor, hasMore]
+      properties:
+        version:
+          type: integer
+        sessionDeviceId:
+          type: integer
+          format: int64
+        generation:
+          type: [string, 'null']
+        resetAt:
+          type: [string, 'null']
+        personalSourceDeviceId:
+          type: [integer, 'null']
+          format: int64
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/GameNotificationEntry'
+        nextCursor:
+          type: string
+        hasMore:
+          type: boolean
+    GameNotificationHistoryPage:
+      type: object
+      required: [gameSessionId, items, nextCursor, hasMore]
+      properties:
+        gameSessionId:
+          type: integer
+          format: int64
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/GameNotificationEntry'
+        nextCursor:
+          type: string
+        hasMore:
+          type: boolean
+    GameNotificationCreate:
+      type: object
+      required: [sessionDeviceId, generation, alert]
+      properties:
+        sessionDeviceId:
+          type: integer
+          format: int64
+        generation:
+          type: string
+        alert:
+          $ref: '#/components/schemas/GameNotificationAlert'
+    GameNotificationCreation:
+      type: object
+      required: [version, generation, item, created]
+      properties:
+        version:
+          type: integer
+        generation:
+          type: string
+        item:
+          $ref: '#/components/schemas/GameNotificationEntry'
+        created:
+          type: boolean
+    GameNotificationState:
+      type: object
+      required: [version, sessionDeviceId, generation, resetAt]
+      properties:
+        version:
+          type: integer
+        sessionDeviceId:
+          type: integer
+          format: int64
+        generation:
+          type: [string, 'null']
+        resetAt:
+          type: [string, 'null']
+    GameNotificationReset:
+      type: object
+      required: [expectedGeneration, replacementGeneration]
+      properties:
+        expectedGeneration:
+          type: string
+        replacementGeneration:
+          type: string
+    GameProximityGrant:
+      type: object
+      required: [episodeId, recipientUserId, sourceDeviceId, targetDeviceId, expiresAt]
+      properties:
+        episodeId:
+          type: string
+        recipientUserId:
+          type: integer
+          format: int64
+        sourceDeviceId:
+          type: integer
+          format: int64
+        targetDeviceId:
+          type: integer
+          format: int64
+        expiresAt:
+          type: string
+          format: date-time
+    GameProximityPublicCircle:
+      type: object
+      required: [id, latitude, longitude, diameterMeters, playerCount, supporterCount, expiresAt]
+      properties:
+        id:
+          type: string
+        latitude:
+          type: number
+        longitude:
+          type: number
+        diameterMeters:
+          type: number
+        playerCount:
+          type: integer
+        supporterCount:
+          type: integer
+        expiresAt:
+          type: string
+          format: date-time
+    GameProximityCircle:
+      allOf:
+        - $ref: '#/components/schemas/GameProximityPublicCircle'
+        - type: object
+          required: [participantDeviceIds]
+          properties:
+            participantDeviceIds:
+              type: array
+              items:
+                type: integer
+                format: int64
+    GameProximitySnapshot:
+      type: object
+      required: [generation, revision, grants, circles]
+      properties:
+        generation:
+          type: string
+        revision:
+          type: integer
+          format: int64
+        grants:
+          type: array
+          items:
+            $ref: '#/components/schemas/GameProximityGrant'
+        circles:
+          type: array
+          items:
+            $ref: '#/components/schemas/GameProximityCircle'
+  parameters:
+    GameSessionId:
+      name: id
+      in: path
+      required: true
+      description: Immutable game-session ID
+      schema:
+        type: integer
+        format: int64
   securitySchemes:
     BasicAuth:
       type: http

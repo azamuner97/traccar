@@ -38,9 +38,11 @@ public class GameProximityServiceTest {
             statement.execute("CREATE TABLE tc_user_device(userid INT, deviceid INT, UNIQUE(userid,deviceid))");
             statement.execute("CREATE TABLE tc_groups(id INT PRIMARY KEY, groupid INT)");
             statement.execute("CREATE TABLE tc_user_group(userid INT, groupid INT)");
-            statement.execute("CREATE TABLE tc_game_proximity_state(sessiondeviceid INT PRIMARY KEY, generation VARCHAR(36), revision BIGINT, snapshot TEXT)");
-            statement.execute("CREATE TABLE tc_game_proximity_grants(sessiondeviceid INT, userid INT, sourcedeviceid INT, deviceid INT, expiresat BIGINT, data TEXT, PRIMARY KEY(sessiondeviceid,userid,deviceid))");
-            statement.execute("CREATE TABLE tc_game_proximity_circles(sessiondeviceid INT, circleid VARCHAR(64), expiresat BIGINT, data TEXT, PRIMARY KEY(sessiondeviceid,circleid))");
+            statement.execute("CREATE TABLE tc_game_sessions(id BIGINT PRIMARY KEY, sessiondeviceid INT)");
+            statement.execute("INSERT INTO tc_game_sessions VALUES(1,900),(2,901)");
+            statement.execute("CREATE TABLE tc_game_proximity_state(sessiondeviceid INT PRIMARY KEY, generation VARCHAR(36), revision BIGINT, snapshot TEXT, gamesessionid BIGINT NOT NULL)");
+            statement.execute("CREATE TABLE tc_game_proximity_grants(sessiondeviceid INT, userid INT, sourcedeviceid INT, deviceid INT, expiresat BIGINT, data TEXT, gamesessionid BIGINT NOT NULL, PRIMARY KEY(sessiondeviceid,userid,deviceid))");
+            statement.execute("CREATE TABLE tc_game_proximity_circles(sessiondeviceid INT, circleid VARCHAR(64), expiresat BIGINT, data TEXT, gamesessionid BIGINT NOT NULL, PRIMARY KEY(sessiondeviceid,circleid))");
             statement.execute("INSERT INTO tc_devices VALUES(900,'{\"traccarToolGameState\":true,\""
                     + GameNotificationService.GENERATION_ATTRIBUTE + "\":\"" + generation + "\"}',0)");
             statement.execute("INSERT INTO tc_devices VALUES(11,'{\"traccarToolRole\":\"player\"}',0),(12,'{\"traccarToolRole\":\"supporter\"}',0)");

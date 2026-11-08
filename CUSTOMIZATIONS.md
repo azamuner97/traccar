@@ -236,6 +236,67 @@ authenticated browser session. They survive navigation but reset on logout,
 account changes, authentication expiry, and full reload. Device sort order
 remains browser-persistent.
 
+## Central game sessions
+
+Traccar's database is the authoritative store for Traccar Tool sessions
+(`changelog-game-sessions.xml`, implementation plan stage 1). Sessions have an
+immutable numeric ID, a unique name, a schema version and one revision per
+stored part. Every write names the revision it was based on; a stale revision
+returns 409, while an identical retry of the last write returns the current
+revision, so lost responses can be retried safely.
+
+| Part | Table | Owner |
+|---|---|---|
+| Configuration (settings, roster, planned geofences with geometry, timezone) | `tc_game_sessions.config` | operator |
+| Traccar resource mapping, hidden session device and membership | `tc_game_sessions.resources`, `tc_game_session_members` | Tool device setup |
+| Tool runtime checkpoint (`game_status`) | `tc_game_sessions.runtime` | Tool |
+| Generated-account passwords | `tc_game_session_credentials` (AES-GCM) | operator |
+| Geofence planner document | `tc_game_geofence_plans` | Tool |
+| Published timetable and per-entry progress | `tc_game_timetables`, `tc_game_timetable_entries` | Tool |
+| Session log | `tc_game_session_logs` (append-only) | Tool |
+
+All `/api/game-sessions` endpoints require a Traccar administrator; operators
+are administrators in this version. `GET /api/game-sessions/capabilities`
+returns the API version so mismatched Tool builds stop before writing. The
+Traccar admin password and machine-specific paths (workbooks, KML imports) are
+never stored centrally; the Tool keeps them in the OS credential store and in
+local preferences.
+
+Membership maps each generated user to one session, role, number and assigned
+tracker; a user belongs to at most one session, and a session device to at most
+one session. Timetable entries are identified by scheduled UTC time and
+participant: matching entries keep their ID and progress across publications,
+content edits update them in place, and entries that disappear are deactivated.
+
+Generated passwords are encrypted with the Base64 256-bit key in
+`gameSessions.credentialKey` (environment `GAME_SESSIONS_CREDENTIAL_KEY`;
+Compose reads `TRACCAR_GAME_SESSIONS_CREDENTIAL_KEY` from `.env`). The key is
+never stored in the database and must stay stable for the database's lifetime.
+Without it, or with a different key, only credential reads and writes fail
+(HTTP 503); everything else keeps working. Key rotation is not supported yet.
+
+The notification journal and proximity tables carry the game-session ID.
+Notification and proximity writes require a session device registered with a
+game session (409 otherwise). Whole-session cleanup no longer deletes
+notification history: deleting the session device or a recipient clears the
+reference instead, and `recipientlabel` keeps the recipient's name.
+Administrators read the complete history of a game session, across generations
+and after cleanup, with `GET /api/game-notifications/history?gameSessionId=…`.
+Proximity state, grants and circles remain live access data and are still
+deleted with the session device. Deleting saved session data
+(`DELETE /api/game-sessions/{id}`) removes every stored part, including its
+notification history, but never touches managed Traccar resources.
+
+The migration deletes notification and proximity rows created before central
+sessions existed, because their local sessions are not migrated; nothing else in
+the database is reset.
+
+Audit the stored behaviour against the full Docker profile with
+`../Traccar-Tool/venv_traccar/bin/python scripts/game_sessions_integration.py --tool-source ../Traccar-Tool/src`.
+It creates and removes a temporary administrator and non-administrator and runs
+the Tool's own server repository against the live API. The notification and
+proximity audits register their fixture session devices with game sessions.
+
 ## Multi-participant replay
 
 The replay page accepts individual devices, nested groups, or all devices

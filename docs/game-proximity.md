@@ -27,6 +27,11 @@ Participant accounts can read their own temporary device IDs and expiry times
 at `/access`. Devices already visible through permanent direct/group permissions
 are omitted so local browser expiry cannot remove independently authorized access.
 
+The session device must be registered with a central game session
+(`PUT /api/game-sessions/{id}/resources` with its `sessionDeviceId`); writes for an
+unregistered session device return 409. Proximity rows carry the game-session ID
+and are still deleted with the session device.
+
 Identical revisions are idempotent; obsolete/conflicting revisions and generations
 return 409. Invalid snapshots return 400 and identity/scope violations return 403.
 Lease expiry is checked by reads and device, position, event, and log delivery and reconciled every second,

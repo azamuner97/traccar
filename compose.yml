@@ -44,6 +44,9 @@ services:
       # Append traccar and supply the key externally to test Manager push alerts.
       NOTIFICATOR_TYPES: ${TRACCAR_NOTIFICATOR_TYPES:-web,mail,command}
       NOTIFICATOR_TRACCAR_KEY: ${TRACCAR_NOTIFICATOR_TRACCAR_KEY:-}
+      # Base64 256-bit key encrypting generated game-account passwords of
+      # central game sessions. Keep it stable for the database's lifetime.
+      GAME_SESSIONS_CREDENTIAL_KEY: ${TRACCAR_GAME_SESSIONS_CREDENTIAL_KEY:-}
     ports:
       - "8083:8082"
       - "5056:5055"

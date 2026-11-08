@@ -68,6 +68,25 @@ def request(method, path, body=None, *, credentials=(EMAIL, PASSWORD), expected=
         return data.decode()
 
 
+GAME_SESSION_IDS = []
+
+
+def register_game_session(session_device_id, label):
+    """Register a fixture session device with its own central game session."""
+    session = request("POST", "/game-sessions", {
+        "name": PREFIX + "-" + label, "schemaVersion": 4, "config": {}})
+    request("PUT", f"/game-sessions/{session['id']}/resources", {
+        "expectedRevision": session["resourcesRevision"], "sessionDeviceId": session_device_id,
+        "resources": {}, "members": []})
+    GAME_SESSION_IDS.append(session["id"])
+    return session["id"]
+
+
+def delete_game_sessions():
+    while GAME_SESSION_IDS:
+        request("DELETE", f"/game-sessions/{GAME_SESSION_IDS.pop()}", expected=204)
+
+
 def wait_for_server():
     for attempt in range(60):
         try:
@@ -258,6 +277,7 @@ def main(tool_source=None):
             device = request("POST", "/devices", {"name": PREFIX + suffix, "uniqueId": PREFIX + suffix,
                 "attributes": {"traccarToolGameState": True}})
             device_ids.append(device["id"])
+            register_game_session(device["id"], suffix)
         session_id = device_ids[0]
         hunter_group = request("POST", "/groups", {"name": PREFIX + "-hunters"})
         group_ids.append(hunter_group["id"])
@@ -489,11 +509,15 @@ def main(tool_source=None):
         supporter_id = generated_users["supporter"]["id"]
         request("DELETE", "/users/" + str(supporter_id), expected=204)
         user_ids.remove(supporter_id)
-        assert sql("SELECT COUNT(*) FROM tc_game_notifications WHERE sessiondeviceid=" + str(session_id)) == "222"
+        # Deleting a recipient keeps its history for operators: the reference is
+        # cleared and the recipient label remains.
+        assert sql("SELECT COUNT(*) FROM tc_game_notifications WHERE sessiondeviceid=" + str(session_id)) == "225"
         after_recipient_delete = request("GET", "/game-notifications?" + urllib.parse.urlencode({
             "sessionDeviceId": session_id, "generation": generation, "limit": 500}))
-        assert "exit-supporter" not in {record["id"] for record in after_recipient_delete["items"]}
-        assert "live" in {record["id"] for record in after_recipient_delete["items"]}
+        by_id = {record["id"]: record for record in after_recipient_delete["items"]}
+        assert "recipientUserId" not in by_id["exit-supporter"]
+        assert by_id["exit-supporter"].get("recipientLabel")
+        assert "live" in by_id
         request("GET", "/game-notifications?sessionDeviceId=" + str(session_id) + "&limit=501", expected=400)
         # A stale ordinary Device PUT must preserve the protected metadata.
         device = request("GET", "/devices?id=" + str(session_id))[0]
@@ -521,13 +545,17 @@ def main(tool_source=None):
         request("POST", "/game-notifications", payload, expected=409)
         assert not request("GET", "/game-notifications?sessionDeviceId=" + str(session_id))["items"]
         request("POST", "/game-notifications", {**payload, "generation": reset["replacementGeneration"]})
+        game_session_id = GAME_SESSION_IDS[0]
         request("DELETE", "/devices/" + str(session_id), expected=204)
         device_ids.remove(session_id)
         assert sql("SELECT COUNT(*) FROM tc_game_notifications WHERE sessiondeviceid=" + str(session_id)) == "0"
+        # Whole-session cleanup deletes the session device; the history stays.
+        history = request("GET", "/game-notifications/history?gameSessionId=" + str(game_session_id))
+        assert history["items"] and all(item["gameStateDeviceId"] == 0 for item in history["items"])
         print("MySQL/HTTP notification audit passed: targeting authorization, private role sockets, hunter-group "
               "visibility, real geofence events without native links, timestamps, case-sensitive IDs, "
               "hunter/spectator Speedhunt names, live recipients, 225-row pagination, GPS cleanup, server restart, "
-              "idempotency, recipient/session deletion cascades, atomic device saves and reset races.")
+              "idempotency, history retained after recipient/session deletion, atomic device saves and reset races.")
         if tool_source:
             print("Tool monitoring audit passed: healthy position websocket, enter/exit polling for player, "
                   "supporter and two hunters, admin-only web subscriptions, no generated-user native events, "
@@ -544,6 +572,7 @@ def main(tool_source=None):
             request("DELETE", "/groups/" + str(group_id), expected=204)
         for user_id in user_ids[1:]:
             request("DELETE", "/users/" + str(user_id), expected=204)
+        delete_game_sessions()
         # Exact test admin ID/email, never a broad production/user cleanup.
         try:
             request("DELETE", "/users/" + str(admin_id), expected=204)

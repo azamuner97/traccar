@@ -1,0 +1,156 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<databaseChangeLog xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+  xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-3.4.xsd">
+
+  <!-- Central game-session storage (implementation plan, stage 1). -->
+  <changeSet author="traccar-tool" id="game-sessions-1">
+    <createTable tableName="tc_game_sessions">
+      <column name="id" type="BIGINT" autoIncrement="true"><constraints primaryKey="true" nullable="false" /></column>
+      <column name="name" type="VARCHAR(128)"><constraints nullable="false" /></column>
+      <column name="schemaversion" type="INT"><constraints nullable="false" /></column>
+      <column name="sessiondeviceid" type="INT" />
+      <column name="configrevision" type="BIGINT"><constraints nullable="false" /></column>
+      <column name="config" type="CLOB"><constraints nullable="false" /></column>
+      <column name="resourcesrevision" type="BIGINT"><constraints nullable="false" /></column>
+      <column name="resources" type="CLOB"><constraints nullable="false" /></column>
+      <column name="runtimerevision" type="BIGINT"><constraints nullable="false" /></column>
+      <column name="runtime" type="CLOB"><constraints nullable="false" /></column>
+      <column name="createdat" type="TIMESTAMP(3)"><constraints nullable="false" /></column>
+      <column name="updatedat" type="TIMESTAMP(3)"><constraints nullable="false" /></column>
+    </createTable>
+    <addUniqueConstraint tableName="tc_game_sessions" columnNames="name" constraintName="uq_game_sessions_name" />
+    <addUniqueConstraint tableName="tc_game_sessions" columnNames="sessiondeviceid" constraintName="uq_game_sessions_device" />
+    <addForeignKeyConstraint baseTableName="tc_game_sessions" baseColumnNames="sessiondeviceid"
+      referencedTableName="tc_devices" referencedColumnNames="id" constraintName="fk_game_sessions_device" onDelete="SET NULL" />
+
+    <createTable tableName="tc_game_session_members">
+      <column name="gamesessionid" type="BIGINT"><constraints nullable="false" /></column>
+      <column name="userid" type="INT"><constraints nullable="false" /></column>
+      <column name="role" type="VARCHAR(16)"><constraints nullable="false" /></column>
+      <column name="number" type="INT" />
+      <column name="assigneddeviceid" type="INT" />
+      <column name="login" type="VARCHAR(128)"><constraints nullable="false" /></column>
+    </createTable>
+    <addPrimaryKey tableName="tc_game_session_members" columnNames="gamesessionid,userid" constraintName="pk_game_session_members" />
+    <addUniqueConstraint tableName="tc_game_session_members" columnNames="userid" constraintName="uq_game_session_members_user" />
+    <addForeignKeyConstraint baseTableName="tc_game_session_members" baseColumnNames="gamesessionid"
+      referencedTableName="tc_game_sessions" referencedColumnNames="id" constraintName="fk_game_session_members_session" onDelete="CASCADE" />
+    <addForeignKeyConstraint baseTableName="tc_game_session_members" baseColumnNames="userid"
+      referencedTableName="tc_users" referencedColumnNames="id" constraintName="fk_game_session_members_user" onDelete="CASCADE" />
+    <addForeignKeyConstraint baseTableName="tc_game_session_members" baseColumnNames="assigneddeviceid"
+      referencedTableName="tc_devices" referencedColumnNames="id" constraintName="fk_game_session_members_device" onDelete="SET NULL" />
+
+    <createTable tableName="tc_game_session_credentials">
+      <column name="gamesessionid" type="BIGINT"><constraints primaryKey="true" nullable="false" /></column>
+      <column name="revision" type="BIGINT"><constraints nullable="false" /></column>
+      <column name="ciphertext" type="CLOB"><constraints nullable="false" /></column>
+    </createTable>
+    <addForeignKeyConstraint baseTableName="tc_game_session_credentials" baseColumnNames="gamesessionid"
+      referencedTableName="tc_game_sessions" referencedColumnNames="id" constraintName="fk_game_session_credentials" onDelete="CASCADE" />
+
+    <createTable tableName="tc_game_geofence_plans">
+      <column name="gamesessionid" type="BIGINT"><constraints primaryKey="true" nullable="false" /></column>
+      <column name="revision" type="BIGINT"><constraints nullable="false" /></column>
+      <column name="data" type="CLOB"><constraints nullable="false" /></column>
+    </createTable>
+    <addForeignKeyConstraint baseTableName="tc_game_geofence_plans" baseColumnNames="gamesessionid"
+      referencedTableName="tc_game_sessions" referencedColumnNames="id" constraintName="fk_game_geofence_plans" onDelete="CASCADE" />
+
+    <createTable tableName="tc_game_timetables">
+      <column name="gamesessionid" type="BIGINT"><constraints primaryKey="true" nullable="false" /></column>
+      <column name="revision" type="BIGINT"><constraints nullable="false" /></column>
+      <column name="headers" type="CLOB"><constraints nullable="false" /></column>
+      <column name="source" type="CLOB"><constraints nullable="false" /></column>
+      <column name="updatedat" type="TIMESTAMP(3)"><constraints nullable="false" /></column>
+    </createTable>
+    <addForeignKeyConstraint baseTableName="tc_game_timetables" baseColumnNames="gamesessionid"
+      referencedTableName="tc_game_sessions" referencedColumnNames="id" constraintName="fk_game_timetables" onDelete="CASCADE" />
+
+    <createTable tableName="tc_game_timetable_entries">
+      <column name="id" type="BIGINT" autoIncrement="true"><constraints primaryKey="true" nullable="false" /></column>
+      <column name="gamesessionid" type="BIGINT"><constraints nullable="false" /></column>
+      <column name="scheduledat" type="TIMESTAMP(3)"><constraints nullable="false" /></column>
+      <column name="participant" type="VARCHAR(128)"><constraints nullable="false" /></column>
+      <column name="content" type="VARCHAR(512)"><constraints nullable="false" /></column>
+      <column name="active" type="BOOLEAN"><constraints nullable="false" /></column>
+      <column name="revision" type="BIGINT"><constraints nullable="false" /></column>
+      <column name="status" type="VARCHAR(16)"><constraints nullable="false" /></column>
+      <column name="statusat" type="TIMESTAMP(3)" />
+    </createTable>
+    <addUniqueConstraint tableName="tc_game_timetable_entries" columnNames="gamesessionid,scheduledat,participant"
+      constraintName="uq_game_timetable_entries" />
+    <addForeignKeyConstraint baseTableName="tc_game_timetable_entries" baseColumnNames="gamesessionid"
+      referencedTableName="tc_game_sessions" referencedColumnNames="id" constraintName="fk_game_timetable_entries" onDelete="CASCADE" />
+
+    <createTable tableName="tc_game_session_logs">
+      <column name="id" type="BIGINT" autoIncrement="true"><constraints primaryKey="true" nullable="false" /></column>
+      <column name="gamesessionid" type="BIGINT"><constraints nullable="false" /></column>
+      <column name="category" type="VARCHAR(32)"><constraints nullable="false" /></column>
+      <column name="occurredat" type="TIMESTAMP(3)"><constraints nullable="false" /></column>
+      <column name="message" type="TEXT"><constraints nullable="false" /></column>
+    </createTable>
+    <addForeignKeyConstraint baseTableName="tc_game_session_logs" baseColumnNames="gamesessionid"
+      referencedTableName="tc_game_sessions" referencedColumnNames="id" constraintName="fk_game_session_logs" onDelete="CASCADE" />
+    <createIndex tableName="tc_game_session_logs" indexName="idx_game_session_logs_session">
+      <column name="gamesessionid" /><column name="id" />
+    </createIndex>
+  </changeSet>
+
+  <!--
+    Re-key the notification journal and proximity state to the game session.
+    Existing rows belong to unmigrated local sessions and are deleted; nothing
+    else is reset. Notification history now survives whole-session cleanup:
+    its device and recipient references are cleared instead of cascading.
+    Proximity state remains live access data and is still deleted with the
+    session device.
+  -->
+  <changeSet author="traccar-tool" id="game-sessions-rekey-1">
+    <delete tableName="tc_game_proximity_grants" />
+    <delete tableName="tc_game_proximity_circles" />
+    <delete tableName="tc_game_proximity_state" />
+    <delete tableName="tc_game_notifications" />
+
+    <addColumn tableName="tc_game_notifications">
+      <column name="gamesessionid" type="BIGINT"><constraints nullable="false" /></column>
+      <column name="recipientlabel" type="VARCHAR(128)" />
+    </addColumn>
+    <addForeignKeyConstraint baseTableName="tc_game_notifications" baseColumnNames="gamesessionid"
+      referencedTableName="tc_game_sessions" referencedColumnNames="id"
+      constraintName="fk_game_notifications_game_session" onDelete="CASCADE" />
+    <dropForeignKeyConstraint baseTableName="tc_game_notifications" constraintName="fk_game_notifications_session" />
+    <dropForeignKeyConstraint baseTableName="tc_game_notifications" constraintName="fk_game_notifications_recipient" />
+    <dropUniqueConstraint tableName="tc_game_notifications" constraintName="uq_game_notifications_alert" />
+    <addUniqueConstraint tableName="tc_game_notifications" columnNames="gamesessionid,generation,alertid"
+      constraintName="uq_game_notifications_alert" />
+    <dropNotNullConstraint tableName="tc_game_notifications" columnName="sessiondeviceid" columnDataType="INT" />
+    <addForeignKeyConstraint baseTableName="tc_game_notifications" baseColumnNames="sessiondeviceid"
+      referencedTableName="tc_devices" referencedColumnNames="id"
+      constraintName="fk_game_notifications_session" onDelete="SET NULL" />
+    <addForeignKeyConstraint baseTableName="tc_game_notifications" baseColumnNames="recipientuserid"
+      referencedTableName="tc_users" referencedColumnNames="id"
+      constraintName="fk_game_notifications_recipient" onDelete="SET NULL" />
+    <createIndex tableName="tc_game_notifications" indexName="idx_game_notifications_game_session">
+      <column name="gamesessionid" /><column name="id" />
+    </createIndex>
+
+    <addColumn tableName="tc_game_proximity_state">
+      <column name="gamesessionid" type="BIGINT"><constraints nullable="false" /></column>
+    </addColumn>
+    <addForeignKeyConstraint baseTableName="tc_game_proximity_state" baseColumnNames="gamesessionid"
+      referencedTableName="tc_game_sessions" referencedColumnNames="id"
+      constraintName="fk_game_proximity_state_game_session" onDelete="CASCADE" />
+    <addColumn tableName="tc_game_proximity_grants">
+      <column name="gamesessionid" type="BIGINT"><constraints nullable="false" /></column>
+    </addColumn>
+    <addForeignKeyConstraint baseTableName="tc_game_proximity_grants" baseColumnNames="gamesessionid"
+      referencedTableName="tc_game_sessions" referencedColumnNames="id"
+      constraintName="fk_game_proximity_grant_game_session" onDelete="CASCADE" />
+    <addColumn tableName="tc_game_proximity_circles">
+      <column name="gamesessionid" type="BIGINT"><constraints nullable="false" /></column>
+    </addColumn>
+    <addForeignKeyConstraint baseTableName="tc_game_proximity_circles" baseColumnNames="gamesessionid"
+      referencedTableName="tc_game_sessions" referencedColumnNames="id"
+      constraintName="fk_game_proximity_circle_game_session" onDelete="CASCADE" />
+  </changeSet>
+</databaseChangeLog>

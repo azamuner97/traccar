@@ -272,35 +272,39 @@ public class GameProximityService {
                         || snapshot.circles().stream().anyMatch(circle -> !validCircle(circle, participants))) {
                     throw new ForbiddenException("Proximity participants do not match this session");
                 }
+                long gameSessionId = GameSessionService.gameSessionIdForDevice(connection, sessionId);
                 delete(connection, sessionId);
                 try (var query = connection.prepareStatement("INSERT INTO tc_game_proximity_state"
-                        + " (sessiondeviceid,generation,revision,snapshot) VALUES (?,?,?,?)")) {
+                        + " (sessiondeviceid,generation,revision,snapshot,gamesessionid) VALUES (?,?,?,?,?)")) {
                     query.setLong(1, sessionId);
                     query.setString(2, generation);
                     query.setLong(3, snapshot.revision());
                     query.setString(4, serialized);
+                    query.setLong(5, gameSessionId);
                     query.executeUpdate();
                 }
                 for (Grant grant : snapshot.grants()) {
                     try (var query = connection.prepareStatement("INSERT INTO tc_game_proximity_grants"
-                            + " (sessiondeviceid,userid,sourcedeviceid,deviceid,expiresat,data)"
-                            + " VALUES (?,?,?,?,?,?)")) {
+                            + " (sessiondeviceid,userid,sourcedeviceid,deviceid,expiresat,data,gamesessionid)"
+                            + " VALUES (?,?,?,?,?,?,?)")) {
                         query.setLong(1, sessionId);
                         query.setLong(2, grant.recipientUserId());
                         query.setLong(3, grant.sourceDeviceId());
                         query.setLong(4, grant.targetDeviceId());
                         query.setLong(5, timestamp(grant.expiresAt()).toEpochMilli());
                         query.setString(6, objectMapper.writeValueAsString(grant));
+                        query.setLong(7, gameSessionId);
                         query.executeUpdate();
                     }
                 }
                 for (Circle circle : snapshot.circles()) {
                     try (var query = connection.prepareStatement("INSERT INTO tc_game_proximity_circles"
-                            + " (sessiondeviceid,circleid,expiresat,data) VALUES (?,?,?,?)")) {
+                            + " (sessiondeviceid,circleid,expiresat,data,gamesessionid) VALUES (?,?,?,?,?)")) {
                         query.setLong(1, sessionId);
                         query.setString(2, circle.id());
                         query.setLong(3, timestamp(circle.expiresAt()).toEpochMilli());
                         query.setString(4, objectMapper.writeValueAsString(circle));
+                        query.setLong(5, gameSessionId);
                         query.executeUpdate();
                     }
                 }

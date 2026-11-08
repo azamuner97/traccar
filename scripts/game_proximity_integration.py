@@ -170,9 +170,11 @@ def main(tool_source=None, skip_restart=False):
                               "attributes": {"traccarToolGameState": True}})
         session_id = session["id"]
         device_ids.append(session_id)
+        api.register_game_session(session_id, "session")
         other = api.request("POST", "/devices", {"name": api.PREFIX + "-other",
                             "uniqueId": api.PREFIX + "-other", "attributes": {"traccarToolGameState": True}})
         device_ids.append(other["id"])
+        api.register_game_session(other["id"], "other")
         generation = api.request("POST", f"/game-notifications/session/{session_id}", {})["generation"]
         endpoint = f"/game-proximity/session/{session_id}"
         users, devices, credentials = {}, {}, {}
@@ -348,6 +350,7 @@ def main(tool_source=None, skip_restart=False):
             api.request("DELETE", f"/devices/{device_id}", expected=204)
         for user_id in user_ids:
             api.request("DELETE", f"/users/{user_id}", expected=204)
+        api.delete_game_sessions()
         try:
             api.request("DELETE", f"/users/{admin_id}", expected=204)
         finally:
