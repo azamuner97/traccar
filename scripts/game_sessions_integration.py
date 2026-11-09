@@ -980,6 +980,10 @@ def audit_speedhunt_fakes(session_id, tracker, mirror, hunter, player, tool_sour
     assert bound and bound[0]["plan"]["pingNumber"] == 2, bound
     # The owner never learns which run bound it, so nothing tells them whom the speedhunt targets.
     assert "boundTo" not in bound[0]["plan"], bound
+    # Operators see every owner's binding, with the run reference, in the overview.
+    operator_bound = [item for item in api.request("GET", f"/game-sessions/{session_id}/jokers")["boundFakes"]
+                      if item["id"] == reservation]
+    assert operator_bound and operator_bound[0]["plan"].get("boundTo"), operator_bound
     api.request("POST", f"/game-jokers/reservations/{reservation}/cancel", {}, credentials=player, expected=409)
     # An unbound fake can be cancelled by its owner only.
     unbound = arm(1)

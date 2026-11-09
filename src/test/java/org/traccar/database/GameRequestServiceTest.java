@@ -764,6 +764,12 @@ public class GameRequestServiceTest {
         assertFalse(bound.plan().has("boundTo"), bound.plan().toString());
         assertTrue(bound.plan().hasNonNull("boundAt"));
         assertEquals(2, bound.plan().get("pingNumber").asInt());
+        // The operators' overview lists every owner's bound fake, with the run it was bound to.
+        var overviewBound = jokers.overview(sessionId).boundFakes();
+        assertEquals(java.util.Set.of(101L, 102L), overviewBound.stream().map(GameJokerService.Reservation::deviceId)
+                .collect(java.util.stream.Collectors.toSet()));
+        assertTrue(overviewBound.stream().allMatch(item -> "operation-1".equals(item.plan().get("boundTo").asText())));
+        assertTrue(jokers.overview(sessionId).reservations().stream().noneMatch(GameJokerService.Reservation::bound));
         assertEquals(0, requests.status(anna).status().get("fakes").size(), "no longer armed");
         // Bound fakes cannot be cancelled and are never refunded.
         assertEquals(409, status(assertThrows(WebApplicationException.class,

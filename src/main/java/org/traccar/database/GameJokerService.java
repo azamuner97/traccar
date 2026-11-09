@@ -82,6 +82,9 @@ public class GameJokerService {
     static final int DEFAULT_PINGS_PER_SPEEDHUNT = 4;
     /** The highest ping number a fake may name when speedhunts have no ping limit. */
     public static final int MAX_FAKE_PING_NUMBER = 1000;
+    /** Bound speedhunt fakes listed for an owner, and for the operators across the session. */
+    private static final int BOUND_FAKES_OWN = 5;
+    private static final int BOUND_FAKES_OVERVIEW = 50;
     /** Types an operator action may use directly (relays); other types are used only through requests. */
     private static final Set<String> OPERATOR_USES = Set.of(HUNTER_POSITIONS);
     private static final ObjectMapper CONFIG_READER = new ObjectMapper();
@@ -101,7 +104,9 @@ public class GameJokerService {
      */
     public record Reservation(long id, long deviceId, String type, Long requestId, String status,
                               String createdAt, boolean armed, boolean bound, JsonNode plan) { }
-    public record Overview(List<Inventory> inventories, List<Reservation> reservations) { }
+    /** The operators' overview; {@code boundFakes} are the latest speedhunt fakes bound to a run (used). */
+    public record Overview(List<Inventory> inventories, List<Reservation> reservations,
+                           List<Reservation> boundFakes) { }
     /** One of the owner's upcoming timetable pings a fake can replace; {@code taken} when one is planned. */
     public record FakeEntry(long entryId, String scheduledAt, boolean taken) { }
     public record Own(List<Inventory> inventories, List<Reservation> reservations,
@@ -419,7 +424,8 @@ public class GameJokerService {
             Set<Long> devices = participants(connection, gameSessionId);
             var tallies = tallies(connection, gameSessionId, null);
             devices.addAll(tallies.keySet());
-            return new Overview(inventories(devices, tallies), reservations(connection, gameSessionId, null));
+            return new Overview(inventories(devices, tallies), reservations(connection, gameSessionId, null),
+                    boundSpeedhuntFakes(connection, gameSessionId, null));
         });
     }
 
@@ -440,25 +446,33 @@ public class GameJokerService {
         });
     }
 
-    /** The owner's most recent speedhunt fakes that were bound to a run (used), so they see the binding. */
-    private static List<Reservation> boundSpeedhuntFakes(Connection connection, long gameSessionId, long deviceId)
+    /**
+     * The most recent speedhunt fakes that were bound to a run (used): the owner's own ({@code deviceId}), so they
+     * see the binding, or every owner's for the operators ({@code deviceId} null), who also see the run reference.
+     */
+    private static List<Reservation> boundSpeedhuntFakes(Connection connection, long gameSessionId, Long deviceId)
             throws SQLException {
         List<Reservation> result = new ArrayList<>();
         try (var query = connection.prepareStatement("SELECT * FROM tc_game_joker_reservations WHERE gamesessionid = ?"
-                + " AND deviceid = ? AND type = ? AND status = ? ORDER BY id DESC")) {
+                + " AND type = ? AND status = ?" + (deviceId == null ? "" : " AND deviceid = ?")
+                + " ORDER BY id DESC")) {
             query.setLong(1, gameSessionId);
-            query.setLong(2, deviceId);
-            query.setString(3, FAKE_SPEEDHUNT);
-            query.setString(4, CONSUMED);
-            query.setMaxRows(5);
+            query.setString(2, FAKE_SPEEDHUNT);
+            query.setString(3, CONSUMED);
+            if (deviceId != null) {
+                query.setLong(4, deviceId);
+            }
+            query.setMaxRows(deviceId == null ? BOUND_FAKES_OVERVIEW : BOUND_FAKES_OWN);
             try (var rows = query.executeQuery()) {
                 while (rows.next()) {
                     ObjectNode plan = (ObjectNode) plan(rows.getString("details"));
                     if (plan.hasNonNull("boundAt")) {
-                        // The run reference stays with the operators: owners only learn that and when it bound.
-                        plan.remove("boundTo");
-                        result.add(new Reservation(rows.getLong("id"), deviceId, FAKE_SPEEDHUNT, null, CONSUMED,
-                                iso(rows, "createdat"), false, true, plan));
+                        if (deviceId != null) {
+                            // The run reference stays with the operators: owners only learn that and when it bound.
+                            plan.remove("boundTo");
+                        }
+                        result.add(new Reservation(rows.getLong("id"), rows.getLong("deviceid"), FAKE_SPEEDHUNT, null,
+                                CONSUMED, iso(rows, "createdat"), false, true, plan));
                     }
                 }
             }

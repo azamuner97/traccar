@@ -4927,7 +4927,9 @@ paths:
       - $ref: '#/components/parameters/GameSessionId'
     get:
       operationId: getGameSessionJokers
-      summary: Joker inventories of every player and supporter, and the open reservations
+      summary: >-
+        Joker inventories of every player and supporter, the open reservations and the latest speedhunt
+        fakes bound to a speedhunt
       tags:
         - Game Requests
       responses:
@@ -7215,7 +7217,7 @@ components:
                 type: boolean
     GameJokerOverview:
       type: object
-      required: [inventories, reservations]
+      required: [inventories, reservations, boundFakes]
       properties:
         inventories:
           type: array
@@ -7223,6 +7225,13 @@ components:
             $ref: '#/components/schemas/GameJokerInventory'
         reservations:
           type: array
+          items:
+            $ref: '#/components/schemas/GameJokerReservation'
+        boundFakes:
+          type: array
+          description: >-
+            The latest speedhunt fakes of the session that were bound to a speedhunt (status consumed, bound
+            true), newest first, with the run reference (boundTo) in their plan
           items:
             $ref: '#/components/schemas/GameJokerReservation'
     GameJokerLedgerEntry:

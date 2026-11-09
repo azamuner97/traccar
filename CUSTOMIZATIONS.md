@@ -513,7 +513,10 @@ timetable fake.
   bound one is no longer cancellable (409). A reported catch releases unbound
   fakes; bound ones stay used.
 - The owner's `/api/game-jokers` also lists their latest bound speedhunt fakes
-  (`bound` true, status `consumed`); `status.fakes` shows only armed ones.
+  (`bound` true, status `consumed`); `status.fakes` shows only armed ones. The
+  operators' overview (`…/jokers`) lists the session's 50 latest bound
+  speedhunt fakes as `boundFakes`, with `boundTo`, so the Tool shows every
+  owner's binding.
 - The Tool applies only the target's own fake, at its ping number, to hunter
   destinations; those positions carry no marker.
 
