@@ -166,12 +166,18 @@ public class GameEffectsService {
         return HexFormat.of().formatHex(digest);
     }
 
+    /**
+     * The fix time to store, in whole seconds. MySQL keeps {@code tc_positions.fixtime} to the second and rounds
+     * fractions on insert, so a millisecond fix time would be compared against a different stored value: a ping at
+     * x.6 s is stored as x+1 and a later ping at x.9 s in the same second would then count as older. Truncating
+     * first stores exactly the value that is compared, so deliveries within one second all become latest in order.
+     */
     private static Instant fixTime(String value, Instant now) {
         if (value == null) {
-            return now;
+            return now.truncatedTo(ChronoUnit.SECONDS);
         }
         try {
-            Instant parsed = Instant.parse(value).truncatedTo(ChronoUnit.MILLIS);
+            Instant parsed = Instant.parse(value).truncatedTo(ChronoUnit.SECONDS);
             if (parsed.isAfter(now.plusSeconds(60)) || parsed.isBefore(Instant.parse("1970-01-01T00:00:01Z"))) {
                 throw new BadRequestException("Position fix time is out of range");
             }
@@ -241,7 +247,8 @@ public class GameEffectsService {
         try (var query = connection.prepareStatement("SELECT fixtime FROM tc_positions WHERE id = ?")) {
             query.setLong(1, positionId);
             try (var rows = query.executeQuery()) {
-                return rows.next() ? rows.getTimestamp(1).toInstant() : null;
+                // Whole seconds like the new fix time, also for rows stored with fractions (H2, PostgreSQL).
+                return rows.next() ? rows.getTimestamp(1).toInstant().truncatedTo(ChronoUnit.SECONDS) : null;
             }
         }
     }

@@ -716,8 +716,6 @@ def run_timetable_fake_through_tool(tool_source, session_id, tracker, mirror, na
                       fakes={name: armed[0]})
     assert released == [], released
     fake_position = api.request("GET", f"/positions?id={stored_device(mirror['id'])['positionId']}")[0]
-    # tc_positions.fixtime keeps whole seconds; pings in the same second may not replace the latest.
-    time.sleep(1.1)
     execution.execute([(name, "")], {name: device}, None, lambda: None, is_current=lambda: True)
     real_position = api.request("GET", f"/positions?id={stored_device(mirror['id'])['positionId']}")[0]
     return armed[0].reservation_id, fake_position, real_position
@@ -908,10 +906,7 @@ def run_speedhunt_fake_through_tool(tool_source, session_id, tracker, mirror):
         no_location_message=lambda label: f"No location for {label}", fakes=Fakes())
     participant = {"id": tracker["id"], "name": "Anna"}
     positions = []
-    for ping in range(3):
-        if ping:
-            # tc_positions.fixtime keeps whole seconds; pings in the same second may not replace the latest.
-            time.sleep(1.1)
+    for _ping in range(3):
         outcome = service.send_static_ping(participant)
         assert outcome.status == "counted", (outcome, events)
         positions.append(api.request("GET", f"/positions?id={stored_device(mirror['id'])['positionId']}")[0])

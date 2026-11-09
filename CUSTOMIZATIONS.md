@@ -342,6 +342,11 @@ the stored outcome without applying it again. Positions use the uniform mirror
 payload (protocol `osmand`, accuracy/speed/course 0, activity `still`) plus the
 caller's scalar attributes; the fix time defaults to the delivery time, and a
 position older than the device's latest is stored without becoming latest.
+Fix times are truncated to whole seconds before they are stored and compared,
+because MySQL keeps `tc_positions.fixtime` to the second and rounds fractions:
+a ping at x.6 s would otherwise be stored as x+1 and a ping at x.9 s in the
+same second would count as older. Deliveries within one second therefore all
+become latest, in delivery order; a fix from an earlier second is still older.
 After commit the latest positions reach the cache and WebSocket subscribers
 like `PostProcessHandler`, and the destination devices show as online with a
 new last-update time, as for tracker uploads. These positions skip filters and
