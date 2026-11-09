@@ -510,8 +510,10 @@ timetable fake.
   starts is skipped by the server; if it names ping 1, the Tool may already
   have sent it with that first ping.
 - Owners cancel an unbound speedhunt fake through the same cancel endpoint; a
-  bound one is no longer cancellable (409). A reported catch releases unbound
-  fakes; bound ones stay used.
+  bound one is no longer cancellable (409). Another owner's reservation is
+  answered like one that does not exist (404), so probing reservation numbers
+  never tells a participant anything about someone else's jokers or fakes. A
+  reported catch releases unbound fakes; bound ones stay used.
 - The owner's `/api/game-jokers` also lists their latest bound speedhunt fakes
   (`bound` true, status `consumed`); `status.fakes` shows only armed ones. The
   operators' overview (`…/jokers`) lists the session's 50 latest bound
@@ -552,6 +554,40 @@ permission grant and a first break or fake joker grant made at the same moment
 can both pass their checks. Making a hunter an administrator, or linking them
 as manager of another user (`managedUserId`), is not checked; only
 administrators can do either.
+
+## Game page
+
+Generated player and supporter accounts open the **Game** page (`/game`) from
+the bottom menu; it is laid out for phones and also works in the desktop
+sidebar menu. It reads only the member endpoints, so it shows nothing the
+server did not already filter for the signed-in member:
+
+- `GET /api/game-status`: whether a Tool runs the game (`controllerActive`),
+  the server's clock (`serverTime`), the anonymous speedhunt status, the own
+  break and the own armed fakes;
+- `GET /api/game-requests`: the member's own requests;
+- `GET /api/game-jokers`: the own jokers, reservations and plans.
+
+The page shows whether the game runs, is paused (no Tool controls it) or the
+page is disconnected; the anonymous speedhunt status; the own break with its
+absolute end and a countdown computed from the server's clock, shown as
+ending once its deadline has passed but no Tool has ended it yet; jokers with
+available, reserved and used (including uses beyond the allocation); held
+reservations, armed fakes and fakes bound to a speedhunt; and the own requests
+with their state, message and expiry countdown. Players and supporters use
+"Get hunter positions" and break jokers there (after a confirmation), cancel
+their open requests and cancel unbound fakes. Buttons are disabled only for
+reasons every participant sees alike (no Tool, no joker left, an open request
+of the same joker, the own break, any speedhunt running); the server checks
+everything again.
+
+The `game` store slice belongs to one account, role and assignment: data
+loaded for another is discarded. `GameController` (mounted by
+`SocketController`) reads the endpoints on sign-in, on the `game-status`,
+`game-requests` and `game-jokers` invalidations, after every WebSocket
+reconnect, when the app returns to the foreground, and every 30 seconds
+(every 5 seconds while disconnected). Game texts exist in English and German;
+other languages fall back to English.
 
 ## Multi-participant replay
 

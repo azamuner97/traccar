@@ -13,7 +13,6 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import jakarta.inject.Inject;
 import jakarta.inject.Singleton;
 import jakarta.ws.rs.BadRequestException;
-import jakarta.ws.rs.ForbiddenException;
 import jakarta.ws.rs.NotFoundException;
 import jakarta.ws.rs.WebApplicationException;
 
@@ -803,11 +802,20 @@ public class GameJokerService {
     public Reservation cancelFake(long gameSessionId, long deviceId, long reservationId, String actor)
             throws Exception {
         return transaction(connection -> {
-            Armed fake = armed(connection, gameSessionId, reservationId);
-            if (fake == null || fake.deviceId() != deviceId) {
-                if (fake != null) {
-                    throw new ForbiddenException("Only the owner can cancel this fake");
+            // Another owner's reservation is answered like one that does not exist, so probing reservation numbers
+            // never tells a participant anything about someone else's jokers or fakes.
+            try (var query = connection.prepareStatement("SELECT deviceid FROM tc_game_joker_reservations"
+                    + " WHERE id = ? AND gamesessionid = ? FOR UPDATE")) {
+                query.setLong(1, reservationId);
+                query.setLong(2, gameSessionId);
+                try (var rows = query.executeQuery()) {
+                    if (!rows.next() || rows.getLong(1) != deviceId) {
+                        throw new NotFoundException("Joker reservation not found");
+                    }
                 }
+            }
+            Armed fake = armed(connection, gameSessionId, reservationId);
+            if (fake == null) {
                 throw new WebApplicationException("This fake can no longer be cancelled", 409);
             }
             if (FAKE_TIMETABLE.equals(fake.type())) {

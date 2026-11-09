@@ -397,17 +397,17 @@ def audit_jokers(session_id, tracker_id, mirror_id, hunter, player):
 BREAK_UNAVAILABLE = "A break cannot start right now; try again later"
 
 
-def refusal(path, body, credentials):
-    """The message of a 409 answer: the first line of the server's error text."""
+def refusal(path, body, credentials, expected=409):
+    """The message of a refusal (409 by default): the first line of the server's error text."""
     message = urllib.request.Request(api.BASE + "/api" + path, data=json.dumps(body).encode(), method="POST",
                                      headers={"Content-Type": "application/json", "Authorization": "Basic "
                                               + base64.b64encode(":".join(credentials).encode()).decode()})
     try:
         urllib.request.urlopen(message, timeout=15)
     except urllib.error.HTTPError as error:
-        assert error.code == 409, f"POST {path} returned {error.code}, expected 409"
+        assert error.code == expected, f"POST {path} returned {error.code}, expected {expected}"
         return error.read().decode().splitlines()[0].split(": ", 1)[-1].strip()
-    raise AssertionError(f"POST {path} was accepted, expected 409")
+    raise AssertionError(f"POST {path} was accepted, expected {expected}")
 
 
 def run_break_through_tool(tool_source, session_id, tracker_id, settings_minutes):
@@ -993,6 +993,148 @@ def audit_speedhunt_fakes(session_id, tracker, mirror, hunter, player, tool_sour
     assert inventory()["used"] == 1 and inventory()["available"] == 1, inventory()
 
 
+PRIVATE_LATITUDE = 47.123457
+
+
+def audit_participant_privacy():
+    """Leakage between participants: own data only, nobody acts for another, nothing reveals a speedhunt target.
+
+    Anna is the speedhunt target, Ben is not; both must see exactly the same thing apart from their own jokers.
+    """
+    password = secrets.token_hex(24)
+    emails = {name: f"{api.PREFIX}-pv-{name}@example.invalid" for name in ("hunter", "anna", "ben")}
+    users = {name: create_user(f"{api.PREFIX}-pv-{name}", email, password, False) for name, email in emails.items()}
+    hunter, anna, ben = ((emails[name], password) for name in ("hunter", "anna", "ben"))
+    session = api.request("POST", "/game-sessions", {"name": api.PREFIX + "-privacy", "schemaVersion": 4,
+                                                     "config": {"game_settings": {"break_duration_minutes": 10,
+                                                                                  "pings_per_speedhunt": 4}}})
+    session_id = session["id"]
+    api.GAME_SESSION_IDS.append(session_id)
+    devices = {name: api.request("POST", "/devices", {"name": f"{api.PREFIX}-pv-{name}",
+                                                       "uniqueId": f"{api.PREFIX}-pv-{name}", **extra})
+               for name, extra in (("state", {"attributes": {"traccarToolGameState": True}}), ("anna", {}),
+                                   ("ben", {}))}
+    trackers = {"anna": devices["anna"]["id"], "ben": devices["ben"]["id"]}
+    effects = f"/game-sessions/{session_id}/effects"
+    sockets = []
+    try:
+        api.request("PUT", f"/game-sessions/{session_id}/resources", {
+            "expectedRevision": 1, "sessionDeviceId": devices["state"]["id"],
+            "resources": {"devices": {"real": dict(trackers)}},
+            "members": [{"userId": users["hunter"], "role": "hunter", "number": 1, "assignedDeviceId": None,
+                         "login": "pv-hunter"},
+                        {"userId": users["anna"], "role": "player", "number": 1,
+                         "assignedDeviceId": trackers["anna"], "login": "pv-anna"},
+                        {"userId": users["ben"], "role": "player", "number": 2,
+                         "assignedDeviceId": trackers["ben"], "login": "pv-ben"}]})
+        api.request("PUT", "/game-controller/session", {"gameSessionId": session_id})
+
+        def publish(revision, target=None):
+            api.request("POST", effects, {"deliveryId": "audit" + uuid4().hex, "status": {
+                "version": 1, "limits": {"pingsPerSpeedhunt": 4}, "participants": [
+                    {"deviceId": trackers[name], "name": name.title(), "role": "player", "caught": False,
+                     "speedhunt": {"revision": revision, "running": name == target, "pings": 0, "live": False},
+                     "break": {"active": False}} for name in ("anna", "ben")]}})
+
+        publish(1)
+        for name in ("anna", "ben"):
+            for joker in ("hunterPositions", "break", "fakeSpeedhunt"):
+                api.request("POST", f"/game-sessions/{session_id}/jokers/change",
+                            {"deviceId": trackers[name], "type": joker, "quantity": 1, "reason": "audit"})
+
+        def arm(credentials, latitude):
+            request = api.request("POST", "/game-requests", {"type": "jokerFakeSpeedhunt", "parameters": {
+                "pingNumber": 2, "latitude": latitude, "longitude": 8.5}}, credentials=credentials)
+            api.request("POST", f"/game-sessions/{session_id}/requests/{request['id']}/claim", {})
+            api.request("POST", effects, {"deliveryId": "audit" + uuid4().hex, "requests": [
+                {"id": request["id"], "status": "succeeded", "message": "Your fake is armed."}]})
+            return next(item["id"] for item in api.request("GET", "/game-jokers", credentials=credentials)
+                        ["reservations"] if item["armed"])
+
+        # One participant never reads another's jokers, plans, requests or break.
+        anna_request = api.request("POST", "/game-requests", {"type": "jokerHunterPositions"}, credentials=anna)
+        # Acting for another participant: jokers are always the requester's own.
+        ben_request = api.request("POST", "/game-requests", {"type": "jokerHunterPositions",
+                                                             "targetDeviceId": trackers["anna"]}, credentials=ben)
+        assert ben_request["targetDeviceId"] == trackers["ben"], ben_request
+        anna_fake = arm(anna, PRIVATE_LATITUDE)
+        ben_own = api.request("GET", "/game-jokers", credentials=ben)
+        assert {item["deviceId"] for item in ben_own["inventories"] + ben_own["reservations"]} == {trackers["ben"]}
+        assert str(PRIVATE_LATITUDE) not in json.dumps(ben_own), "another participant's fake plan leaked"
+        assert anna_request["id"] not in {item["id"] for item in api.request("GET", "/game-requests",
+                                                                             credentials=ben)}
+        ben_status = api.request("GET", "/game-status", credentials=ben)
+        assert "participants" not in ben_status["status"] and ben_status["status"].get("fakes") == [], ben_status
+        assert str(PRIVATE_LATITUDE) not in json.dumps(ben_status)
+        api.request("POST", f"/game-requests/{anna_request['id']}/cancel", {}, credentials=ben, expected=403)
+        # Another owner's reservation is answered like one that does not exist: probing tells nothing.
+        assert refusal(f"/game-jokers/reservations/{anna_fake}/cancel", {}, ben, 404) \
+            == refusal(f"/game-jokers/reservations/{anna_fake + 1000000}/cancel", {}, ben, 404)
+        assert any(item["id"] == anna_fake and item["armed"]
+                   for item in api.request("GET", "/game-jokers", credentials=anna)["reservations"])
+        assert next(item for item in api.request("GET", "/game-requests", credentials=anna)
+                    if item["id"] == anna_request["id"])["status"] == "pending"
+        api.request("GET", "/game-jokers", credentials=hunter, expected=403)
+        hunter_view = json.dumps([api.request("GET", "/game-status", credentials=hunter),
+                                  api.request("GET", "/game-requests", credentials=hunter)])
+        assert str(PRIVATE_LATITUDE) not in hunter_view and '"fakes"' not in hunter_view \
+            and "jokerHunterPositions" not in hunter_view, hunter_view
+        for credentials, request in ((anna, anna_request), (ben, ben_request)):
+            api.request("POST", f"/game-requests/{request['id']}/cancel", {}, credentials=credentials)
+        ben_fake = arm(ben, 46.5)
+
+        # Nothing tells Anna that a speedhunt targets her: not the status, a refusal, her jokers or the timing
+        # of what the server announces.
+        def own_views():
+            return {name: (api.request("GET", "/game-jokers", credentials=credentials),
+                           api.request("GET", "/game-requests", credentials=credentials))
+                    for name, credentials in (("anna", anna), ("ben", ben))}
+
+        before = own_views()
+        sockets.extend([member_socket(anna), member_socket(ben)])
+        publish(2, target="anna")
+        announced = [invalidations(socket) for socket in sockets]
+        assert announced[0] == announced[1] and "game-status" in announced[0], announced
+        views = {}
+        for name, credentials in (("anna", anna), ("ben", ben)):
+            view = api.request("GET", "/game-status", credentials=credentials)
+            view["status"].pop("fakes")
+            views[name] = {key: value for key, value in view.items() if key != "serverTime"}
+        assert views["anna"] == views["ben"] and views["anna"]["status"]["speedhunt"] == {"active": True}, views
+        assert own_views() == before, "a participant's jokers or requests changed when a speedhunt started"
+        assert refusal("/game-requests", {"type": "jokerBreak"}, anna) \
+            == refusal("/game-requests", {"type": "jokerBreak"}, ben) == BREAK_UNAVAILABLE
+        # A hunter's request on Anna is announced to everyone alike and never listed for her.
+        revision = api.request("GET", "/game-status", credentials=hunter)["status"]["participants"][0]
+        hunter_request = api.request("POST", "/game-requests", {
+            "type": "speedhuntStaticPing", "targetDeviceId": trackers["anna"],
+            "baseRevision": revision["speedhunt"]["revision"]}, credentials=hunter)
+        announced = [invalidations(socket) for socket in sockets]
+        assert announced[0] == announced[1] and "game-requests" in announced[0], announced
+        assert hunter_request["id"] not in {item["id"] for item in api.request("GET", "/game-requests",
+                                                                               credentials=anna)}
+        # The run's first ping binds both owners' fakes at once; both are told alike and see the same.
+        api.request("POST", effects, {"deliveryId": "audit" + uuid4().hex, "fakes": [
+            {"reservationId": anna_fake, "outcome": "bound", "run": "audit-privacy"},
+            {"reservationId": ben_fake, "outcome": "bound", "run": "audit-privacy"}]})
+        announced = [invalidations(socket) for socket in sockets]
+        assert announced[0] == announced[1] and "game-jokers" in announced[0], announced
+        bound = {}
+        for name, credentials in (("anna", anna), ("ben", ben)):
+            items = [item for item in api.request("GET", "/game-jokers", credentials=credentials)["reservations"]
+                     if item["bound"]]
+            assert len(items) == 1 and "boundTo" not in items[0]["plan"], items
+            bound[name] = (sorted(items[0]), sorted(items[0]["plan"]), items[0]["status"])
+        assert bound["anna"] == bound["ben"], bound
+    finally:
+        for socket in sockets:
+            socket.close()
+        for device in devices.values():
+            api.request("DELETE", f"/devices/{device['id']}", expected=204)
+        api.sql(f"DELETE FROM tc_users WHERE id IN ({','.join(str(value) for value in users.values())}) "
+                "AND email LIKE " + api.literal(api.PREFIX + "-%") + ";")
+
+
 def audit_requests(tool_source=None):
     """Hunters' requests: membership, role-filtered status, revisions, lifecycle, invalidation."""
     password = secrets.token_hex(24)
@@ -1110,6 +1252,7 @@ def main(tool_source=None):
         audit_http((user_email, user_password), [])
         audit_controller(user_id, api.PREFIX + "-user", (user_email, user_password))
         audit_requests(tool_source)
+        audit_participant_privacy()
         if tool_source:
             audit_tool(tool_source)
         print("MySQL/HTTP game-session audit passed: admin-only access, revision conflicts and idempotent retries, "
@@ -1122,7 +1265,9 @@ def main(tool_source=None):
               "mirror-only hunter access for permissions, group and device moves, joker grants and membership, "
               "timetable fakes armed on eligible pings, private plans, used with the hunters' delivery and "
               "released on cancellation or a changed ping, speedhunt fakes bound at a run's first ping and "
-              "given to the hunters at their ping"
+              "given to the hunters at their ping, participant privacy (own jokers, plans, requests and break "
+              "only, no acting for another, and the same status, refusals, jokers and announcements for a "
+              "speedhunt's target as for everyone else)"
               + (", plus the Tool's repository round trip." if tool_source else "."))
     finally:
         api.delete_game_sessions()

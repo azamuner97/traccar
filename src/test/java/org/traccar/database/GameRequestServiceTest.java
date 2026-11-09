@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.ws.rs.BadRequestException;
 import jakarta.ws.rs.ForbiddenException;
+import jakarta.ws.rs.NotFoundException;
 import jakarta.ws.rs.WebApplicationException;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.BeforeEach;
@@ -656,7 +657,9 @@ public class GameRequestServiceTest {
 
         // The owner may cancel until shortly before the ping; nobody else may.
         long cancelled = arm(owner, anna.apply(7), 47.2);
-        assertThrows(ForbiddenException.class, () -> jokers.cancelFake(sessionId, 102, cancelled, "Ben"));
+        // Another participant learns nothing: the answer is the same as for a reservation that does not exist.
+        assertThrows(NotFoundException.class, () -> jokers.cancelFake(sessionId, 102, cancelled, "Ben"));
+        assertThrows(NotFoundException.class, () -> jokers.cancelFake(sessionId, 102, cancelled + 1000, "Ben"));
         assertEquals("released", jokers.cancelFake(sessionId, 101, cancelled, "Owner").status());
         assertEquals(409, status(assertThrows(WebApplicationException.class,
                 () -> jokers.cancelFake(sessionId, 101, cancelled, "Owner"))));

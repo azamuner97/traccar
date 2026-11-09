@@ -4914,10 +4914,12 @@ paths:
               schema:
                 $ref: '#/components/schemas/GameJokerReservation'
         '403':
-          description: Not the owner, or not a player or supporter
+          description: Not a player or supporter
           content: {}
         '404':
-          description: Unknown reservation
+          description: >-
+            Unknown reservation, or not the member's own (answered alike, so it never tells a participant
+            anything about someone else's jokers or fakes)
           content: {}
         '409':
           description: The fake is no longer armed, or its ping is too close
