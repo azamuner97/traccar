@@ -66,6 +66,7 @@ public class GameRequestService {
     public static final int EXPIRY_SECONDS = 120;
     public static final String BREAK_REQUEST = "jokerBreak";
     public static final String FAKE_TIMETABLE_REQUEST = "jokerFakeTimetable";
+    public static final String FAKE_SPEEDHUNT_REQUEST = "jokerFakeSpeedhunt";
     /** The same answer for every participant, so it never reveals whom a speedhunt targets. */
     public static final String BREAK_UNAVAILABLE = "A break cannot start right now; try again later";
     private static final Set<String> SPEEDHUNT_PINGS = Set.of("speedhuntStaticPing", "speedhuntLivePing");
@@ -381,10 +382,22 @@ public class GameRequestService {
         if (FAKE_TIMETABLE_REQUEST.equals(submission.type())) {
             JsonNode input = submission.parameters();
             JsonNode entry = input == null ? null : input.get("entryId");
-            if (entry == null || !entry.canConvertToLong() || entry.asLong() <= 0) {
+            if (entry == null || !entry.isIntegralNumber() || !entry.canConvertToLong() || entry.asLong() <= 0) {
                 throw new BadRequestException("Choose one of your upcoming timetable pings");
             }
             result.put("entryId", entry.asLong());
+            result.put("latitude", coordinate(input, "latitude", 90));
+            result.put("longitude", coordinate(input, "longitude", 180));
+            return result;
+        }
+        if (FAKE_SPEEDHUNT_REQUEST.equals(submission.type())) {
+            JsonNode input = submission.parameters();
+            JsonNode ping = input == null ? null : input.get("pingNumber");
+            if (ping == null || !ping.isIntegralNumber() || !ping.canConvertToInt() || ping.asInt() < 1
+                    || ping.asInt() > GameJokerService.MAX_FAKE_PING_NUMBER) {
+                throw new BadRequestException("Choose the ping of the next speedhunt the fake replaces");
+            }
+            result.put("pingNumber", ping.asInt());
             result.put("latitude", coordinate(input, "latitude", 90));
             result.put("longitude", coordinate(input, "longitude", 180));
             return result;
@@ -487,6 +500,17 @@ public class GameRequestService {
                     throw conflict("This ping already has a fake");
                 }
                 parameters.put("scheduledAt", scheduled.toString());
+            }
+            if (FAKE_SPEEDHUNT_REQUEST.equals(accepted.type())) {
+                Integer limit = GameJokerService.pingsPerSpeedhunt(connection, member.gameSessionId());
+                if (limit != null && parameters.get("pingNumber").asInt() > limit) {
+                    throw conflict("A speedhunt has " + limit + " pings; choose one of them");
+                }
+                // One unbound speedhunt fake per participant; it waits for the next speedhunt, whoever it targets.
+                if (GameJokerService.speedhuntFakeHeld(connection, member.gameSessionId(),
+                        accepted.targetDeviceId())) {
+                    throw conflict("You already have a fake for the next speedhunt");
+                }
             }
             if (target.hasNonNull("name")) {
                 targetLabel = target.get("name").asText();

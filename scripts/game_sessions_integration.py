@@ -341,7 +341,7 @@ def audit_jokers(session_id, tracker_id, mirror_id, hunter, player):
     change = f"/game-sessions/{session_id}/jokers/change"
     grant = {"deviceId": tracker_id, "type": "hunterPositions", "quantity": 1, "reason": "audit"}
     api.request("POST", change, grant, epoch=False, expected=423)
-    api.request("POST", change, {**grant, "type": "fakeSpeedhunt"}, expected=400)
+    api.request("POST", change, {**grant, "type": "teleport"}, expected=400)
     api.request("POST", change, grant)
     api.request("GET", "/game-jokers", credentials=hunter, expected=403)
 
@@ -716,6 +716,8 @@ def run_timetable_fake_through_tool(tool_source, session_id, tracker, mirror, na
                       fakes={name: armed[0]})
     assert released == [], released
     fake_position = api.request("GET", f"/positions?id={stored_device(mirror['id'])['positionId']}")[0]
+    # tc_positions.fixtime keeps whole seconds; pings in the same second may not replace the latest.
+    time.sleep(1.1)
     execution.execute([(name, "")], {name: device}, None, lambda: None, is_current=lambda: True)
     real_position = api.request("GET", f"/positions?id={stored_device(mirror['id'])['positionId']}")[0]
     return armed[0].reservation_id, fake_position, real_position
@@ -820,6 +822,178 @@ def audit_timetable_fakes(session_id, tracker, mirror, hunter, player, tool_sour
     assert replaced != cancelled
 
 
+def run_speedhunt_fake_through_tool(tool_source, session_id, tracker, mirror):
+    """The Tool's speedhunt service binds the armed fake at the first ping and gives the hunters ping 2's fake."""
+    sys.path.insert(0, tool_source)
+    import requests
+    from traccar_game_manager.application.game_actions.fakes import armed_speedhunt_fakes
+    from traccar_game_manager.application.game_actions.speedhunt import SpeedhuntRuntimeState, SpeedhuntService
+    from traccar_game_manager.application.tracking.outgoing import OutgoingPositionPolicy, ParticipantPingSender
+    from traccar_game_manager.application.tracking.positions import PositionUploadService, TargetResolutionContext
+    from traccar_game_manager.domain.game.settings import normalize_game_settings
+    from traccar_game_manager.infrastructure.traccar.effects import SessionEffects
+    from traccar_game_manager.infrastructure.traccar.game_requests import GameRequestGateway
+    from traccar_game_manager.infrastructure.traccar.game_sessions import GameSessionApi
+
+    class Transport:
+        get, post, put, delete = (staticmethod(requests.get), staticmethod(requests.post),
+                                  staticmethod(requests.put), staticmethod(requests.delete))
+
+    client = GameSessionApi(api.BASE, api.EMAIL, api.PASSWORD, transport=Transport(),
+                            epoch_provider=lambda: api.CONTROLLER["epoch"])
+    effects = SessionEffects(client, session_id)
+    gateway = GameRequestGateway(client, session_id, effects)
+
+    class Positions:
+        def upload_position(self, *_args):
+            raise AssertionError("game pings go through effects")
+
+        def effects_available(self):
+            return True
+
+        def upload_positions(self, items, fakes=()):
+            return effects.deliver(positions=items, fakes=fakes)
+
+    context = TargetResolutionContext(
+        session={"devices": {"mirroring": {"player_1_to_hunters": mirror["id"]}}},
+        devices_by_id={mirror["id"]: {"uniqueId": mirror["uniqueId"]}},
+        player_indexes={tracker["id"]: 1}, supporter_indexes={}, hunter_indexes={})
+
+    def deliver(device_id, latitude, longitude, targets, **fake):
+        return PositionUploadService(Positions()).upload_participant(device_id, latitude, longitude, targets,
+                                                                     context, **fake)
+
+    class Clock:
+        def now(self):
+            return datetime.now(timezone.utc)
+
+    class Scheduler:
+        def call_later(self, _delay, callback):
+            return None
+
+        def cancel(self, _handle):
+            return None
+
+    class View:
+        def run_state_changed(self, _id):
+            pass
+
+        totals_changed = history_changed = live_state_changed = run_state_changed
+
+    class Live:
+        def stop_live(self, participant, *, reason, log_stop):
+            pass
+
+        def release_live(self, _id):
+            pass
+
+    class Fakes:
+        def armed_speedhunt_fakes(self):
+            return list(armed_speedhunt_fakes(gateway.joker_overview()).values())
+
+        def speedhunt_fakes_bound(self, _ids):
+            pass
+
+    events = []
+    state = SpeedhuntRuntimeState()
+    service = SpeedhuntService(
+        state, clock=Clock(), scheduler=Scheduler(), local_tz=lambda: timezone.utc,
+        settings=lambda: normalize_game_settings({"pings_per_speedhunt": 4}), persist=lambda: True,
+        log_sink=lambda _participant, text, _metadata: events.append(text) or True, view=View(), live=Live(),
+        sender=ParticipantPingSender(OutgoingPositionPolicy(lambda _id: False), deliver),
+        targets=lambda _id: {"hunters": True, "players": False, "supporters": False},
+        has_any_target=lambda _id, config: any(config.values()), describe_targets=lambda _config: "Hunters",
+        keeps_operation_open=lambda _id: False,
+        position_fetcher=lambda _id: ({"latitude": 47.0, "longitude": 8.0}, True),
+        no_location_message=lambda label: f"No location for {label}", fakes=Fakes())
+    participant = {"id": tracker["id"], "name": "Anna"}
+    positions = []
+    for ping in range(3):
+        if ping:
+            # tc_positions.fixtime keeps whole seconds; pings in the same second may not replace the latest.
+            time.sleep(1.1)
+        outcome = service.send_static_ping(participant)
+        assert outcome.status == "counted", (outcome, events)
+        positions.append(api.request("GET", f"/positions?id={stored_device(mirror['id'])['positionId']}")[0])
+    assert any("bound to this speedhunt" in line for line in events), events
+    return positions
+
+
+def audit_speedhunt_fakes(session_id, tracker, mirror, hunter, player, tool_source=None):
+    """Speedhunt fakes: armed for the next run, bound for every owner at its first ping, private, never refunded."""
+    stored = api.request("GET", f"/game-sessions/{session_id}")
+    config = dict(stored["config"])
+    config["game_settings"] = {**(config.get("game_settings") or {}), "pings_per_speedhunt": 4}
+    api.request("PUT", f"/game-sessions/{session_id}/config",
+                {"expectedRevision": stored["configRevision"], "document": config})
+    change = f"/game-sessions/{session_id}/jokers/change"
+    effects = f"/game-sessions/{session_id}/effects"
+    api.request("POST", change, {"deviceId": tracker["id"], "type": "fakeSpeedhunt", "quantity": 2, "reason": "audit"})
+
+    def inventory():
+        own = api.request("GET", "/game-jokers", credentials=player)
+        return next(item for item in own["inventories"] if item["type"] == "fakeSpeedhunt")
+
+    def fake(ping_number):
+        return {"type": "jokerFakeSpeedhunt",
+                "parameters": {"pingNumber": ping_number, "latitude": 47.3, "longitude": 8.6}}
+
+    def arm(ping_number):
+        request = api.request("POST", "/game-requests", fake(ping_number), credentials=player)
+        api.request("POST", f"/game-sessions/{session_id}/requests/{request['id']}/claim", {})
+        api.request("POST", effects, {"deliveryId": "audit" + uuid4().hex, "requests": [
+            {"id": request["id"], "status": "succeeded", "message": "Your fake is armed."}]})
+        own = api.request("GET", "/game-jokers", credentials=player)["reservations"]
+        return next(item["id"] for item in own if item["armed"] and item["type"] == "fakeSpeedhunt")
+
+    api.request("POST", "/game-requests", fake(5), credentials=player, expected=409)
+    api.request("POST", "/game-requests", fake(0), credentials=player, expected=400)
+    reservation = arm(2)
+    api.request("POST", "/game-requests", fake(3), credentials=player, expected=409)
+    assert inventory()["reserved"] == 1 and inventory()["used"] == 0, inventory()
+    own = api.request("GET", "/game-status", credentials=player)["status"]
+    assert [item["pingNumber"] for item in own["fakes"]] == [2], own
+    hunter_view = json.dumps(api.request("GET", "/game-status", credentials=hunter))
+    assert "fakes" not in hunter_view and "47.3" not in hunter_view, hunter_view
+
+    hunter_socket, player_socket = member_socket(hunter), member_socket(player)
+    invalidations(hunter_socket, 0.5)
+    invalidations(player_socket, 0.5)
+    if tool_source:
+        positions = run_speedhunt_fake_through_tool(tool_source, session_id, tracker, mirror)
+        assert [(item["latitude"], item["longitude"]) for item in positions] \
+            == [(47.0, 8.0), (47.3, 8.6), (47.0, 8.0)], positions
+        for key in ("attributes", "accuracy", "speed", "course", "altitude", "valid", "protocol"):
+            assert positions[0][key] == positions[1][key], key
+    else:
+        bound = api.request("POST", effects, {
+            "deliveryId": "audit" + uuid4().hex,
+            "positions": [{"uniqueId": mirror["uniqueId"], "latitude": 47.0, "longitude": 8.0}],
+            "fakes": [{"reservationId": reservation, "outcome": "bound", "run": "audit-run"}]})
+        assert bound["fakes"] == [{"reservationId": reservation, "status": "consumed"}], bound
+    try:
+        assert "game-jokers" in invalidations(player_socket), "the owner is told that their fake was bound"
+        assert "game-jokers" not in invalidations(hunter_socket, 0.5), "a hunter learned that a fake was bound"
+    finally:
+        hunter_socket.close()
+        player_socket.close()
+
+    # Bound: used for good, shown to its owner as bound, never cancelled or refunded.
+    assert inventory()["used"] == 1 and inventory()["reserved"] == 0, inventory()
+    bound = [item for item in api.request("GET", "/game-jokers", credentials=player)["reservations"]
+             if item["bound"]]
+    assert bound and bound[0]["plan"]["pingNumber"] == 2, bound
+    # The owner never learns which run bound it, so nothing tells them whom the speedhunt targets.
+    assert "boundTo" not in bound[0]["plan"], bound
+    api.request("POST", f"/game-jokers/reservations/{reservation}/cancel", {}, credentials=player, expected=409)
+    # An unbound fake can be cancelled by its owner only.
+    unbound = arm(1)
+    api.request("POST", f"/game-jokers/reservations/{unbound}/cancel", {}, credentials=hunter, expected=403)
+    assert api.request("POST", f"/game-jokers/reservations/{unbound}/cancel", {},
+                       credentials=player)["status"] == "released"
+    assert inventory()["used"] == 1 and inventory()["available"] == 1, inventory()
+
+
 def audit_requests(tool_source=None):
     """Hunters' requests: membership, role-filtered status, revisions, lifecycle, invalidation."""
     password = secrets.token_hex(24)
@@ -897,6 +1071,7 @@ def audit_requests(tool_source=None):
         audit_breaks(session_id, tracker["id"], hunter, player, tool_source)
         audit_mirror_only_access(session_id, tracker["id"], hunter_id, player_id)
         audit_timetable_fakes(session_id, tracker, mirror, hunter, player, tool_source)
+        audit_speedhunt_fakes(session_id, tracker, mirror, hunter, player, tool_source)
 
         revision = 2
         if tool_source:
@@ -947,7 +1122,8 @@ def main(tool_source=None):
               "with a configured duration, one refusal for everyone during speedhunts and the published break, "
               "mirror-only hunter access for permissions, group and device moves, joker grants and membership, "
               "timetable fakes armed on eligible pings, private plans, used with the hunters' delivery and "
-              "released on cancellation or a changed ping"
+              "released on cancellation or a changed ping, speedhunt fakes bound at a run's first ping and "
+              "given to the hunters at their ping"
               + (", plus the Tool's repository round trip." if tool_source else "."))
     finally:
         api.delete_game_sessions()

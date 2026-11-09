@@ -4717,7 +4717,8 @@ paths:
             break cannot start (no break duration is configured, the requester is already on a break, or a
             speedhunt runs: the same message for every participant, so it never reveals the target), or a
             timetable fake cannot be planned (the ping does not reach hunters, is too close, falls inside the
-            requester's break, or already has a fake)
+            requester's break, or already has a fake), or a speedhunt fake names a ping beyond the session's
+            pings per speedhunt or the requester already has an unbound speedhunt fake
           content: {}
   /game-requests/{id}/cancel:
     parameters:
@@ -4902,7 +4903,7 @@ paths:
       operationId: cancelGameJokerFake
       summary: >-
         Cancel the member's own armed fake; its joker returns. A timetable fake can be cancelled until 60
-        seconds before its ping.
+        seconds before its ping, a speedhunt fake until it is bound to a speedhunt.
       tags:
         - Game Requests
       responses:
@@ -6777,8 +6778,9 @@ components:
         fakes:
           type: [array, 'null']
           description: >-
-            Armed timetable fakes: used when this delivery's positions give the hunters the fake, or released
-            when their ping was skipped or failed. A fake that is no longer armed is skipped.
+            Armed fakes settled by this delivery: a timetable fake used when this delivery's positions give the
+            hunters the fake, or released when its ping was skipped or failed; a speedhunt fake bound (and used)
+            by the delivery of a run's first ping. A fake that is no longer armed is skipped.
           items:
             type: object
             required: [reservationId, outcome]
@@ -6788,9 +6790,12 @@ components:
                 format: int64
               outcome:
                 type: string
-                enum: [used, released]
+                enum: [used, released, bound]
               detail:
                 type: [string, 'null']
+              run:
+                type: [string, 'null']
+                description: bound only; the Tool's reference of the speedhunt
         logs:
           type: [array, 'null']
           items:
@@ -6919,7 +6924,7 @@ components:
         type:
           type: string
           enum: [speedhuntStaticPing, speedhuntLivePing, speedhuntStopLivePing, speedhuntTerminate,
-                 jokerHunterPositions, jokerBreak, jokerFakeTimetable]
+                 jokerHunterPositions, jokerBreak, jokerFakeTimetable, jokerFakeSpeedhunt]
         requesterUserId:
           type: [integer, 'null']
           format: int64
@@ -6970,12 +6975,15 @@ components:
         available joker; a break lasts the duration configured in the session's game settings and is timed by
         the Tool. A timetable fake names one of the requester's own upcoming timetable pings (entryId from
         /game-jokers timetableEntries) and a coordinate; when the request succeeds the fake is armed (still
-        reserved) and its joker is used when the hunters receive the fake at that ping.
+        reserved) and its joker is used when the hunters receive the fake at that ping. A speedhunt fake names a
+        ping number (1 to the session's pings per speedhunt, any positive number when unlimited) and a
+        coordinate; it is armed for the next speedhunt, whoever it targets, and is bound (used, never refunded)
+        when that run's first ping is sent. One unbound speedhunt fake per participant.
       properties:
         type:
           type: string
           enum: [speedhuntStaticPing, speedhuntLivePing, speedhuntStopLivePing, speedhuntTerminate,
-                 jokerHunterPositions, jokerBreak, jokerFakeTimetable]
+                 jokerHunterPositions, jokerBreak, jokerFakeTimetable, jokerFakeSpeedhunt]
         targetDeviceId:
           type: [integer, 'null']
           format: int64
@@ -6995,16 +7003,21 @@ components:
               type: integer
               format: int64
               description: jokerFakeTimetable only
+            pingNumber:
+              type: integer
+              minimum: 1
+              maximum: 1000
+              description: jokerFakeSpeedhunt only
             latitude:
               type: number
               minimum: -90
               maximum: 90
-              description: jokerFakeTimetable only
+              description: jokerFakeTimetable and jokerFakeSpeedhunt
             longitude:
               type: number
               minimum: -180
               maximum: 180
-              description: jokerFakeTimetable only
+              description: jokerFakeTimetable and jokerFakeSpeedhunt
     GameRequestDecision:
       type: object
       required: [decision]
@@ -7105,10 +7118,11 @@ components:
           description: Uses beyond the granted quantity
     GameJokerReservation:
       type: object
-      required: [id, deviceId, type, requestId, status, createdAt, armed, plan]
+      required: [id, deviceId, type, requestId, status, createdAt, armed, bound, plan]
       description: >-
-        A use held by an open request, or an armed fake (no request, armed true). Plans are visible only to
-        their owner and the operators.
+        A use held by an open request, or an armed fake (no request, armed true). The owner's view also lists
+        their latest speedhunt fakes that were bound to a speedhunt (status consumed, bound true). Plans are
+        visible only to their owner and the operators.
       properties:
         id:
           type: integer
@@ -7128,6 +7142,8 @@ components:
           format: date-time
         armed:
           type: boolean
+        bound:
+          type: boolean
         plan:
           $ref: '#/components/schemas/GameJokerFakePlan'
     GameJokerFakePlan:
@@ -7143,6 +7159,18 @@ components:
           type: integer
           format: int64
           description: The timetable entry a timetable fake replaces for the hunters
+        pingNumber:
+          type: integer
+          description: The ping of the next speedhunt a speedhunt fake replaces for the hunters
+        boundAt:
+          type: string
+          format: date-time
+          description: When a speedhunt fake was bound to a speedhunt
+        boundTo:
+          type: string
+          description: >-
+            The Tool's opaque reference of the speedhunt a fake was bound to; never shown to the owner, so it
+            cannot tell them whom the speedhunt targets
         scheduledAt:
           type: string
           format: date-time

@@ -284,8 +284,7 @@ public class GameRequestServiceTest {
                 () -> requests.submit(player, hunterPositions))), "nothing granted yet");
         assertThrows(ForbiddenException.class, () -> requests.submit(requests.membership(10), hunterPositions));
         assertThrows(BadRequestException.class, () -> jokers.change(sessionId,
-                new GameJokerService.Change(101L, GameJokerService.FAKE_SPEEDHUNT, 1, null), "Operator"),
-                "not available yet");
+                new GameJokerService.Change(101L, "teleport", 1, null), "Operator"), "unknown joker type");
         assertThrows(BadRequestException.class, () -> jokers.change(sessionId,
                 new GameJokerService.Change(999L, GameJokerService.HUNTER_POSITIONS, 1, null), "Operator"));
 
@@ -604,6 +603,9 @@ public class GameRequestServiceTest {
         assertEquals(409, status(assertThrows(WebApplicationException.class,
                 () -> requests.submit(owner, fake(tooClose, 47.2)))), "too close");
         assertThrows(BadRequestException.class, () -> requests.submit(owner, fake(anna.apply(0), 91)));
+        assertThrows(BadRequestException.class, () -> requests.submit(owner, new GameRequestService.Submission(
+                "jokerFakeTimetable", null, null, mapper.readTree("{\"entryId\":" + anna.apply(0)
+                        + ".5,\"latitude\":47.2,\"longitude\":8.5}"))), "whole entry IDs only");
         var offered = jokers.own(sessionId, 101).timetableEntries().stream()
                 .map(GameJokerService.FakeEntry::entryId).toList();
         assertEquals(List.of(anna.apply(0), anna.apply(5), anna.apply(6), anna.apply(7)), offered);
@@ -689,5 +691,98 @@ public class GameRequestServiceTest {
         deliver(List.of(new GameRequestService.Completion(id, "failed", "Not armed", null)), null);
         assertEquals(0, fakes(jokers, 101).reserved());
         assertEquals(1, fakes(jokers, 101).available());
+    }
+
+    private GameRequestService.Submission speedhuntFake(Object pingNumber) throws Exception {
+        return new GameRequestService.Submission("jokerFakeSpeedhunt", null, null, mapper.readTree(
+                "{\"pingNumber\":" + pingNumber + ",\"latitude\":47.2,\"longitude\":8.5}"));
+    }
+
+    private long armSpeedhunt(GameRequestService.Membership owner, int pingNumber) throws Exception {
+        long id = requests.submit(owner, speedhuntFake(pingNumber)).id();
+        requests.claim(sessionId, id, epoch);
+        deliver(List.of(new GameRequestService.Completion(id, "succeeded", "Armed for the next speedhunt", null)),
+                null);
+        return new GameJokerService(source).own(sessionId, owner.assignedDeviceId()).reservations().stream()
+                .filter(item -> item.armed() && item.type().equals(GameJokerService.FAKE_SPEEDHUNT))
+                .findFirst().orElseThrow().id();
+    }
+
+    private GameJokerService.Inventory speedhuntFakes(GameJokerService jokers, long deviceId) throws Exception {
+        return jokers.overview(sessionId).inventories().stream()
+                .filter(item -> item.deviceId() == deviceId && item.type().equals(GameJokerService.FAKE_SPEEDHUNT))
+                .findFirst().orElseThrow();
+    }
+
+    @Test
+    void speedhuntFakesBindToTheNextRunForEveryOwnerAndAreNeverRefunded() throws Exception {
+        var jokers = new GameJokerService(source);
+        publish("""
+                {"participants":[
+                  {"deviceId":101,"name":"Anna","role":"player","caught":false,
+                   "speedhunt":{"revision":3,"running":false,"live":false}},
+                  {"deviceId":102,"name":"Ben","role":"player","caught":false,
+                   "speedhunt":{"revision":1,"running":false,"live":false}}]}""");
+        sessions.updateConfig(sessionId, 1, null, mapper.readTree("{\"game_settings\":{\"pings_per_speedhunt\":4}}"));
+        for (long device : new long[] {101, 102}) {
+            jokers.change(sessionId, new GameJokerService.Change(device, GameJokerService.FAKE_SPEEDHUNT, 2, null),
+                    "Operator");
+        }
+        var anna = requests.membership(20);
+        var ben = requests.membership(21);
+
+        // A ping of the next speedhunt: 1 to the configured ping limit.
+        assertThrows(BadRequestException.class, () -> requests.submit(anna, speedhuntFake(0)));
+        assertThrows(BadRequestException.class, () -> requests.submit(anna, speedhuntFake(2.5)), "whole pings only");
+        assertEquals(409, status(assertThrows(WebApplicationException.class,
+                () -> requests.submit(anna, speedhuntFake(5)))));
+        long annaFake = armSpeedhunt(anna, 2);
+        assertEquals("You already have a fake for the next speedhunt", message(assertThrows(
+                WebApplicationException.class, () -> requests.submit(anna, speedhuntFake(3)))));
+        long benFake = armSpeedhunt(ben, 1);
+        assertEquals(1, speedhuntFakes(jokers, 101).reserved());
+        assertEquals(0, speedhuntFakes(jokers, 101).used());
+        assertEquals(2, requests.status(anna).status().get("fakes").get(0).get("pingNumber").asInt());
+
+        // The first ping of the next run binds every armed speedhunt fake, whoever it targets; both owners (and
+        // nobody else) are told, at the same moment.
+        var bind = new GameEffectsService.Delivery("delivery-" + UUID.randomUUID(), null, null, null, null, null,
+                null, null, null, null, List.of(
+                        new GameJokerService.FakeSettlement(annaFake, "bound", null, "operation-1"),
+                        new GameJokerService.FakeSettlement(benFake, "bound", null, "operation-1")));
+        var applied = effects.apply(sessionId, epoch, bind, effects.validate(bind));
+        assertEquals(java.util.Set.of(20L, 21L), applied.jokerUsers());
+        assertEquals(List.of("consumed", "consumed"),
+                applied.outcome().fakes().stream().map(GameJokerService.FakeOutcome::status).toList());
+        for (long device : new long[] {101, 102}) {
+            assertEquals(1, speedhuntFakes(jokers, device).used());
+            assertEquals(0, speedhuntFakes(jokers, device).reserved());
+        }
+        var bound = jokers.own(sessionId, 101).reservations().stream().filter(GameJokerService.Reservation::bound)
+                .findFirst().orElseThrow();
+        // The owner learns that and when the fake was bound, never which run (whom it targets).
+        assertFalse(bound.plan().has("boundTo"), bound.plan().toString());
+        assertTrue(bound.plan().hasNonNull("boundAt"));
+        assertEquals(2, bound.plan().get("pingNumber").asInt());
+        assertEquals(0, requests.status(anna).status().get("fakes").size(), "no longer armed");
+        // Bound fakes cannot be cancelled and are never refunded.
+        assertEquals(409, status(assertThrows(WebApplicationException.class,
+                () -> jokers.cancelFake(sessionId, 101, annaFake, "Owner"))));
+        assertEquals("skipped", deliverFakes(List.of(new GameJokerService.FakeSettlement(annaFake, "bound", null,
+                "operation-2")), null).fakes().getFirst().status());
+
+        // Unbound fakes can be cancelled; catching the owner releases an unbound fake, the bound one stays used.
+        long cancelled = armSpeedhunt(anna, 1);
+        assertEquals("released", jokers.cancelFake(sessionId, 101, cancelled, "Owner").status());
+        long armed = armSpeedhunt(anna, 4);
+        assertThrows(BadRequestException.class, () -> deliverFakes(List.of(
+                new GameJokerService.FakeSettlement(armed, "used", null)), null), "speedhunt fakes bind");
+        deliverFakes(null, List.of(101L));
+        assertEquals(1, speedhuntFakes(jokers, 101).used());
+        assertEquals(0, speedhuntFakes(jokers, 101).reserved());
+
+        // Without a ping limit any positive ping number is accepted.
+        sessions.updateConfig(sessionId, 2, null, mapper.readTree("{\"game_settings\":{\"pings_per_speedhunt\":\"\"}}"));
+        assertEquals("pending", requests.submit(ben, speedhuntFake(50)).status());
     }
 }

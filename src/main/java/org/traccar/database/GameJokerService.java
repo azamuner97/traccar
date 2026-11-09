@@ -46,6 +46,10 @@ import java.util.TimeZone;
  * and with the owner's plan in {@code details}, until the Tool reports the fake delivered (used) or skipped
  * (released). Owners may cancel an armed timetable fake until shortly before its ping. Plans are private to their
  * owner and the operators.
+ * <p>
+ * Armed speedhunt fakes wait for the next speedhunt run: the delivery of a run's first ping binds every armed
+ * speedhunt fake it lists, whoever the run targets, and uses their jokers in the same transaction. Bound fakes are
+ * never refunded; only the target's own fake applies, at its ping number.
  */
 @Singleton
 public class GameJokerService {
@@ -56,10 +60,11 @@ public class GameJokerService {
     public static final String BREAK = "break";
     public static final List<String> TYPES = List.of(HUNTER_POSITIONS, FAKE_TIMETABLE, FAKE_SPEEDHUNT, BREAK);
     /** Types that can be granted and used in this version. */
-    public static final Set<String> ENABLED = Set.of(HUNTER_POSITIONS, BREAK, FAKE_TIMETABLE);
+    public static final Set<String> ENABLED = Set.of(HUNTER_POSITIONS, BREAK, FAKE_TIMETABLE, FAKE_SPEEDHUNT);
     /** Request type of each joker type. */
     public static final Map<String, String> REQUEST_TYPES = Map.of(
-            "jokerHunterPositions", HUNTER_POSITIONS, "jokerBreak", BREAK, "jokerFakeTimetable", FAKE_TIMETABLE);
+            "jokerHunterPositions", HUNTER_POSITIONS, "jokerBreak", BREAK, "jokerFakeTimetable", FAKE_TIMETABLE,
+            "jokerFakeSpeedhunt", FAKE_SPEEDHUNT);
     /** Fake types: a succeeded request arms the fake; the joker is used when the fake takes effect. */
     static final Set<String> FAKE_TYPES = Set.of(FAKE_TIMETABLE, FAKE_SPEEDHUNT);
     /** Timetable fakes are armed and cancelled at least this long before their ping. */
@@ -71,6 +76,12 @@ public class GameJokerService {
      */
     static final Set<String> FAKE_TIMETABLE_CONTENT = Set.of("", "2H", "2P2H", "2S2H", "2P2S2H");
     public static final String USED = "used";
+    /** A speedhunt fake bound to the run whose first ping the same delivery sends. */
+    public static final String BOUND = "bound";
+    /** Pings per speedhunt when the stored settings do not say (the Tool's default). */
+    static final int DEFAULT_PINGS_PER_SPEEDHUNT = 4;
+    /** The highest ping number a fake may name when speedhunts have no ping limit. */
+    public static final int MAX_FAKE_PING_NUMBER = 1000;
     /** Types an operator action may use directly (relays); other types are used only through requests. */
     private static final Set<String> OPERATOR_USES = Set.of(HUNTER_POSITIONS);
     private static final ObjectMapper CONFIG_READER = new ObjectMapper();
@@ -84,16 +95,26 @@ public class GameJokerService {
 
     public record Inventory(long deviceId, String type, int granted, int used, int reserved, int available,
                             int overAllocated) { }
-    /** {@code armed} fakes have no request and carry the owner's plan (coordinate, timetable entry). */
+    /**
+     * {@code armed} fakes have no request and carry the owner's plan (coordinate, timetable entry or speedhunt ping
+     * number); {@code bound} speedhunt fakes are used and belong to the run they were bound to.
+     */
     public record Reservation(long id, long deviceId, String type, Long requestId, String status,
-                              String createdAt, boolean armed, JsonNode plan) { }
+                              String createdAt, boolean armed, boolean bound, JsonNode plan) { }
     public record Overview(List<Inventory> inventories, List<Reservation> reservations) { }
     /** One of the owner's upcoming timetable pings a fake can replace; {@code taken} when one is planned. */
     public record FakeEntry(long entryId, String scheduledAt, boolean taken) { }
     public record Own(List<Inventory> inventories, List<Reservation> reservations,
                       List<FakeEntry> timetableEntries) { }
-    /** The Tool's report on an armed fake: {@code used} (delivered) or {@code released}. */
-    public record FakeSettlement(Long reservationId, String outcome, String detail) { }
+    /**
+     * The Tool's report on an armed fake: a timetable fake {@code used} (delivered) or {@code released}, a speedhunt
+     * fake {@code bound} to the run ({@code run}) whose first ping this delivery sends.
+     */
+    public record FakeSettlement(Long reservationId, String outcome, String detail, String run) {
+        public FakeSettlement(Long reservationId, String outcome, String detail) {
+            this(reservationId, outcome, detail, null);
+        }
+    }
     /** {@code consumed}, {@code released} or {@code skipped} (no longer armed). */
     public record FakeOutcome(long reservationId, String status) { }
     public record LedgerEntry(long id, long deviceId, String type, String kind, int quantity, Long requestId,
@@ -222,6 +243,34 @@ public class GameJokerService {
             return null;
         }
         return minutes.asDouble();
+    }
+
+    /**
+     * The ping limit of a speedhunt from the session's game settings ({@code game_settings.pings_per_speedhunt}),
+     * or {@code null} when speedhunts are unlimited (a blank setting).
+     */
+    static Integer pingsPerSpeedhunt(Connection connection, long gameSessionId) throws SQLException {
+        String config;
+        try (var query = connection.prepareStatement("SELECT config FROM tc_game_sessions WHERE id = ?")) {
+            query.setLong(1, gameSessionId);
+            try (var rows = query.executeQuery()) {
+                config = rows.next() ? rows.getString(1) : null;
+            }
+        }
+        JsonNode settings;
+        try {
+            settings = CONFIG_READER.readTree(config == null ? "{}" : config).path("game_settings");
+        } catch (Exception error) {
+            return DEFAULT_PINGS_PER_SPEEDHUNT;
+        }
+        JsonNode pings = settings.path("pings_per_speedhunt");
+        if (pings.isMissingNode() || pings.isNull()) {
+            return DEFAULT_PINGS_PER_SPEEDHUNT;
+        }
+        if (pings.isTextual() && pings.asText().isBlank()) {
+            return null;
+        }
+        return pings.canConvertToInt() && pings.asInt() > 0 ? pings.asInt() : DEFAULT_PINGS_PER_SPEEDHUNT;
     }
 
     private static int[] counts(Connection connection, long gameSessionId, long deviceId, String type, boolean lock)
@@ -384,9 +433,37 @@ public class GameJokerService {
                     taken.add(item.plan().get("entryId").asLong());
                 }
             }
+            List<Reservation> visible = new ArrayList<>(reservations);
+            visible.addAll(boundSpeedhuntFakes(connection, gameSessionId, deviceId));
             return new Own(inventories(List.of(deviceId), tallies(connection, gameSessionId, deviceId)),
-                    reservations, fakeEntries(connection, gameSessionId, deviceId, taken));
+                    visible, fakeEntries(connection, gameSessionId, deviceId, taken));
         });
+    }
+
+    /** The owner's most recent speedhunt fakes that were bound to a run (used), so they see the binding. */
+    private static List<Reservation> boundSpeedhuntFakes(Connection connection, long gameSessionId, long deviceId)
+            throws SQLException {
+        List<Reservation> result = new ArrayList<>();
+        try (var query = connection.prepareStatement("SELECT * FROM tc_game_joker_reservations WHERE gamesessionid = ?"
+                + " AND deviceid = ? AND type = ? AND status = ? ORDER BY id DESC")) {
+            query.setLong(1, gameSessionId);
+            query.setLong(2, deviceId);
+            query.setString(3, FAKE_SPEEDHUNT);
+            query.setString(4, CONSUMED);
+            query.setMaxRows(5);
+            try (var rows = query.executeQuery()) {
+                while (rows.next()) {
+                    ObjectNode plan = (ObjectNode) plan(rows.getString("details"));
+                    if (plan.hasNonNull("boundAt")) {
+                        // The run reference stays with the operators: owners only learn that and when it bound.
+                        plan.remove("boundTo");
+                        result.add(new Reservation(rows.getLong("id"), deviceId, FAKE_SPEEDHUNT, null, CONSUMED,
+                                iso(rows, "createdat"), false, true, plan));
+                    }
+                }
+            }
+        }
+        return result;
     }
 
     /** The participant's active timetable entries that reach hunters and are far enough ahead for a fake. */
@@ -435,7 +512,7 @@ public class GameJokerService {
                     JsonNode plan = plan(rows.getString("details"));
                     result.add(new Reservation(rows.getLong("id"), rows.getLong("deviceid"), type,
                             requestId, rows.getString("status"), iso(rows, "createdat"),
-                            requestId == null && FAKE_TYPES.contains(type), plan));
+                            requestId == null && FAKE_TYPES.contains(type), false, plan));
                 }
             }
         }
@@ -671,8 +748,8 @@ public class GameJokerService {
             throws SQLException {
         List<FakeOutcome> result = new ArrayList<>();
         for (FakeSettlement item : items) {
-            if (item == null || item.reservationId() == null
-                    || !USED.equals(item.outcome()) && !RELEASED.equals(item.outcome())) {
+            if (item == null || item.reservationId() == null || !USED.equals(item.outcome())
+                    && !RELEASED.equals(item.outcome()) && !BOUND.equals(item.outcome())) {
                 throw new BadRequestException("Invalid fake outcome");
             }
             Armed fake = armed(connection, gameSessionId, item.reservationId());
@@ -680,8 +757,26 @@ public class GameJokerService {
                 result.add(new FakeOutcome(item.reservationId(), "skipped"));
                 continue;
             }
+            if (BOUND.equals(item.outcome())) {
+                if (!FAKE_SPEEDHUNT.equals(fake.type())) {
+                    throw new BadRequestException("Only speedhunt fakes are bound to a speedhunt");
+                }
+                // Bound to this run and used for its owner, whoever the run targets; never refunded.
+                ObjectNode details = (ObjectNode) fake.plan().deepCopy();
+                details.put("boundAt", now().toString());
+                details.put("boundTo", text(item.run(), 64));
+                try (var query = connection.prepareStatement(
+                        "UPDATE tc_game_joker_reservations SET details = ? WHERE id = ?")) {
+                    query.setString(1, details.toString());
+                    query.setLong(2, fake.id());
+                    query.executeUpdate();
+                }
+                endArmed(connection, fake, true, "Tool", "Bound to a speedhunt");
+                result.add(new FakeOutcome(fake.id(), CONSUMED));
+                continue;
+            }
             if (!FAKE_TIMETABLE.equals(fake.type())) {
-                throw new BadRequestException("Only timetable fakes are settled by deliveries");
+                throw new BadRequestException("Only timetable fakes are used or released by deliveries");
             }
             boolean used = USED.equals(item.outcome());
             endArmed(connection, fake, used, "Tool", text(item.detail(), 512));
@@ -708,7 +803,7 @@ public class GameJokerService {
                 }
             }
             endArmed(connection, fake, false, actor, "Cancelled by the owner");
-            return new Reservation(fake.id(), fake.deviceId(), fake.type(), null, RELEASED, null, false,
+            return new Reservation(fake.id(), fake.deviceId(), fake.type(), null, RELEASED, null, false, false,
                     fake.plan());
         });
     }
@@ -756,6 +851,21 @@ public class GameJokerService {
             }
         }
         return result;
+    }
+
+    /** Whether the participant already has an unbound speedhunt fake: requested (open) or armed. */
+    static boolean speedhuntFakeHeld(Connection connection, long gameSessionId, long deviceId) throws SQLException {
+        try (var query = connection.prepareStatement("SELECT 1 FROM tc_game_joker_reservations"
+                + " WHERE gamesessionid = ? AND deviceid = ? AND type = ? AND status = ?")) {
+            query.setLong(1, gameSessionId);
+            query.setLong(2, deviceId);
+            query.setString(3, FAKE_SPEEDHUNT);
+            query.setString(4, RESERVED);
+            query.setMaxRows(1);
+            try (var rows = query.executeQuery()) {
+                return rows.next();
+            }
+        }
     }
 
     /** Whether a timetable entry already has a fake: requested (open) or armed. */

@@ -397,9 +397,9 @@ implementation plan stage 4), keyed by their real tracker:
 `tc_game_jokers` keeps the granted quantity and the uses (including uses beyond
 the allocation), `tc_game_joker_reservations` the uses held by open requests,
 and `tc_game_joker_ledger` every grant, revoke, reservation, release and use.
-New sessions start without jokers. In this version "Get hunter positions"
-(`hunterPositions`), break (`break`) and timetable fake (`fakeTimetable`)
-jokers can be granted and used; the speedhunt fake follows.
+New sessions start without jokers. "Get hunter positions"
+(`hunterPositions`), break (`break`), timetable fake (`fakeTimetable`) and
+speedhunt fake (`fakeSpeedhunt`) jokers can be granted and used.
 
 - Operators grant or revoke unused jokers with the fenced
   `POST /api/game-sessions/{id}/jokers/change`, and read the overview and
@@ -484,6 +484,33 @@ reserves one joker with the plan in the reservation's `details`.
   refreshes its armed fakes every 2 seconds. If those refreshes stall for more
   than a minute, the Tool may still send a cancelled fake; the server then
   ignores its use (`skipped`), so the joker is not used twice and nothing leaks.
+
+### Speedhunt fakes
+
+`jokerFakeSpeedhunt` takes `parameters` `pingNumber` (1 to the stored
+`game_settings.pings_per_speedhunt`, or 1–1000 when it is blank), `latitude`
+and `longitude`. A participant has at most one unbound speedhunt fake (an open
+request or an armed fake; 409 otherwise). The succeeded request arms it like a
+timetable fake.
+
+- The Tool's delivery of a run's first ping lists every armed speedhunt fake it
+  knows as `bound` (with `run`, an opaque reference of the run) in `fakes`.
+  The server uses each joker in the same transaction as the ping's positions,
+  whoever the run targets, records `boundAt`/`boundTo` in the plan and never
+  refunds it. A fake that is no longer armed is `skipped`; the Tool then does
+  not apply it. `boundTo` is never shown to owners, so a bound fake does not
+  tell them whom the speedhunt targets.
+- `pingNumber` and `entryId` must be whole numbers (400 otherwise).
+- Known limit: a speedhunt fake cancelled in the seconds before the next run
+  starts is skipped by the server; if it names ping 1, the Tool may already
+  have sent it with that first ping.
+- Owners cancel an unbound speedhunt fake through the same cancel endpoint; a
+  bound one is no longer cancellable (409). A reported catch releases unbound
+  fakes; bound ones stay used.
+- The owner's `/api/game-jokers` also lists their latest bound speedhunt fakes
+  (`bound` true, status `consumed`); `status.fakes` shows only armed ones.
+- The Tool applies only the target's own fake, at its ping number, to hunter
+  destinations; those positions carry no marker.
 
 ### Mirror-only hunter access
 
