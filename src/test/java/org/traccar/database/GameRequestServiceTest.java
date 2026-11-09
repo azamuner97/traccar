@@ -933,4 +933,99 @@ public class GameRequestServiceTest {
                 .map(GameJokerService.Reservation::id).toList());
         assertEquals(1, fakes(jokers, 101).available());
     }
+
+    private GameRequestService.Submission breakAt(String startsAt) throws Exception {
+        return new GameRequestService.Submission("jokerBreak", null, null,
+                mapper.readTree("{\"startsAt\":\"" + startsAt + "\"}"));
+    }
+
+    @Test
+    void plannedBreaksAreArmedStartedOrReleasedAndNeverOverlap() throws Exception {
+        var jokers = new GameJokerService(source);
+        var anna = requests.membership(20);
+        sessions.updateConfig(sessionId, 1, null,
+                mapper.readTree("{\"game_settings\":{\"break_duration_minutes\":15}}"));
+        jokers.change(sessionId, new GameJokerService.Change(101L, GameJokerService.BREAK, 3, null), "Operator");
+        publish("""
+                {"participants":[
+                  {"deviceId":101,"name":"Anna","role":"player","caught":false,
+                   "speedhunt":{"revision":3,"running":false,"live":false}},
+                  {"deviceId":102,"name":"Ben","role":"player","caught":false,
+                   "speedhunt":{"revision":1,"running":false,"live":true}}]}""");
+        Instant base = clock.now.truncatedTo(java.time.temporal.ChronoUnit.SECONDS);
+        String in30 = base.plusSeconds(1800).toString();
+
+        // While a speedhunt runs, a break that starts now is refused for everyone; a planned break is accepted.
+        assertEquals(GameRequestService.BREAK_UNAVAILABLE, message(assertThrows(WebApplicationException.class,
+                () -> requests.submit(anna, new GameRequestService.Submission("jokerBreak", null, null, null)))));
+        assertEquals(GameRequestService.BREAK_UNAVAILABLE, message(assertThrows(WebApplicationException.class,
+                () -> requests.submit(anna, breakAt(base.minusSeconds(60).toString())))),
+                "a start that has passed is a break that starts now");
+        assertThrows(BadRequestException.class, () -> requests.submit(anna, breakAt("14:00")));
+        var request = requests.submit(anna, breakAt(in30));
+        assertEquals(in30, request.parameters().get("startsAt").asText());
+        requests.claim(sessionId, request.id(), epoch);
+        deliver(List.of(new GameRequestService.Completion(request.id(), "succeeded", "Planned", null)), null);
+
+        // Armed: still reserved, not used, with its start in the plan; private to its owner and the operators.
+        var plan = jokers.own(sessionId, 101).reservations().stream()
+                .filter(GameJokerService.Reservation::armed).findFirst().orElseThrow();
+        assertEquals(in30, plan.plan().get("startsAt").asText());
+        assertNull(plan.requestId());
+        assertEquals(1, breaks(jokers, 101).reserved());
+        assertEquals(0, breaks(jokers, 101).used());
+        assertTrue(jokers.overview(sessionId).reservations().stream().anyMatch(item -> item.id() == plan.id()));
+        String hunterView = mapper.writeValueAsString(requests.status(requests.membership(10)));
+        assertFalse(hunterView.contains(in30), hunterView);
+        assertTrue(requests.list(requests.membership(10), 0).isEmpty());
+        assertEquals(0, requests.status(anna).status().get("fakes").size(), "a planned break is not a fake");
+
+        // Breaks of one participant never overlap; a planned break may follow another one.
+        assertEquals(GameRequestService.BREAK_OVERLAP, message(assertThrows(WebApplicationException.class,
+                () -> requests.submit(anna, breakAt(base.plusSeconds(1800 + 600).toString())))));
+        assertEquals(GameRequestService.BREAK_OVERLAP, message(assertThrows(WebApplicationException.class,
+                () -> requests.submit(anna, breakAt(base.plusSeconds(1800 - 600).toString())))));
+        var next = requests.submit(anna, breakAt(base.plusSeconds(1800 + 900).toString()));
+        requests.cancel(anna, next.id());
+        assertEquals(1, breaks(jokers, 101).reserved(), "a cancelled request returns its joker");
+
+        // An operator plans a break for Ben, who holds no break joker: only beyond the allocation.
+        assertEquals(409, status(assertThrows(WebApplicationException.class, () -> requests.planBreak(sessionId,
+                new GameJokerService.BreakPlan(102L, in30, false), "Operator"))));
+        var benPlan = requests.planBreak(sessionId, new GameJokerService.BreakPlan(102L, in30, true), "Operator");
+        assertTrue(benPlan.armed());
+        assertEquals("operator", benPlan.plan().get("plannedBy").asText());
+        assertEquals(1, breaks(jokers, 102).reserved());
+        assertEquals(409, status(assertThrows(WebApplicationException.class, () -> requests.planBreak(sessionId,
+                new GameJokerService.BreakPlan(102L, base.plusSeconds(2000).toString(), true), "Operator"))));
+        assertThrows(BadRequestException.class, () -> requests.planBreak(sessionId,
+                new GameJokerService.BreakPlan(900L, in30, true), "Operator"), "only players and supporters");
+
+        // The Tool starts Anna's planned break: its joker is used with that delivery; it cannot be bound.
+        assertThrows(BadRequestException.class, () -> deliverFakes(List.of(
+                new GameJokerService.FakeSettlement(plan.id(), "bound", null, "run")), null));
+        assertEquals("consumed", deliverFakes(List.of(new GameJokerService.FakeSettlement(plan.id(), "used",
+                "The break started")), null).fakes().getFirst().status());
+        assertEquals(1, breaks(jokers, 101).used());
+        assertEquals(0, breaks(jokers, 101).reserved());
+        assertEquals(409, status(assertThrows(WebApplicationException.class,
+                () -> jokers.cancelFake(sessionId, 101, plan.id(), "Anna"))), "a started break is not cancelled");
+
+        // Only its owner cancels a planned break; a used one beyond the allocation would count as over.
+        assertThrows(NotFoundException.class, () -> jokers.cancelFake(sessionId, 101, benPlan.id(), "Anna"));
+        assertEquals("released", jokers.cancelFake(sessionId, 102, benPlan.id(), "Ben").status());
+        assertEquals(0, breaks(jokers, 102).reserved());
+        assertEquals(0, breaks(jokers, 102).overAllocated());
+
+        // Catching a participant releases their planned breaks.
+        requests.planBreak(sessionId, new GameJokerService.BreakPlan(101L, base.plusSeconds(7200).toString(), false),
+                "Operator");
+        assertEquals(1, breaks(jokers, 101).reserved());
+        deliverFakes(null, List.of(101L));
+        assertEquals(0, breaks(jokers, 101).reserved());
+        assertEquals(1, breaks(jokers, 101).used());
+        var kinds = jokers.ledger(sessionId, 0).stream().filter(item -> item.deviceId() == 102)
+                .map(GameJokerService.LedgerEntry::kind).toList();
+        assertEquals(List.of("release", "arm"), kinds);
+    }
 }

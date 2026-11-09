@@ -384,6 +384,23 @@ public class GameSessionResource extends BaseResource {
         return jokers.ledger(id, limit);
     }
 
+    /**
+     * Plans a break for a participant, from {@code startsAt} (now when it is missing or has passed). Its joker is
+     * reserved until the Tool starts the break; without an available joker only with {@code overAllocate}.
+     */
+    @POST
+    @Path("{id}/jokers/breaks")
+    public GameJokerService.Reservation planBreak(@PathParam("id") long id, GameJokerService.BreakPlan plan)
+            throws Exception {
+        checkOperator();
+        var user = permissionsService.getUser(getUserId());
+        String actor = user.getName() == null || user.getName().isBlank() ? user.getEmail() : user.getName();
+        var result = requests.planBreak(id, plan, actor);
+        connectionManager.updateGameUsers(true, jokers.owners(id, java.util.List.of(result.deviceId())),
+                GameJokerResource.INVALIDATION);
+        return result;
+    }
+
     /** Grants (positive quantity) or revokes (negative) unused jokers of one participant. */
     @POST
     @Path("{id}/jokers/change")

@@ -4924,8 +4924,9 @@ paths:
     post:
       operationId: cancelGameJokerFake
       summary: >-
-        Cancel the member's own armed fake; its joker returns. A timetable fake can be cancelled until 60
-        seconds before its ping, a speedhunt fake until it is bound to a speedhunt.
+        Cancel the member's own armed fake or planned break; its joker returns. A timetable fake can be
+        cancelled until 60 seconds before its ping, a speedhunt fake until it is bound to a speedhunt, and a
+        planned break until the Tool starts it.
       tags:
         - Game Requests
       responses:
@@ -5018,6 +5019,43 @@ paths:
             game_settings.break_duration_minutes is configured, or granting break or fake jokers while a
             hunter of the session sees a real participant tracker, directly or through a group
             (mirror-only hunter access)
+          content: {}
+        '423':
+          description: The game controller lease is required, or another Tool instance holds it
+          content: {}
+  /game-sessions/{id}/jokers/breaks:
+    parameters:
+      - $ref: '#/components/parameters/GameSessionId'
+      - $ref: '#/components/parameters/GameControllerEpoch'
+    post:
+      operationId: planGameSessionBreak
+      summary: >-
+        Plan a participant's break from startsAt, or from now when it is missing or has passed. The break
+        joker is armed (reserved, with the plan) until the Tool starts the break, which waits at its start while
+        any speedhunt runs; owners and operators can cancel it until then.
+      tags:
+        - Game Requests
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GameJokerBreakPlan'
+      responses:
+        '200':
+          description: The armed planned break
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GameJokerReservation'
+        '400':
+          description: Not a player or supporter of the session, or a start that is not a time
+          content: {}
+        '409':
+          description: >-
+            No break duration configured, the participant is out of the game, the break would overlap
+            another break of the participant, no break joker is available without overAllocate, or a hunter
+            sees a real participant tracker (mirror-only hunter access)
           content: {}
         '423':
           description: The game controller lease is required, or another Tool instance holds it
@@ -6804,9 +6842,11 @@ components:
         fakes:
           type: [array, 'null']
           description: >-
-            Armed fakes settled by this delivery: a timetable fake used when this delivery's positions give the
-            hunters the fake, or released when its ping was skipped or failed; a speedhunt fake bound (and used)
-            by the delivery of a run's first ping. A fake that is no longer armed is skipped.
+            Armed fakes and planned breaks settled by this delivery: a timetable fake used when this delivery's
+            positions give the hunters the fake, or released when its ping was skipped or failed; a speedhunt
+            fake bound (and used) by the delivery of a run's first ping; a planned break used when the Tool
+            starts it, or released when the operator cancels it or its time passed while no Tool ran. One that
+            is no longer armed is skipped.
           items:
             type: object
             required: [reservationId, outcome]
@@ -6999,7 +7039,10 @@ components:
         Hunters' speedhunt requests need targetDeviceId and baseRevision. Jokers (jokerHunterPositions,
         jokerBreak, jokerFakePing) are always for the requesting player or supporter and reserve one
         available joker; a break lasts the duration configured in the session's game settings and is timed by
-        the Tool. A fake ping (jokerFakePing) names a coordinate and either entryId or pingNumber, never both.
+        the Tool. A break starts now, or from parameters.startsAt (a planned break; a start that has passed
+        when it is submitted starts now). A planned break is accepted while a speedhunt runs: its succeeded
+        request arms the joker, and the Tool starts the break at its start, waiting while any speedhunt runs.
+        Breaks of one participant never overlap. A fake ping (jokerFakePing) names a coordinate and either entryId or pingNumber, never both.
         On a timetable ping it names one of the requester's own upcoming timetable pings (entryId from
         /game-jokers timetableEntries); when the request succeeds the fake is armed (still reserved) and its
         joker is used when the hunters receive the fake at that ping. On the next speedhunt it names a ping
@@ -7026,6 +7069,10 @@ components:
               type: number
               exclusiveMinimum: 0
               maximum: 240
+            startsAt:
+              type: string
+              format: date-time
+              description: jokerBreak only; the planned start
             entryId:
               type: integer
               format: int64
@@ -7201,6 +7248,17 @@ components:
           type: string
           format: date-time
           description: When a speedhunt fake was bound to a speedhunt
+        startsAt:
+          type: string
+          format: date-time
+          description: The planned start of a planned break
+        armedAt:
+          type: string
+          format: date-time
+        plannedBy:
+          type: string
+          enum: [operator]
+          description: A planned break an operator planned
         boundTo:
           type: string
           description: >-
@@ -7333,6 +7391,21 @@ components:
         occurredAt:
           type: string
           format: date-time
+    GameJokerBreakPlan:
+      type: object
+      required: [deviceId]
+      properties:
+        deviceId:
+          type: integer
+          format: int64
+          description: The participant's real tracker
+        startsAt:
+          type: [string, 'null']
+          format: date-time
+          description: The planned start; now when missing or past
+        overAllocate:
+          type: [boolean, 'null']
+          description: Plan the break although no break joker is available (a use beyond the allocation)
     GameJokerChange:
       type: object
       required: [deviceId, type, quantity]

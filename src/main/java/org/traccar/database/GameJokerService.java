@@ -53,6 +53,10 @@ import java.util.TimeZone;
  * speedhunt fake it lists, whoever the run targets, and uses their jokers in the same transaction. Bound fakes are
  * never refunded; only the target's own fake applies, at its ping number.
  * <p>
+ * A planned break is a break joker armed for a later start ({@code startsAt} in its plan), planned by its owner
+ * through a request or by an operator for a participant. It stays reserved until the Tool starts the break (used)
+ * or the plan is cancelled, its owner caught, or its time missed (released). Plans are private like fake plans.
+ * <p>
  * Sessions saved before the two fake types were merged into {@link #FAKE_PING} were migrated forward
  * ({@code changelog-game-jokers-fake-ping.xml}); their ledger keeps the earlier type names.
  */
@@ -237,6 +241,74 @@ public class GameJokerService {
                 return rows.next() ? rows.getString(1) : null;
             }
         }
+    }
+
+    /** A planned break: a break joker whose plan names its start ({@code startsAt}). */
+    static boolean plannedBreak(String type, JsonNode plan) {
+        return BREAK.equals(type) && plan != null && plan.hasNonNull("startsAt");
+    }
+
+    /** Whether a succeeded request arms its joker instead of using it: fakes and planned breaks. */
+    static boolean armable(String type, JsonNode plan) {
+        return FAKE_TYPES.contains(type) || plannedBreak(type, plan);
+    }
+
+    /** A break lasts whole seconds, at least one (the Tool's {@code break_length}). */
+    static long breakSeconds(double minutes) {
+        return Math.max(1, (long) Math.ceil(Math.round(minutes * 60 * 1e6) / 1e6));
+    }
+
+    /**
+     * Whether a break of the participant from {@code start} would overlap their active break (from the published
+     * status) or another planned or requested break. A planned break that is already due counts from now, and a
+     * requested break without a start (one that starts now) from now.
+     */
+    static boolean breakOverlaps(Connection connection, long gameSessionId, long deviceId, Instant start,
+                                 double minutes, JsonNode published, Instant now) throws SQLException {
+        long length = breakSeconds(minutes);
+        Instant from = start.isBefore(now) ? now : start;
+        Instant to = from.plusSeconds(length);
+        List<Instant[]> intervals = new ArrayList<>();
+        JsonNode pause = published == null ? null : published.path("break");
+        if (pause != null && pause.path("active").asBoolean(false) && pause.hasNonNull("endsAt")) {
+            try {
+                Instant ends = Instant.parse(pause.get("endsAt").asText());
+                Instant started = pause.hasNonNull("startedAt") ? Instant.parse(pause.get("startedAt").asText()) : now;
+                if (ends.isAfter(now)) {
+                    intervals.add(new Instant[] {started, ends});
+                }
+            } catch (java.time.format.DateTimeParseException error) {
+                intervals.add(new Instant[] {now, now.plusSeconds(length)});
+            }
+        }
+        try (var query = connection.prepareStatement("SELECT details FROM tc_game_joker_reservations"
+                + " WHERE gamesessionid = ? AND deviceid = ? AND type = ? AND status = ?")) {
+            query.setLong(1, gameSessionId);
+            query.setLong(2, deviceId);
+            query.setString(3, BREAK);
+            query.setString(4, RESERVED);
+            try (var rows = query.executeQuery()) {
+                while (rows.next()) {
+                    JsonNode plan = plan(rows.getString(1));
+                    Instant other = now;
+                    if (plan.hasNonNull("startsAt")) {
+                        try {
+                            other = Instant.parse(plan.get("startsAt").asText());
+                        } catch (java.time.format.DateTimeParseException error) {
+                            other = now;
+                        }
+                    }
+                    Instant otherFrom = other.isBefore(now) ? now : other;
+                    intervals.add(new Instant[] {otherFrom, otherFrom.plusSeconds(length)});
+                }
+            }
+        }
+        for (Instant[] interval : intervals) {
+            if (interval[0].isBefore(to) && from.isBefore(interval[1])) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /** A fake ping planned on a timetable ping. */
@@ -677,7 +749,7 @@ public class GameJokerService {
                     JsonNode plan = plan(rows.getString("details"));
                     result.add(new Reservation(rows.getLong("id"), rows.getLong("deviceid"), type,
                             requestId, rows.getString("status"), iso(rows, "createdat"),
-                            requestId == null && FAKE_TYPES.contains(type), false, plan));
+                            requestId == null && armable(type, plan), false, plan));
                 }
             }
         }
@@ -803,8 +875,9 @@ public class GameJokerService {
         }
         for (Pending item : pending) {
             boolean consumed = GameRequestService.SUCCEEDED.equals(item.status());
-            if (consumed && FAKE_TYPES.contains(item.type())) {
-                // The fake is armed: it keeps its reservation, without the request, until it takes effect.
+            if (consumed && armable(item.type(), plan(item.details()))) {
+                // A fake or planned break is armed: it keeps its reservation, without the request, until it takes
+                // effect.
                 ObjectNode details = (ObjectNode) plan(item.details());
                 details.put("requestId", item.requestId());
                 details.put("armedAt", now().toString());
@@ -877,7 +950,7 @@ public class GameJokerService {
                 rows.getLong("requestid");
                 boolean open = !rows.wasNull();
                 if (open || !RESERVED.equals(rows.getString("status"))
-                        || !FAKE_TYPES.contains(rows.getString("type"))) {
+                        || !armable(rows.getString("type"), plan(rows.getString("details")))) {
                     return null;
                 }
                 return new Armed(rows.getLong("id"), gameSessionId, rows.getLong("deviceid"), rows.getString("type"),
@@ -940,8 +1013,9 @@ public class GameJokerService {
                 result.add(new FakeOutcome(fake.id(), CONSUMED));
                 continue;
             }
-            if (!timetableUse(fake.plan())) {
-                throw new BadRequestException("Only timetable fakes are used or released by deliveries");
+            if (!timetableUse(fake.plan()) && !plannedBreak(fake.type(), fake.plan())) {
+                throw new BadRequestException("Only timetable fakes and planned breaks are used or released by"
+                        + " deliveries");
             }
             boolean used = USED.equals(item.outcome());
             endArmed(connection, fake, used, "Tool", text(item.detail(), 512));
@@ -950,7 +1024,10 @@ public class GameJokerService {
         return result;
     }
 
-    /** The owner cancels an armed fake; a timetable fake only until shortly before its ping. */
+    /**
+     * The owner cancels an armed fake or planned break; a timetable fake only until shortly before its ping. A
+     * planned break can be cancelled until the Tool starts it.
+     */
     public Reservation cancelFake(long gameSessionId, long deviceId, long reservationId, String actor)
             throws Exception {
         return transaction(connection -> {
@@ -968,7 +1045,7 @@ public class GameJokerService {
             }
             Armed fake = armed(connection, gameSessionId, reservationId);
             if (fake == null) {
-                throw new WebApplicationException("This fake can no longer be cancelled", 409);
+                throw new WebApplicationException("This can no longer be cancelled", 409);
             }
             if (timetableUse(fake.plan())) {
                 Instant scheduled = Instant.parse(fake.plan().path("scheduledAt").asText());
@@ -1070,7 +1147,7 @@ public class GameJokerService {
                                                                    long deviceId) throws SQLException {
         var result = JsonNodeFactory.instance.arrayNode();
         for (Reservation item : reservations(connection, gameSessionId, deviceId)) {
-            if (item.armed()) {
+            if (item.armed() && FAKE_TYPES.contains(item.type())) {
                 ObjectNode fake = result.addObject();
                 fake.put("reservationId", item.id());
                 fake.put("type", item.type());
@@ -1079,6 +1156,55 @@ public class GameJokerService {
             }
         }
         return result;
+    }
+
+    /** An operator's plan for a participant's break: from {@code startsAt} (now when missing or past). */
+    public record BreakPlan(Long deviceId, String startsAt, Boolean overAllocate) { }
+
+    /**
+     * Arms a break joker for a planned break an operator planned, inside the caller's transaction. Without an
+     * available joker it needs {@code overAllocate}; the use then counts beyond the allocation once the break
+     * starts. Reserved uses of the participant's open requests are never taken.
+     */
+    static Reservation armBreak(Connection connection, long gameSessionId, long deviceId, Instant startsAt,
+                                boolean overAllocate, String actor) throws SQLException {
+        int[] counts = counts(connection, gameSessionId, deviceId, BREAK, true);
+        boolean over = counts[0] - counts[1] - counts[2] <= 0;
+        if (over && !overAllocate) {
+            throw new WebApplicationException(
+                    "No break joker is available; confirm a use beyond the allocation", 409);
+        }
+        Instant now = now();
+        ObjectNode details = JsonNodeFactory.instance.objectNode();
+        details.put("startsAt", startsAt.toString());
+        details.put("armedAt", now.toString());
+        details.put("plannedBy", "operator");
+        long id;
+        try (var query = connection.prepareStatement("INSERT INTO tc_game_joker_reservations (gamesessionid,deviceid,"
+                + "type,requestid,status,details,createdat,updatedat) VALUES (?,?,?,?,?,?,?,?)",
+                Statement.RETURN_GENERATED_KEYS)) {
+            query.setLong(1, gameSessionId);
+            query.setLong(2, deviceId);
+            query.setString(3, BREAK);
+            query.setNull(4, Types.BIGINT);
+            query.setString(5, RESERVED);
+            query.setString(6, details.toString());
+            query.setTimestamp(7, Timestamp.from(now), utc());
+            query.setTimestamp(8, Timestamp.from(now), utc());
+            query.executeUpdate();
+            try (var keys = query.getGeneratedKeys()) {
+                keys.next();
+                id = keys.getLong(1);
+            }
+        }
+        ledger(connection, gameSessionId, deviceId, BREAK, "arm", 1, null, id, actor,
+                over ? "Planned by an operator beyond the allocation" : "Planned by an operator");
+        return new Reservation(id, deviceId, BREAK, null, RESERVED, now.toString(), true, false, details);
+    }
+
+    /** Players and supporters of a session, by real tracker (for checks in other services). */
+    static boolean participant(Connection connection, long gameSessionId, long deviceId) throws SQLException {
+        return participants(connection, gameSessionId).contains(deviceId);
     }
 
     /** Releases armed fakes of the given trackers (caught participants); bound fakes are already used. */

@@ -449,6 +449,35 @@ effects deliveries use only "Get hunter positions" jokers.
   from every position of that participant and keeps them out of proximity
   circles and anonymous proximity notifications.
 
+#### Planned breaks
+
+A `jokerBreak` request may name `parameters.startsAt`, a later start (a start
+that has passed when the request is submitted makes it a break that starts
+now). A planned break is accepted while a speedhunt runs; only a break that
+starts now is refused then. Its reservation carries the plan, and the succeeded
+request *arms* it like a fake (ledger `arm`): the joker stays reserved until
+the Tool starts the break.
+
+- Operators plan a break for a participant with the fenced
+  `POST /api/game-sessions/{id}/jokers/breaks` (`deviceId`, `startsAt`,
+  `overAllocate`). Without an available break joker it needs `overAllocate`;
+  the use then counts beyond the allocation once the break starts. The plan is
+  marked `plannedBy: operator`.
+- Breaks of one participant never overlap (409): a new break is checked
+  against the published active break and every planned or requested break of
+  the participant, each lasting the configured duration; a planned break that
+  is already due counts from now.
+- The Tool starts a planned break at its start and reports the reservation
+  `used` in an effects delivery's `fakes`. While any speedhunt runs (or the
+  participant is still on a break) it waits, then lasts its full duration. A
+  start missed while no Tool ran ends at the planned end; once that has passed,
+  the Tool reports it `released`. Operators release it the same way to cancel
+  it, and owners cancel it with `POST /api/game-jokers/reservations/{id}/cancel`
+  until it starts. A reported catch releases the participant's planned breaks.
+- Planned breaks are private like fake plans: owners see theirs in
+  `/api/game-jokers`, operators in the overview; hunters and spectators see a
+  break only once the Tool publishes it as active.
+
 Hunter relay snapshots carry the hunter position's own fix time, so a mirror
 shows its age; an older fix is stored without becoming latest.
 

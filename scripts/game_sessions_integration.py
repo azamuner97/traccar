@@ -545,6 +545,76 @@ def audit_breaks(session_id, tracker_id, hunter, player, tool_source=None):
              if entry["type"] == "break"]
     assert kinds[:3] == ["use", "reserve", "grant"], kinds
     api.request("POST", change, {**grant, "quantity": -1})
+    audit_planned_breaks(session_id, tracker_id, hunter, player, publish, breaks, revision, tool_source)
+
+
+def audit_planned_breaks(session_id, tracker_id, hunter, player, publish, breaks, revision, tool_source=None):
+    """Planned breaks: accepted during a speedhunt, armed, private, never overlapping, cancelled or used."""
+    change = f"/game-sessions/{session_id}/jokers/change"
+    effects = f"/game-sessions/{session_id}/effects"
+    plan_endpoint = f"/game-sessions/{session_id}/jokers/breaks"
+    api.request("POST", change, {"deviceId": tracker_id, "type": "break", "quantity": 1, "reason": "audit"})
+    publish(running="other", revision=revision)
+    later = datetime.now(timezone.utc).replace(microsecond=0) + timedelta(hours=1)
+    planned = {"type": "jokerBreak", "parameters": {"startsAt": _iso(later)}}
+
+    def armed():
+        return [item for item in api.request("GET", "/game-jokers", credentials=player)["reservations"]
+                if item["armed"] and item["type"] == "break"]
+
+    # While a speedhunt runs a break that starts now is refused for everyone, but a planned one is accepted.
+    assert refusal("/game-requests", {"type": "jokerBreak"}, player) == BREAK_UNAVAILABLE
+    request = api.request("POST", "/game-requests", planned, credentials=player)
+    assert request["parameters"]["startsAt"] == _iso(later), request
+    api.request("POST", f"/game-sessions/{session_id}/requests/{request['id']}/claim", {})
+    api.request("POST", effects, {"deliveryId": "audit" + uuid4().hex, "requests": [
+        {"id": request["id"], "status": "succeeded", "message": "Your break is planned."}]})
+    plans = armed()
+    assert len(plans) == 1 and plans[0]["plan"]["startsAt"] == _iso(later), plans
+    assert breaks()["reserved"] == 1 and breaks()["used"] == 1, breaks()
+    # Private: hunters see neither the plan nor the request; the owner's status lists no fake for it.
+    hunter_view = json.dumps(api.request("GET", "/game-status", credentials=hunter))
+    assert _iso(later) not in hunter_view, hunter_view
+    assert all(item["type"] != "jokerBreak" for item in api.request("GET", "/game-requests", credentials=hunter))
+    assert api.request("GET", "/game-status", credentials=player)["status"]["fakes"] == []
+    # Breaks of one participant never overlap.
+    overlapping = {"type": "jokerBreak", "parameters": {"startsAt": _iso(later + timedelta(minutes=5))}}
+    assert refusal("/game-requests", overlapping, player) == "This break would overlap another break of yours"
+    assert api.request("POST", f"/game-jokers/reservations/{plans[0]['id']}/cancel", {},
+                       credentials=player)["status"] == "released"
+    assert breaks()["reserved"] == 0 and breaks()["available"] == 1, breaks()
+
+    # An operator plans breaks: with the available joker, then beyond the allocation only when confirmed.
+    first = api.request("POST", plan_endpoint, {"deviceId": tracker_id, "startsAt": _iso(later)})
+    assert first["armed"] and first["plan"]["plannedBy"] == "operator", first
+    api.request("POST", plan_endpoint, {"deviceId": tracker_id, "startsAt": _iso(later + timedelta(minutes=5)),
+                                        "overAllocate": True}, expected=409)
+    second_start = later + timedelta(hours=1)
+    api.request("POST", plan_endpoint, {"deviceId": tracker_id, "startsAt": _iso(second_start)}, expected=409)
+    second = api.request("POST", plan_endpoint, {"deviceId": tracker_id, "startsAt": _iso(second_start),
+                                                 "overAllocate": True})
+    # Participants cannot plan for others: the endpoint is fenced, so their accounts are refused first.
+    api.request("POST", plan_endpoint, {"deviceId": tracker_id, "startsAt": _iso(later)}, credentials=player,
+                expected=423)
+    if tool_source:
+        sys.path.insert(0, tool_source)
+        from traccar_game_manager.application.game_actions.planned_breaks import planned_breaks
+        overview = api.request("GET", f"/game-sessions/{session_id}/jokers")
+        known = planned_breaks(overview)
+        assert sorted(known) == sorted([first["id"], second["id"]]), known
+        used, released = known[first["id"]].used(), known[second["id"]].released("Cancelled by the operator")
+    else:
+        used = {"reservationId": first["id"], "outcome": "used", "detail": "The break started"}
+        released = {"reservationId": second["id"], "outcome": "released", "detail": "Cancelled by the operator"}
+    # The Tool starts the first break (its joker is used) and the operator cancels the second.
+    outcome = api.request("POST", effects, {"deliveryId": "audit" + uuid4().hex, "fakes": [used, released]})
+    assert [item["status"] for item in outcome["fakes"]] == ["consumed", "released"], outcome
+    assert breaks()["used"] == 2 and breaks()["reserved"] == 0 and breaks()["overAllocated"] == 0, breaks()
+    api.request("POST", f"/game-jokers/reservations/{first['id']}/cancel", {}, credentials=player, expected=409)
+    kinds = [entry["kind"] for entry in api.request("GET", f"/game-sessions/{session_id}/jokers/ledger")
+             if entry["type"] == "break"]
+    assert kinds[:4] == ["release", "use", "arm", "arm"], kinds
+    publish(revision=revision)
 
 
 def audit_mirror_only_access(session_id, tracker_id, hunter_id, player_id):

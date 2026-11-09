@@ -53,7 +53,7 @@ public class GameJokerResource extends BaseResource {
         return jokers.own(member.gameSessionId(), member.assignedDeviceId());
     }
 
-    /** The owner cancels an armed fake; a timetable fake only until shortly before its ping. */
+    /** The owner cancels an armed fake or planned break; a timetable fake only until shortly before its ping. */
     @POST
     @Path("reservations/{id}/cancel")
     public GameJokerService.Reservation cancel(@PathParam("id") long id) throws Exception {

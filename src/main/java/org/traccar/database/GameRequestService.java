@@ -45,6 +45,9 @@ import java.util.TimeZone;
  * <p>
  * Breaks are timed by the Tool and published in the status. A break request is refused while any speedhunt runs,
  * with the same message whoever the speedhunt targets; speedhunt pings on a participant on a break are refused.
+ * A break request may name a later start ({@code startsAt}): the succeeded request arms the break joker until the
+ * Tool starts the break, which waits at its start while any speedhunt runs. Breaks of one participant never
+ * overlap.
  */
 @Singleton
 public class GameRequestService {
@@ -69,6 +72,7 @@ public class GameRequestService {
     public static final String FAKE_PING_REQUEST = "jokerFakePing";
     /** The same answer for every participant, so it never reveals whom a speedhunt targets. */
     public static final String BREAK_UNAVAILABLE = "A break cannot start right now; try again later";
+    public static final String BREAK_OVERLAP = "This break would overlap another break of yours";
     private static final Set<String> SPEEDHUNT_PINGS = Set.of("speedhuntStaticPing", "speedhuntLivePing");
     private static final int MAX_LIVE_MINUTES = 240;
 
@@ -407,6 +411,19 @@ public class GameRequestService {
             result.put("longitude", coordinate(input, "longitude", 180));
             return result;
         }
+        if (BREAK_REQUEST.equals(submission.type()) && input != null && input.hasNonNull("startsAt")) {
+            // A planned start; one that has already passed is a break that starts now.
+            Instant start;
+            try {
+                start = Instant.parse(input.get("startsAt").asText());
+            } catch (java.time.format.DateTimeParseException error) {
+                throw new BadRequestException("The start of a break must be a time such as 2026-11-09T14:00:00Z");
+            }
+            if (start.isAfter(now())) {
+                result.put("startsAt", start.truncatedTo(ChronoUnit.SECONDS).toString());
+            }
+            return result;
+        }
         if ("speedhuntLivePing".equals(submission.type()) && submission.parameters() != null
                 && submission.parameters().has("durationMinutes")
                 && !submission.parameters().get("durationMinutes").isNull()) {
@@ -482,14 +499,23 @@ public class GameRequestService {
                 throw conflict("This participant is on a break");
             }
             if (BREAK_REQUEST.equals(accepted.type())) {
-                if (GameJokerService.breakMinutes(connection, member.gameSessionId()) == null) {
+                Double minutes = GameJokerService.breakMinutes(connection, member.gameSessionId());
+                if (minutes == null) {
                     throw conflict("Breaks are not set up for this game");
                 }
-                if (onBreak(target, now())) {
+                boolean planned = parameters.has("startsAt");
+                // A planned break waits at its start while any speedhunt runs; only a break that starts now is
+                // refused during a speedhunt.
+                if (!planned && onBreak(target, now())) {
                     throw conflict("You are already on a break");
                 }
-                if (speedhuntRunning(published)) {
+                if (!planned && speedhuntRunning(published)) {
                     throw conflict(BREAK_UNAVAILABLE);
+                }
+                Instant start = planned ? Instant.parse(parameters.get("startsAt").asText()) : now();
+                if (GameJokerService.breakOverlaps(connection, member.gameSessionId(), accepted.targetDeviceId(),
+                        start, minutes, target, now())) {
+                    throw conflict(BREAK_OVERLAP);
                 }
             }
             if (FAKE_PING_REQUEST.equals(accepted.type()) && parameters.has("entryId")) {
@@ -570,12 +596,61 @@ public class GameRequestService {
             }
             if (joker) {
                 String jokerType = GameJokerService.REQUEST_TYPES.get(accepted.type());
-                // A fake's reservation carries its plan, which stays private to its owner and the operators.
+                // A fake's or planned break's reservation carries its plan, which stays private to its owner and the
+                // operators.
+                boolean withPlan = GameJokerService.FAKE_TYPES.contains(jokerType)
+                        || GameJokerService.BREAK.equals(jokerType) && parameters.has("startsAt");
                 GameJokerService.reserve(connection, member.gameSessionId(), accepted.targetDeviceId(), jokerType, id,
-                        userLabel(connection, member.userId()),
-                        GameJokerService.FAKE_TYPES.contains(jokerType) ? parameters : null);
+                        userLabel(connection, member.userId()), withPlan ? parameters : null);
             }
             return memberView(load(connection, member.gameSessionId(), id, false));
+        });
+    }
+
+    /**
+     * An operator plans a participant's break (or starts one now, when {@code startsAt} is missing or has passed):
+     * the break joker is armed until the Tool starts the break. The same rules as for a participant's planned break
+     * apply, and without an available joker the operator must confirm a use beyond the allocation.
+     */
+    public GameJokerService.Reservation planBreak(long gameSessionId, GameJokerService.BreakPlan plan, String actor)
+            throws Exception {
+        if (plan == null || plan.deviceId() == null) {
+            throw new BadRequestException("Participant required");
+        }
+        Instant requested = now();
+        if (plan.startsAt() != null && !plan.startsAt().isBlank()) {
+            try {
+                requested = Instant.parse(plan.startsAt());
+            } catch (java.time.format.DateTimeParseException error) {
+                throw new BadRequestException("The start of a break must be a time such as 2026-11-09T14:00:00Z");
+            }
+        }
+        Instant start = (requested.isAfter(now()) ? requested : now()).truncatedTo(ChronoUnit.SECONDS);
+        return transaction(connection -> {
+            try (var query = connection.prepareStatement(
+                    "SELECT id FROM tc_game_sessions WHERE id = ? FOR UPDATE")) {
+                query.setLong(1, gameSessionId);
+                query.executeQuery().close();
+            }
+            if (!GameJokerService.participant(connection, gameSessionId, plan.deviceId())) {
+                throw new BadRequestException("Breaks belong to players and supporters of this session");
+            }
+            Double minutes = GameJokerService.breakMinutes(connection, gameSessionId);
+            if (minutes == null) {
+                throw conflict("Set a positive break duration in the game settings first");
+            }
+            JsonNode target = participant(statusDocument(connection, gameSessionId), plan.deviceId());
+            if (target != null && target.path("caught").asBoolean(false)) {
+                throw conflict("This participant is out of the game");
+            }
+            if (GameJokerService.breakOverlaps(connection, gameSessionId, plan.deviceId(), start, minutes, target,
+                    now())) {
+                throw conflict("This break would overlap another break of this participant");
+            }
+            // Planning a break beyond the allocation grants a break joker in effect: hunters must see only mirrors.
+            GameAccessRule.checkGrant(connection, gameSessionId, GameJokerService.BREAK);
+            return GameJokerService.armBreak(connection, gameSessionId, plan.deviceId(), start,
+                    Boolean.TRUE.equals(plan.overAllocate()), actor);
         });
     }
 
