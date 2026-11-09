@@ -48,4 +48,5 @@
   <include file="changelog-game-controller.xml" relativeToChangelogFile="true" />
   <include file="changelog-game-requests.xml" relativeToChangelogFile="true" />
   <include file="changelog-game-jokers.xml" relativeToChangelogFile="true" />
+  <include file="changelog-game-jokers-fake-ping.xml" relativeToChangelogFile="true" />
 </databaseChangeLog>

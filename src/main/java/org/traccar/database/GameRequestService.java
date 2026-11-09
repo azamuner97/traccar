@@ -65,8 +65,8 @@ public class GameRequestService {
     public static final Set<String> JOKER_TYPES = GameJokerService.REQUEST_TYPES.keySet();
     public static final int EXPIRY_SECONDS = 120;
     public static final String BREAK_REQUEST = "jokerBreak";
-    public static final String FAKE_TIMETABLE_REQUEST = "jokerFakeTimetable";
-    public static final String FAKE_SPEEDHUNT_REQUEST = "jokerFakeSpeedhunt";
+    /** A fake ping on an own timetable ping ({@code entryId}) or a ping of the next speedhunt ({@code pingNumber}). */
+    public static final String FAKE_PING_REQUEST = "jokerFakePing";
     /** The same answer for every participant, so it never reveals whom a speedhunt targets. */
     public static final String BREAK_UNAVAILABLE = "A break cannot start right now; try again later";
     private static final Set<String> SPEEDHUNT_PINGS = Set.of("speedhuntStaticPing", "speedhuntLivePing");
@@ -379,10 +379,16 @@ public class GameRequestService {
 
     private ObjectNode parameters(Submission submission) {
         ObjectNode result = JsonNodeFactory.instance.objectNode();
-        if (FAKE_TIMETABLE_REQUEST.equals(submission.type())) {
-            JsonNode input = submission.parameters();
-            JsonNode entry = input == null ? null : input.get("entryId");
-            if (entry == null || !entry.isIntegralNumber() || !entry.canConvertToLong() || entry.asLong() <= 0) {
+        JsonNode input = submission.parameters();
+        boolean fake = FAKE_PING_REQUEST.equals(submission.type());
+        boolean timetable = fake && input != null && input.hasNonNull("entryId");
+        boolean speedhunt = fake && input != null && input.hasNonNull("pingNumber");
+        if (fake && timetable == speedhunt) {
+            throw new BadRequestException("Choose either one of your timetable pings or a ping of the next speedhunt");
+        }
+        if (timetable) {
+            JsonNode entry = input.get("entryId");
+            if (!entry.isIntegralNumber() || !entry.canConvertToLong() || entry.asLong() <= 0) {
                 throw new BadRequestException("Choose one of your upcoming timetable pings");
             }
             result.put("entryId", entry.asLong());
@@ -390,9 +396,8 @@ public class GameRequestService {
             result.put("longitude", coordinate(input, "longitude", 180));
             return result;
         }
-        if (FAKE_SPEEDHUNT_REQUEST.equals(submission.type())) {
-            JsonNode input = submission.parameters();
-            JsonNode ping = input == null ? null : input.get("pingNumber");
+        if (speedhunt) {
+            JsonNode ping = input.get("pingNumber");
             if (ping == null || !ping.isIntegralNumber() || !ping.canConvertToInt() || ping.asInt() < 1
                     || ping.asInt() > GameJokerService.MAX_FAKE_PING_NUMBER) {
                 throw new BadRequestException("Choose the ping of the next speedhunt the fake replaces");
@@ -487,7 +492,7 @@ public class GameRequestService {
                     throw conflict(BREAK_UNAVAILABLE);
                 }
             }
-            if (FAKE_TIMETABLE_REQUEST.equals(accepted.type())) {
+            if (FAKE_PING_REQUEST.equals(accepted.type()) && parameters.has("entryId")) {
                 Instant scheduled = fakeTimetableEntry(connection, member.gameSessionId(), accepted.targetDeviceId(),
                         parameters.get("entryId").asLong());
                 JsonNode pause = target.path("break");
@@ -501,7 +506,7 @@ public class GameRequestService {
                 }
                 parameters.put("scheduledAt", scheduled.toString());
             }
-            if (FAKE_SPEEDHUNT_REQUEST.equals(accepted.type())) {
+            if (FAKE_PING_REQUEST.equals(accepted.type()) && parameters.has("pingNumber")) {
                 Integer limit = GameJokerService.pingsPerSpeedhunt(connection, member.gameSessionId());
                 if (limit != null && parameters.get("pingNumber").asInt() > limit) {
                     throw conflict("A speedhunt has " + limit + " pings; choose one of them");
@@ -773,7 +778,8 @@ public class GameRequestService {
                 throw conflict("Request " + completion.id() + " cannot become " + completion.status()
                         + " from " + request.status());
             }
-            if (SUCCEEDED.equals(completion.status()) && FAKE_TIMETABLE_REQUEST.equals(request.type())) {
+            if (SUCCEEDED.equals(completion.status()) && FAKE_PING_REQUEST.equals(request.type())
+                    && request.parameters().hasNonNull("entryId")) {
                 // Checked again right before the fake is armed: the timetable may have changed meanwhile. A refusal
                 // is a 400, so the Tool records the request as failed and the joker returns.
                 try {

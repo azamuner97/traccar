@@ -6950,7 +6950,7 @@ components:
         type:
           type: string
           enum: [speedhuntStaticPing, speedhuntLivePing, speedhuntStopLivePing, speedhuntTerminate,
-                 jokerHunterPositions, jokerBreak, jokerFakeTimetable, jokerFakeSpeedhunt]
+                 jokerHunterPositions, jokerBreak, jokerFakePing]
         requesterUserId:
           type: [integer, 'null']
           format: int64
@@ -6997,19 +6997,20 @@ components:
       required: [type]
       description: >-
         Hunters' speedhunt requests need targetDeviceId and baseRevision. Jokers (jokerHunterPositions,
-        jokerBreak, jokerFakeTimetable) are always for the requesting player or supporter and reserve one
+        jokerBreak, jokerFakePing) are always for the requesting player or supporter and reserve one
         available joker; a break lasts the duration configured in the session's game settings and is timed by
-        the Tool. A timetable fake names one of the requester's own upcoming timetable pings (entryId from
-        /game-jokers timetableEntries) and a coordinate; when the request succeeds the fake is armed (still
-        reserved) and its joker is used when the hunters receive the fake at that ping. A speedhunt fake names a
-        ping number (1 to the session's pings per speedhunt, any positive number when unlimited) and a
-        coordinate; it is armed for the next speedhunt, whoever it targets, and is bound (used, never refunded)
-        when that run's first ping is sent. One unbound speedhunt fake per participant.
+        the Tool. A fake ping (jokerFakePing) names a coordinate and either entryId or pingNumber, never both.
+        On a timetable ping it names one of the requester's own upcoming timetable pings (entryId from
+        /game-jokers timetableEntries); when the request succeeds the fake is armed (still reserved) and its
+        joker is used when the hunters receive the fake at that ping. On the next speedhunt it names a ping
+        number (1 to the session's pings per speedhunt, any positive number when unlimited); it is armed for the
+        next speedhunt, whoever it targets, and is bound (used, never refunded) when that run's first ping is
+        sent. At most one fake per timetable ping and one unbound speedhunt fake per participant.
       properties:
         type:
           type: string
           enum: [speedhuntStaticPing, speedhuntLivePing, speedhuntStopLivePing, speedhuntTerminate,
-                 jokerHunterPositions, jokerBreak, jokerFakeTimetable, jokerFakeSpeedhunt]
+                 jokerHunterPositions, jokerBreak, jokerFakePing]
         targetDeviceId:
           type: [integer, 'null']
           format: int64
@@ -7028,22 +7029,22 @@ components:
             entryId:
               type: integer
               format: int64
-              description: jokerFakeTimetable only
+              description: jokerFakePing on a timetable ping (not with pingNumber)
             pingNumber:
               type: integer
               minimum: 1
               maximum: 1000
-              description: jokerFakeSpeedhunt only
+              description: jokerFakePing on the next speedhunt (not with entryId)
             latitude:
               type: number
               minimum: -90
               maximum: 90
-              description: jokerFakeTimetable and jokerFakeSpeedhunt
+              description: jokerFakePing
             longitude:
               type: number
               minimum: -180
               maximum: 180
-              description: jokerFakeTimetable and jokerFakeSpeedhunt
+              description: jokerFakePing
     GameRequestDecision:
       type: object
       required: [decision]
@@ -7127,7 +7128,7 @@ components:
           description: The participant's real tracker
         type:
           type: string
-          enum: [hunterPositions, fakeTimetable, fakeSpeedhunt, break]
+          enum: [hunterPositions, fakePing, break]
         granted:
           type: integer
         used:
@@ -7144,7 +7145,7 @@ components:
           description: Uses beyond the granted quantity
     GameJokerReservation:
       type: object
-      required: [id, deviceId, type, requestId, status, createdAt, armed, bound, plan]
+      required: [id, deviceId, type, requestId, status, createdAt, armed, bound, plan, use]
       description: >-
         A use held by an open request, or an armed fake (no request, armed true). The owner's view also lists
         their latest speedhunt fakes that were bound to a speedhunt (status consumed, bound true). Plans are
@@ -7172,6 +7173,10 @@ components:
           type: boolean
         plan:
           $ref: '#/components/schemas/GameJokerFakePlan'
+        use:
+          type: [string, 'null']
+          enum: [timetable, speedhunt, null]
+          description: How a fake ping is used (its plan names entryId or pingNumber); null for other jokers
     GameJokerFakePlan:
       type: object
       description: A fake's plan; empty for other jokers
@@ -7181,6 +7186,10 @@ components:
           format: int64
         type:
           type: string
+        use:
+          type: [string, 'null']
+          enum: [timetable, speedhunt, null]
+          description: In the member's status fakes, how the fake ping is used
         entryId:
           type: integer
           format: int64
@@ -7303,6 +7312,9 @@ components:
           format: int64
         type:
           type: string
+          description: >-
+            The joker type; entries recorded before the two fake types were merged keep fakeTimetable or
+            fakeSpeedhunt
         kind:
           type: string
           enum: [grant, revoke, reserve, arm, release, use, overuse]
@@ -7330,7 +7342,7 @@ components:
           format: int64
         type:
           type: string
-          enum: [hunterPositions, fakeTimetable, fakeSpeedhunt, break]
+          enum: [hunterPositions, fakePing, break]
         quantity:
           type: integer
           minimum: -1000

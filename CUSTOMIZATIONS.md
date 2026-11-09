@@ -403,8 +403,8 @@ implementation plan stage 4), keyed by their real tracker:
 the allocation), `tc_game_joker_reservations` the uses held by open requests,
 and `tc_game_joker_ledger` every grant, revoke, reservation, release and use.
 New sessions start without jokers. "Get hunter positions"
-(`hunterPositions`), break (`break`), timetable fake (`fakeTimetable`) and
-speedhunt fake (`fakeSpeedhunt`) jokers can be granted and used.
+(`hunterPositions`), break (`break`) and fake-ping (`fakePing`) jokers can be
+granted and used.
 
 - Operators grant or revoke unused jokers with the fenced
   `POST /api/game-sessions/{id}/jokers/change`, and read the overview and
@@ -452,9 +452,22 @@ effects deliveries use only "Get hunter positions" jokers.
 Hunter relay snapshots carry the hunter position's own fix time, so a mirror
 shows its age; an older fix is stored without becoming latest.
 
-### Timetable fakes
+### Fake pings
 
-A player or supporter requests `jokerFakeTimetable` with `parameters`
+One fake-ping joker (`fakePing`, requested with `jokerFakePing`) is used either
+on a timetable ping (`parameters` name `entryId`) or on a ping of the next
+speedhunt (`parameters` name `pingNumber`), never both (400). Reservations
+report how they are used as `use` (`timetable` or `speedhunt`), derived from
+their plan. The two uses keep their own rules, below.
+
+`changelog-game-jokers-fake-ping.xml` merged the earlier `fakeTimetable` and
+`fakeSpeedhunt` types forward: inventories add up per participant,
+reservations and open requests take the merged type, and the ledger keeps its
+entries with the earlier type names.
+
+#### Timetable fakes
+
+A player or supporter requests `jokerFakePing` with `parameters`
 `entryId`, `latitude` and `longitude`. `GET /api/game-jokers` lists their
 `timetableEntries`: their own active entries (the timetable column is the
 assigned tracker's device name) at least 60 seconds ahead whose cell sends the
@@ -490,9 +503,9 @@ reserves one joker with the plan in the reservation's `details`.
   than a minute, the Tool may still send a cancelled fake; the server then
   ignores its use (`skipped`), so the joker is not used twice and nothing leaks.
 
-### Speedhunt fakes
+#### Speedhunt fakes
 
-`jokerFakeSpeedhunt` takes `parameters` `pingNumber` (1 to the stored
+`jokerFakePing` on the next speedhunt takes `parameters` `pingNumber` (1 to the stored
 `game_settings.pings_per_speedhunt`, or 1–1000 when it is blank), `latitude`
 and `longitude`. A participant has at most one unbound speedhunt fake (an open
 request or an armed fake; 409 otherwise). The succeeded request arms it like a

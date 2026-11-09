@@ -34,8 +34,7 @@ import java.util.Set;
 @Singleton
 public class GameAccessRule {
 
-    public static final Set<String> MIRROR_ONLY_TYPES = Set.of(
-            GameJokerService.BREAK, GameJokerService.FAKE_TIMETABLE, GameJokerService.FAKE_SPEEDHUNT);
+    public static final Set<String> MIRROR_ONLY_TYPES = Set.of(GameJokerService.BREAK, GameJokerService.FAKE_PING);
     /** Status of refused permission, device, group and membership changes (409 means a revision conflict). */
     public static final int REFUSED = 422;
 
@@ -62,13 +61,10 @@ public class GameAccessRule {
     /** Whether the session has break or fake jokers allocated or active. */
     static boolean required(Connection connection, long gameSessionId) throws SQLException {
         try (var query = connection.prepareStatement("SELECT 1 FROM tc_game_jokers WHERE gamesessionid = ?"
-                + " AND type IN (?,?,?) AND (granted > 0 OR used > 0)")) {
+                + " AND type IN (?,?) AND (granted > 0 OR used > 0)")) {
             query.setLong(1, gameSessionId);
-            int index = 2;
-            for (String type : List.of(GameJokerService.BREAK, GameJokerService.FAKE_TIMETABLE,
-                    GameJokerService.FAKE_SPEEDHUNT)) {
-                query.setString(index++, type);
-            }
+            query.setString(2, GameJokerService.BREAK);
+            query.setString(3, GameJokerService.FAKE_PING);
             query.setMaxRows(1);
             try (var rows = query.executeQuery()) {
                 return rows.next();
@@ -79,10 +75,9 @@ public class GameAccessRule {
     private static List<Long> requiringSessions(Connection connection) throws SQLException {
         List<Long> result = new ArrayList<>();
         try (var query = connection.prepareStatement("SELECT DISTINCT gamesessionid FROM tc_game_jokers"
-                + " WHERE type IN (?,?,?) AND (granted > 0 OR used > 0)")) {
+                + " WHERE type IN (?,?) AND (granted > 0 OR used > 0)")) {
             query.setString(1, GameJokerService.BREAK);
-            query.setString(2, GameJokerService.FAKE_TIMETABLE);
-            query.setString(3, GameJokerService.FAKE_SPEEDHUNT);
+            query.setString(2, GameJokerService.FAKE_PING);
             try (var rows = query.executeQuery()) {
                 while (rows.next()) {
                     result.add(rows.getLong(1));

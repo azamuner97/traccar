@@ -37,7 +37,7 @@ def create_user(name, email, password, administrator):
 def audit_http(user_credentials, device_ids):
     """Admin-only access, revisions, encryption at rest, timetable identity, history retention."""
     api.request("GET", "/game-sessions", credentials=user_credentials, expected=403)
-    assert api.request("GET", "/game-sessions/capabilities")["apiVersion"] == 2
+    assert api.request("GET", "/game-sessions/capabilities")["apiVersion"] == 3
     session = api.request("POST", "/game-sessions", {
         "name": api.PREFIX + "-http", "schemaVersion": 4, "config": {"game_settings": {"pings": 4}}})
     session_id = session["id"]
@@ -675,7 +675,7 @@ def run_timetable_fake_through_tool(tool_source, session_id, tracker, mirror, na
                                      log=lambda _message: None)
     processor.sync(gateway.list_open())
     awaiting = processor.awaiting()
-    assert [item["type"] for item in awaiting] == ["jokerFakeTimetable"], awaiting
+    assert [item["type"] for item in awaiting] == ["jokerFakePing"], awaiting
     processor.approve(awaiting[0]["id"])
     armed = list(armed_timetable_fakes(gateway.joker_overview()).values())
     assert len(armed) == 1, armed
@@ -735,14 +735,16 @@ def audit_timetable_fakes(session_id, tracker, mirror, hunter, player, tool_sour
     ids = {entry["content"]: entry["id"] for entry in published["entries"]}
     change = f"/game-sessions/{session_id}/jokers/change"
     effects = f"/game-sessions/{session_id}/effects"
-    api.request("POST", change, {"deviceId": tracker["id"], "type": "fakeTimetable", "quantity": 3, "reason": "audit"})
+    api.request("POST", change, {"deviceId": tracker["id"], "type": "fakePing", "quantity": 3, "reason": "audit"})
+    # The earlier fake types are gone: the one fake-ping joker is used on a timetable ping or the next speedhunt.
+    api.request("POST", change, {"deviceId": tracker["id"], "type": "fakeTimetable", "quantity": 1}, expected=400)
 
     def inventory():
         own = api.request("GET", "/game-jokers", credentials=player)
-        return next(item for item in own["inventories"] if item["type"] == "fakeTimetable")
+        return next(item for item in own["inventories"] if item["type"] == "fakePing")
 
     def fake(entry_id):
-        return {"type": "jokerFakeTimetable", "parameters": {"entryId": entry_id, "latitude": 47.2, "longitude": 8.5}}
+        return {"type": "jokerFakePing", "parameters": {"entryId": entry_id, "latitude": 47.2, "longitude": 8.5}}
 
     def armed():
         return [item for item in api.request("GET", "/game-jokers", credentials=player)["reservations"]
@@ -753,8 +755,13 @@ def audit_timetable_fakes(session_id, tracker, mirror, hunter, player, tool_sour
         api.request("POST", f"/game-sessions/{session_id}/requests/{request['id']}/claim", {})
         api.request("POST", effects, {"deliveryId": "audit" + uuid4().hex, "requests": [
             {"id": request["id"], "status": "succeeded", "message": "Your fake ping is armed."}]})
-        return next(item["id"] for item in armed() if item["plan"]["entryId"] == entry_id)
+        return next(item["id"] for item in armed() if item["plan"].get("entryId") == entry_id)
 
+    # A fake ping names either a timetable ping or a ping of the next speedhunt, never both.
+    api.request("POST", "/game-requests", {"type": "jokerFakePing", "parameters": {
+        "entryId": ids[""], "pingNumber": 1, "latitude": 47.2, "longitude": 8.5}}, credentials=player, expected=400)
+    api.request("POST", "/game-requests", {"type": "jokerFakeTimetable", "parameters": {
+        "entryId": ids[""], "latitude": 47.2, "longitude": 8.5}}, credentials=player, expected=400)
     # Only the owner's own upcoming pings that send the real position to hunters can carry a fake.
     offered = api.request("GET", "/game-jokers", credentials=player)["timetableEntries"]
     assert [item["entryId"] for item in offered] == [ids[""], ids["2H"]], offered
@@ -771,10 +778,10 @@ def audit_timetable_fakes(session_id, tracker, mirror, hunter, player, tool_sour
     def private():
         # The plan is private: its owner sees it, hunters see neither the plan nor the request.
         own = api.request("GET", "/game-status", credentials=player)["status"]
-        assert own["fakes"][0]["entryId"] == ids[""], own
+        assert own["fakes"][0]["entryId"] == ids[""] and own["fakes"][0]["use"] == "timetable", own
         hunter_view = json.dumps(api.request("GET", "/game-status", credentials=hunter))
         assert "fakes" not in hunter_view and "47.2" not in hunter_view, hunter_view
-        assert all(item["type"] != "jokerFakeTimetable"
+        assert all(item["type"] != "jokerFakePing"
                    for item in api.request("GET", "/game-requests", credentials=hunter))
 
     if tool_source:
@@ -815,7 +822,7 @@ def audit_timetable_fakes(session_id, tracker, mirror, hunter, player, tool_sour
                                    "source": {}, "entries": entries})
     assert armed() == [] and inventory()["used"] == 1 and inventory()["available"] == 2, inventory()
     kinds = [entry["kind"] for entry in api.request("GET", f"/game-sessions/{session_id}/jokers/ledger")
-             if entry["type"] == "fakeTimetable"]
+             if entry["type"] == "fakePing"]
     assert kinds[:7] == ["release", "arm", "reserve", "release", "arm", "reserve", "use"], kinds
     assert replaced != cancelled
 
@@ -923,14 +930,17 @@ def audit_speedhunt_fakes(session_id, tracker, mirror, hunter, player, tool_sour
                 {"expectedRevision": stored["configRevision"], "document": config})
     change = f"/game-sessions/{session_id}/jokers/change"
     effects = f"/game-sessions/{session_id}/effects"
-    api.request("POST", change, {"deviceId": tracker["id"], "type": "fakeSpeedhunt", "quantity": 2, "reason": "audit"})
+    api.request("POST", change, {"deviceId": tracker["id"], "type": "fakePing", "quantity": 2, "reason": "audit"})
 
     def inventory():
         own = api.request("GET", "/game-jokers", credentials=player)
-        return next(item for item in own["inventories"] if item["type"] == "fakeSpeedhunt")
+        return next(item for item in own["inventories"] if item["type"] == "fakePing")
+
+    # The same fake-ping inventory served the timetable fakes before: count from here.
+    start = inventory()
 
     def fake(ping_number):
-        return {"type": "jokerFakeSpeedhunt",
+        return {"type": "jokerFakePing",
                 "parameters": {"pingNumber": ping_number, "latitude": 47.3, "longitude": 8.6}}
 
     def arm(ping_number):
@@ -939,15 +949,15 @@ def audit_speedhunt_fakes(session_id, tracker, mirror, hunter, player, tool_sour
         api.request("POST", effects, {"deliveryId": "audit" + uuid4().hex, "requests": [
             {"id": request["id"], "status": "succeeded", "message": "Your fake is armed."}]})
         own = api.request("GET", "/game-jokers", credentials=player)["reservations"]
-        return next(item["id"] for item in own if item["armed"] and item["type"] == "fakeSpeedhunt")
+        return next(item["id"] for item in own if item["armed"] and item["use"] == "speedhunt")
 
     api.request("POST", "/game-requests", fake(5), credentials=player, expected=409)
     api.request("POST", "/game-requests", fake(0), credentials=player, expected=400)
     reservation = arm(2)
     api.request("POST", "/game-requests", fake(3), credentials=player, expected=409)
-    assert inventory()["reserved"] == 1 and inventory()["used"] == 0, inventory()
+    assert inventory()["reserved"] == start["reserved"] + 1 and inventory()["used"] == start["used"], inventory()
     own = api.request("GET", "/game-status", credentials=player)["status"]
-    assert [item["pingNumber"] for item in own["fakes"]] == [2], own
+    assert [(item["pingNumber"], item["use"]) for item in own["fakes"]] == [(2, "speedhunt")], own
     hunter_view = json.dumps(api.request("GET", "/game-status", credentials=hunter))
     assert "fakes" not in hunter_view and "47.3" not in hunter_view, hunter_view
 
@@ -974,7 +984,7 @@ def audit_speedhunt_fakes(session_id, tracker, mirror, hunter, player, tool_sour
         player_socket.close()
 
     # Bound: used for good, shown to its owner as bound, never cancelled or refunded.
-    assert inventory()["used"] == 1 and inventory()["reserved"] == 0, inventory()
+    assert inventory()["used"] == start["used"] + 1 and inventory()["reserved"] == start["reserved"], inventory()
     bound = [item for item in api.request("GET", "/game-jokers", credentials=player)["reservations"]
              if item["bound"]]
     assert bound and bound[0]["plan"]["pingNumber"] == 2, bound
@@ -990,7 +1000,8 @@ def audit_speedhunt_fakes(session_id, tracker, mirror, hunter, player, tool_sour
     api.request("POST", f"/game-jokers/reservations/{unbound}/cancel", {}, credentials=hunter, expected=403)
     assert api.request("POST", f"/game-jokers/reservations/{unbound}/cancel", {},
                        credentials=player)["status"] == "released"
-    assert inventory()["used"] == 1 and inventory()["available"] == 1, inventory()
+    assert inventory()["used"] == start["used"] + 1 and inventory()["available"] == start["available"] - 1, \
+        inventory()
 
 
 PRIVATE_LATITUDE = 47.123457
@@ -1040,12 +1051,12 @@ def audit_participant_privacy():
 
         publish(1)
         for name in ("anna", "ben"):
-            for joker in ("hunterPositions", "break", "fakeSpeedhunt"):
+            for joker in ("hunterPositions", "break", "fakePing"):
                 api.request("POST", f"/game-sessions/{session_id}/jokers/change",
                             {"deviceId": trackers[name], "type": joker, "quantity": 1, "reason": "audit"})
 
         def arm(credentials, latitude):
-            request = api.request("POST", "/game-requests", {"type": "jokerFakeSpeedhunt", "parameters": {
+            request = api.request("POST", "/game-requests", {"type": "jokerFakePing", "parameters": {
                 "pingNumber": 2, "latitude": latitude, "longitude": 8.5}}, credentials=credentials)
             api.request("POST", f"/game-sessions/{session_id}/requests/{request['id']}/claim", {})
             api.request("POST", effects, {"deliveryId": "audit" + uuid4().hex, "requests": [
@@ -1142,7 +1153,7 @@ def audit_timetable_privacy(session_id, devices, trackers, sockets, hunter, anna
     """Timetable pings: own fake-eligible pings for each player, every hunter-facing ping for hunters and
     spectators, without cell content, so an operator coordinate or a fake looks exactly like a real ping."""
     api.request("POST", f"/game-sessions/{session_id}/jokers/change",
-                {"deviceId": trackers["anna"], "type": "fakeTimetable", "quantity": 1, "reason": "audit"})
+                {"deviceId": trackers["anna"], "type": "fakePing", "quantity": 1, "reason": "audit"})
     base = (datetime.now(timezone.utc) + timedelta(hours=1)).replace(second=0, microsecond=0)
     names = {key: devices[key]["name"] for key in ("anna", "ben")}
     cells = {"anna": ["", "2H", "b", "x", "47.1,8.5|2H", "2P2S"], "ben": ["", "2H"]}
@@ -1154,7 +1165,7 @@ def audit_timetable_privacy(session_id, devices, trackers, sockets, hunter, anna
                      "content": cell} for key, row in cells.items() for index, cell in enumerate(row)]})
     ids = {(entry["participant"], entry["content"]): entry["id"] for entry in published["entries"]}
     faked = ids[(names["anna"], "")]
-    request = api.request("POST", "/game-requests", {"type": "jokerFakeTimetable", "parameters": {
+    request = api.request("POST", "/game-requests", {"type": "jokerFakePing", "parameters": {
         "entryId": faked, "latitude": PRIVATE_LATITUDE, "longitude": 8.5}}, credentials=anna)
     api.request("POST", f"/game-sessions/{session_id}/requests/{request['id']}/claim", {})
     api.request("POST", f"/game-sessions/{session_id}/effects", {"deliveryId": "audit" + uuid4().hex, "requests": [

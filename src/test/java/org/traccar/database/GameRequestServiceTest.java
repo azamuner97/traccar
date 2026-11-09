@@ -551,13 +551,13 @@ public class GameRequestServiceTest {
     }
 
     private GameRequestService.Submission fake(long entryId, double latitude) throws Exception {
-        return new GameRequestService.Submission("jokerFakeTimetable", null, null, mapper.readTree(
+        return new GameRequestService.Submission("jokerFakePing", null, null, mapper.readTree(
                 "{\"entryId\":" + entryId + ",\"latitude\":" + latitude + ",\"longitude\":8.5}"));
     }
 
     private GameJokerService.Inventory fakes(GameJokerService jokers, long deviceId) throws Exception {
         return jokers.overview(sessionId).inventories().stream()
-                .filter(item -> item.deviceId() == deviceId && item.type().equals(GameJokerService.FAKE_TIMETABLE))
+                .filter(item -> item.deviceId() == deviceId && item.type().equals(GameJokerService.FAKE_PING))
                 .findFirst().orElseThrow();
     }
 
@@ -610,7 +610,7 @@ public class GameRequestServiceTest {
         assertEquals(hunters, jokers.timetable(sessionId, "spectator", null));
 
         // Players see only their own pings that can carry a fake, and whether one still can.
-        jokers.change(sessionId, new GameJokerService.Change(101L, GameJokerService.FAKE_TIMETABLE, 1, null),
+        jokers.change(sessionId, new GameJokerService.Change(101L, GameJokerService.FAKE_PING, 1, null),
                 "Operator");
         var own = jokers.timetable(sessionId, "player", 101L);
         assertEquals(List.of(anna.apply(0), anna.apply(5)),
@@ -675,7 +675,7 @@ public class GameRequestServiceTest {
         java.util.function.IntFunction<Long> anna = index -> ids.get("Anna@" + base.plusSeconds(600L * index));
         long tooClose = ids.get("Anna@" + clock.now.plusSeconds(30).truncatedTo(java.time.temporal.ChronoUnit.MILLIS));
         var owner = requests.membership(20);
-        jokers.change(sessionId, new GameJokerService.Change(101L, GameJokerService.FAKE_TIMETABLE, 5, null),
+        jokers.change(sessionId, new GameJokerService.Change(101L, GameJokerService.FAKE_PING, 5, null),
                 "Operator");
 
         // Only the owner's own upcoming pings that reach hunters, without an operator coordinate.
@@ -688,7 +688,7 @@ public class GameRequestServiceTest {
                 () -> requests.submit(owner, fake(tooClose, 47.2)))), "too close");
         assertThrows(BadRequestException.class, () -> requests.submit(owner, fake(anna.apply(0), 91)));
         assertThrows(BadRequestException.class, () -> requests.submit(owner, new GameRequestService.Submission(
-                "jokerFakeTimetable", null, null, mapper.readTree("{\"entryId\":" + anna.apply(0)
+                "jokerFakePing", null, null, mapper.readTree("{\"entryId\":" + anna.apply(0)
                         + ".5,\"latitude\":47.2,\"longitude\":8.5}"))), "whole entry IDs only");
         var offered = jokers.own(sessionId, 101).timetableEntries().stream()
                 .map(GameJokerService.FakeEntry::entryId).toList();
@@ -752,7 +752,7 @@ public class GameRequestServiceTest {
         deliverFakes(null, List.of(101L));
         assertEquals(0, fakes(jokers, 101).reserved());
         assertEquals(1, fakes(jokers, 101).used());
-        var kinds = jokers.ledger(sessionId, 0).stream().filter(item -> item.type().equals("fakeTimetable"))
+        var kinds = jokers.ledger(sessionId, 0).stream().filter(item -> item.type().equals("fakePing"))
                 .map(GameJokerService.LedgerEntry::kind).toList();
         assertEquals(List.of("release", "arm", "reserve", "release", "arm", "reserve", "release", "arm", "reserve",
                 "release", "arm", "reserve", "use", "arm", "reserve", "grant"), kinds);
@@ -765,7 +765,7 @@ public class GameRequestServiceTest {
         var entries = List.of(new GameSessionService.EntryInput(at.toString(), "Anna", ""));
         var published = sessions.publishTimetable(sessionId, 0, mapper.readTree("[\"Time\",\"Anna\"]"),
                 mapper.readTree("{}"), entries);
-        jokers.change(sessionId, new GameJokerService.Change(101L, GameJokerService.FAKE_TIMETABLE, 1, null),
+        jokers.change(sessionId, new GameJokerService.Change(101L, GameJokerService.FAKE_PING, 1, null),
                 "Operator");
         long id = requests.submit(requests.membership(20), fake(published.entries().getFirst().id(), 47.2)).id();
         requests.claim(sessionId, id, epoch);
@@ -780,7 +780,7 @@ public class GameRequestServiceTest {
     }
 
     private GameRequestService.Submission speedhuntFake(Object pingNumber) throws Exception {
-        return new GameRequestService.Submission("jokerFakeSpeedhunt", null, null, mapper.readTree(
+        return new GameRequestService.Submission("jokerFakePing", null, null, mapper.readTree(
                 "{\"pingNumber\":" + pingNumber + ",\"latitude\":47.2,\"longitude\":8.5}"));
     }
 
@@ -790,13 +790,13 @@ public class GameRequestServiceTest {
         deliver(List.of(new GameRequestService.Completion(id, "succeeded", "Armed for the next speedhunt", null)),
                 null);
         return new GameJokerService(source).own(sessionId, owner.assignedDeviceId()).reservations().stream()
-                .filter(item -> item.armed() && item.type().equals(GameJokerService.FAKE_SPEEDHUNT))
+                .filter(item -> item.armed() && GameJokerService.USE_SPEEDHUNT.equals(item.use()))
                 .findFirst().orElseThrow().id();
     }
 
     private GameJokerService.Inventory speedhuntFakes(GameJokerService jokers, long deviceId) throws Exception {
         return jokers.overview(sessionId).inventories().stream()
-                .filter(item -> item.deviceId() == deviceId && item.type().equals(GameJokerService.FAKE_SPEEDHUNT))
+                .filter(item -> item.deviceId() == deviceId && item.type().equals(GameJokerService.FAKE_PING))
                 .findFirst().orElseThrow();
     }
 
@@ -811,7 +811,7 @@ public class GameRequestServiceTest {
                    "speedhunt":{"revision":1,"running":false,"live":false}}]}""");
         sessions.updateConfig(sessionId, 1, null, mapper.readTree("{\"game_settings\":{\"pings_per_speedhunt\":4}}"));
         for (long device : new long[] {101, 102}) {
-            jokers.change(sessionId, new GameJokerService.Change(device, GameJokerService.FAKE_SPEEDHUNT, 2, null),
+            jokers.change(sessionId, new GameJokerService.Change(device, GameJokerService.FAKE_PING, 2, null),
                     "Operator");
         }
         var anna = requests.membership(20);
@@ -876,5 +876,61 @@ public class GameRequestServiceTest {
         // Without a ping limit any positive ping number is accepted.
         sessions.updateConfig(sessionId, 2, null, mapper.readTree("{\"game_settings\":{\"pings_per_speedhunt\":\"\"}}"));
         assertEquals("pending", requests.submit(ben, speedhuntFake(50)).status());
+    }
+
+    @Test
+    void oneFakePingJokerServesTimetablePingsAndTheNextSpeedhunt() throws Exception {
+        var jokers = new GameJokerService(source);
+        publish("""
+                {"participants":[
+                  {"deviceId":101,"name":"Anna","role":"player","caught":false,
+                   "speedhunt":{"revision":3,"running":false,"live":false}}]}""");
+        Instant at = clock.now.truncatedTo(java.time.temporal.ChronoUnit.MINUTES).plusSeconds(3600);
+        var published = sessions.publishTimetable(sessionId, 0, mapper.readTree("[\"Time\",\"Anna\"]"),
+                mapper.readTree("{}"), List.of(new GameSessionService.EntryInput(at.toString(), "Anna", "")));
+        long entry = published.entries().getFirst().id();
+        jokers.change(sessionId, new GameJokerService.Change(101L, GameJokerService.FAKE_PING, 2, null), "Operator");
+        var anna = requests.membership(20);
+
+        // A fake ping names either a timetable ping or a ping of the next speedhunt, never both or neither.
+        assertThrows(BadRequestException.class, () -> requests.submit(anna, new GameRequestService.Submission(
+                "jokerFakePing", null, null, mapper.readTree("{\"entryId\":" + entry
+                        + ",\"pingNumber\":1,\"latitude\":47.2,\"longitude\":8.5}"))));
+        assertThrows(BadRequestException.class, () -> requests.submit(anna, new GameRequestService.Submission(
+                "jokerFakePing", null, null, mapper.readTree("{\"latitude\":47.2,\"longitude\":8.5}"))));
+        assertThrows(BadRequestException.class, () -> requests.submit(anna, new GameRequestService.Submission(
+                "jokerFakeTimetable", null, null, mapper.readTree("{\"entryId\":" + entry
+                        + ",\"latitude\":47.2,\"longitude\":8.5}"))), "the earlier request types are gone");
+        assertThrows(BadRequestException.class, () -> jokers.change(sessionId,
+                new GameJokerService.Change(101L, "fakeTimetable", 1, null), "Operator"));
+
+        // Both uses come from the one inventory.
+        long timetable = arm(anna, entry, 47.2);
+        long speedhunt = armSpeedhunt(anna, 2);
+        assertEquals(2, fakes(jokers, 101).reserved());
+        assertEquals(0, fakes(jokers, 101).available());
+        assertEquals(409, status(assertThrows(WebApplicationException.class,
+                () -> requests.submit(anna, speedhuntFake(1)))), "no fake-ping joker left");
+        var uses = new java.util.HashMap<Long, String>();
+        jokers.own(sessionId, 101).reservations().forEach(item -> uses.put(item.id(), item.use()));
+        assertEquals(Map.of(timetable, "timetable", speedhunt, "speedhunt"), uses);
+        var statusUses = new java.util.HashSet<String>();
+        requests.status(anna).status().get("fakes").forEach(item -> statusUses.add(item.get("use").asText()));
+        assertEquals(java.util.Set.of("timetable", "speedhunt"), statusUses);
+        assertEquals(java.util.Set.of(GameJokerService.FAKE_PING, GameJokerService.HUNTER_POSITIONS,
+                GameJokerService.BREAK), jokers.own(sessionId, 101).inventories().stream()
+                .map(GameJokerService.Inventory::type).collect(java.util.stream.Collectors.toSet()));
+
+        // Each use keeps its own rules: a delivery cannot bind a timetable fake or use a speedhunt fake, and a
+        // published timetable without the ping releases only the timetable fake.
+        assertThrows(BadRequestException.class, () -> deliverFakes(List.of(
+                new GameJokerService.FakeSettlement(timetable, "bound", null, "operation-1")), null));
+        assertThrows(BadRequestException.class, () -> deliverFakes(List.of(
+                new GameJokerService.FakeSettlement(speedhunt, "used", null)), null));
+        sessions.publishTimetable(sessionId, published.revision(), mapper.readTree("[\"Time\",\"Anna\"]"),
+                mapper.readTree("{}"), List.of());
+        assertEquals(List.of(speedhunt), jokers.own(sessionId, 101).reservations().stream()
+                .map(GameJokerService.Reservation::id).toList());
+        assertEquals(1, fakes(jokers, 101).available());
     }
 }

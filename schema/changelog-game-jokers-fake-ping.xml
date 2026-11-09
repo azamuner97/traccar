@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<databaseChangeLog xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+  xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-3.4.xsd">
+
+  <!--
+    One fake-ping joker instead of two (changes after stage 5): the timetable and the speedhunt fake become one type,
+    used either on a timetable ping or on a ping of the next speedhunt. Forward only: inventories are merged per
+    participant (granted and used add up), reservations and requests take the merged type (their plan still names
+    the timetable entry or the ping number), and the ledger keeps its history with the earlier type names.
+  -->
+  <changeSet author="traccar-tool" id="game-jokers-fake-ping-1">
+    <sql>
+      INSERT INTO tc_game_jokers (gamesessionid, deviceid, type, granted, used, updatedat)
+      SELECT gamesessionid, deviceid, 'fakePing', SUM(granted), SUM(used), MAX(updatedat)
+      FROM tc_game_jokers WHERE type IN ('fakeTimetable', 'fakeSpeedhunt')
+      GROUP BY gamesessionid, deviceid
+    </sql>
+    <sql>DELETE FROM tc_game_jokers WHERE type IN ('fakeTimetable', 'fakeSpeedhunt')</sql>
+    <sql>UPDATE tc_game_joker_reservations SET type = 'fakePing' WHERE type IN ('fakeTimetable', 'fakeSpeedhunt')</sql>
+    <sql>
+      UPDATE tc_game_requests SET type = 'jokerFakePing' WHERE type IN ('jokerFakeTimetable', 'jokerFakeSpeedhunt')
+    </sql>
+  </changeSet>
+</databaseChangeLog>

@@ -43,31 +43,37 @@ import java.util.TimeZone;
  * quantities; a confirmed operator relay may use a joker beyond the allocation. Every change is in the ledger.
  * Break jokers can only be granted once the session's game settings configure a positive break duration.
  * <p>
- * Fake jokers are armed instead of used when their request succeeds: the reservation stays, without its request
- * and with the owner's plan in {@code details}, until the Tool reports the fake delivered (used) or skipped
- * (released). Owners may cancel an armed timetable fake until shortly before its ping. Plans are private to their
- * owner and the operators.
+ * Fake-ping jokers are armed instead of used when their request succeeds: the reservation stays, without its
+ * request and with the owner's plan in {@code details}. A fake ping is used either on a timetable ping (the plan
+ * names an {@code entryId}) or on a ping of the next speedhunt (the plan names a {@code pingNumber}). A timetable
+ * fake waits until the Tool reports it delivered (used) or skipped (released); owners may cancel it until shortly
+ * before its ping. Plans are private to their owner and the operators.
  * <p>
  * Armed speedhunt fakes wait for the next speedhunt run: the delivery of a run's first ping binds every armed
  * speedhunt fake it lists, whoever the run targets, and uses their jokers in the same transaction. Bound fakes are
  * never refunded; only the target's own fake applies, at its ping number.
+ * <p>
+ * Sessions saved before the two fake types were merged into {@link #FAKE_PING} were migrated forward
+ * ({@code changelog-game-jokers-fake-ping.xml}); their ledger keeps the earlier type names.
  */
 @Singleton
 public class GameJokerService {
 
     public static final String HUNTER_POSITIONS = "hunterPositions";
-    public static final String FAKE_TIMETABLE = "fakeTimetable";
-    public static final String FAKE_SPEEDHUNT = "fakeSpeedhunt";
+    /** One fake ping, used on a timetable ping or on a ping of the next speedhunt. */
+    public static final String FAKE_PING = "fakePing";
     public static final String BREAK = "break";
-    public static final List<String> TYPES = List.of(HUNTER_POSITIONS, FAKE_TIMETABLE, FAKE_SPEEDHUNT, BREAK);
+    public static final List<String> TYPES = List.of(HUNTER_POSITIONS, FAKE_PING, BREAK);
     /** Types that can be granted and used in this version. */
-    public static final Set<String> ENABLED = Set.of(HUNTER_POSITIONS, BREAK, FAKE_TIMETABLE, FAKE_SPEEDHUNT);
+    public static final Set<String> ENABLED = Set.of(HUNTER_POSITIONS, BREAK, FAKE_PING);
     /** Request type of each joker type. */
     public static final Map<String, String> REQUEST_TYPES = Map.of(
-            "jokerHunterPositions", HUNTER_POSITIONS, "jokerBreak", BREAK, "jokerFakeTimetable", FAKE_TIMETABLE,
-            "jokerFakeSpeedhunt", FAKE_SPEEDHUNT);
+            "jokerHunterPositions", HUNTER_POSITIONS, "jokerBreak", BREAK, "jokerFakePing", FAKE_PING);
     /** Fake types: a succeeded request arms the fake; the joker is used when the fake takes effect. */
-    static final Set<String> FAKE_TYPES = Set.of(FAKE_TIMETABLE, FAKE_SPEEDHUNT);
+    static final Set<String> FAKE_TYPES = Set.of(FAKE_PING);
+    /** How a fake ping is used: on a timetable ping or on a ping of the next speedhunt. */
+    public static final String USE_TIMETABLE = "timetable";
+    public static final String USE_SPEEDHUNT = "speedhunt";
     /** Timetable fakes are armed and cancelled at least this long before their ping. */
     public static final int FAKE_TIMETABLE_CUTOFF_SECONDS = 60;
     /**
@@ -111,7 +117,12 @@ public class GameJokerService {
      * number); {@code bound} speedhunt fakes are used and belong to the run they were bound to.
      */
     public record Reservation(long id, long deviceId, String type, Long requestId, String status,
-                              String createdAt, boolean armed, boolean bound, JsonNode plan) { }
+                              String createdAt, boolean armed, boolean bound, JsonNode plan, String use) {
+        public Reservation(long id, long deviceId, String type, Long requestId, String status, String createdAt,
+                           boolean armed, boolean bound, JsonNode plan) {
+            this(id, deviceId, type, requestId, status, createdAt, armed, bound, plan, fakeUse(type, plan));
+        }
+    }
     /** The operators' overview; {@code boundFakes} are the latest speedhunt fakes bound to a run (used). */
     public record Overview(List<Inventory> inventories, List<Reservation> reservations,
                            List<Reservation> boundFakes) { }
@@ -228,6 +239,27 @@ public class GameJokerService {
         }
     }
 
+    /** A fake ping planned on a timetable ping. */
+    static boolean timetableUse(JsonNode plan) {
+        return plan != null && plan.hasNonNull("entryId");
+    }
+
+    /** A fake ping planned on a ping of the next speedhunt. */
+    static boolean speedhuntUse(JsonNode plan) {
+        return plan != null && plan.hasNonNull("pingNumber") && !plan.hasNonNull("entryId");
+    }
+
+    /** How a fake ping is used ({@link #USE_TIMETABLE} or {@link #USE_SPEEDHUNT}); {@code null} for other types. */
+    static String fakeUse(String type, JsonNode plan) {
+        if (!FAKE_TYPES.contains(type)) {
+            return null;
+        }
+        if (timetableUse(plan)) {
+            return USE_TIMETABLE;
+        }
+        return speedhuntUse(plan) ? USE_SPEEDHUNT : null;
+    }
+
     static boolean fakeEligible(String content) {
         return content != null && FAKE_TIMETABLE_CONTENT.contains(content.trim());
     }
@@ -266,7 +298,7 @@ public class GameJokerService {
             Set<Long> taken = new HashSet<>();
             if (owner) {
                 for (Reservation item : reservations(connection, gameSessionId, ownDeviceId)) {
-                    if (FAKE_TIMETABLE.equals(item.type()) && item.plan().hasNonNull("entryId")) {
+                    if (FAKE_PING.equals(item.type()) && timetableUse(item.plan())) {
                         taken.add(item.plan().get("entryId").asLong());
                     }
                 }
@@ -553,7 +585,7 @@ public class GameJokerService {
             List<Reservation> reservations = reservations(connection, gameSessionId, deviceId);
             Set<Long> taken = new java.util.HashSet<>();
             for (Reservation item : reservations) {
-                if (FAKE_TIMETABLE.equals(item.type()) && item.plan().hasNonNull("entryId")) {
+                if (FAKE_PING.equals(item.type()) && timetableUse(item.plan())) {
                     taken.add(item.plan().get("entryId").asLong());
                 }
             }
@@ -576,7 +608,7 @@ public class GameJokerService {
                 + " AND type = ? AND status = ?" + (deviceId == null ? "" : " AND deviceid = ?")
                 + " ORDER BY id DESC")) {
             query.setLong(1, gameSessionId);
-            query.setString(2, FAKE_SPEEDHUNT);
+            query.setString(2, FAKE_PING);
             query.setString(3, CONSUMED);
             if (deviceId != null) {
                 query.setLong(4, deviceId);
@@ -585,12 +617,12 @@ public class GameJokerService {
             try (var rows = query.executeQuery()) {
                 while (rows.next()) {
                     ObjectNode plan = (ObjectNode) plan(rows.getString("details"));
-                    if (plan.hasNonNull("boundAt")) {
+                    if (plan.hasNonNull("boundAt") && speedhuntUse(plan)) {
                         if (deviceId != null) {
                             // The run reference stays with the operators: owners only learn that and when it bound.
                             plan.remove("boundTo");
                         }
-                        result.add(new Reservation(rows.getLong("id"), rows.getLong("deviceid"), FAKE_SPEEDHUNT, null,
+                        result.add(new Reservation(rows.getLong("id"), rows.getLong("deviceid"), FAKE_PING, null,
                                 CONSUMED, iso(rows, "createdat"), false, true, plan));
                     }
                 }
@@ -891,7 +923,7 @@ public class GameJokerService {
                 continue;
             }
             if (BOUND.equals(item.outcome())) {
-                if (!FAKE_SPEEDHUNT.equals(fake.type())) {
+                if (!speedhuntUse(fake.plan())) {
                     throw new BadRequestException("Only speedhunt fakes are bound to a speedhunt");
                 }
                 // Bound to this run and used for its owner, whoever the run targets; never refunded.
@@ -908,7 +940,7 @@ public class GameJokerService {
                 result.add(new FakeOutcome(fake.id(), CONSUMED));
                 continue;
             }
-            if (!FAKE_TIMETABLE.equals(fake.type())) {
+            if (!timetableUse(fake.plan())) {
                 throw new BadRequestException("Only timetable fakes are used or released by deliveries");
             }
             boolean used = USED.equals(item.outcome());
@@ -938,7 +970,7 @@ public class GameJokerService {
             if (fake == null) {
                 throw new WebApplicationException("This fake can no longer be cancelled", 409);
             }
-            if (FAKE_TIMETABLE.equals(fake.type())) {
+            if (timetableUse(fake.plan())) {
                 Instant scheduled = Instant.parse(fake.plan().path("scheduledAt").asText());
                 if (!scheduled.isAfter(now().plusSeconds(FAKE_TIMETABLE_CUTOFF_SECONDS))) {
                     throw new WebApplicationException("This ping is too close to cancel its fake", 409);
@@ -997,17 +1029,21 @@ public class GameJokerService {
 
     /** Whether the participant already has an unbound speedhunt fake: requested (open) or armed. */
     static boolean speedhuntFakeHeld(Connection connection, long gameSessionId, long deviceId) throws SQLException {
-        try (var query = connection.prepareStatement("SELECT 1 FROM tc_game_joker_reservations"
+        try (var query = connection.prepareStatement("SELECT details FROM tc_game_joker_reservations"
                 + " WHERE gamesessionid = ? AND deviceid = ? AND type = ? AND status = ?")) {
             query.setLong(1, gameSessionId);
             query.setLong(2, deviceId);
-            query.setString(3, FAKE_SPEEDHUNT);
+            query.setString(3, FAKE_PING);
             query.setString(4, RESERVED);
-            query.setMaxRows(1);
             try (var rows = query.executeQuery()) {
-                return rows.next();
+                while (rows.next()) {
+                    if (speedhuntUse(plan(rows.getString(1)))) {
+                        return true;
+                    }
+                }
             }
         }
+        return false;
     }
 
     /** Whether a timetable entry already has a fake: requested (open) or armed. */
@@ -1016,10 +1052,11 @@ public class GameJokerService {
                 + " WHERE gamesessionid = ? AND status = ? AND type = ?")) {
             query.setLong(1, gameSessionId);
             query.setString(2, RESERVED);
-            query.setString(3, FAKE_TIMETABLE);
+            query.setString(3, FAKE_PING);
             try (var rows = query.executeQuery()) {
                 while (rows.next()) {
-                    if (plan(rows.getString(1)).path("entryId").asLong(0) == entryId) {
+                    JsonNode plan = plan(rows.getString(1));
+                    if (timetableUse(plan) && plan.path("entryId").asLong(0) == entryId) {
                         return true;
                     }
                 }
@@ -1037,6 +1074,7 @@ public class GameJokerService {
                 ObjectNode fake = result.addObject();
                 fake.put("reservationId", item.id());
                 fake.put("type", item.type());
+                fake.put("use", item.use());
                 fake.setAll((ObjectNode) item.plan().deepCopy());
             }
         }
@@ -1088,7 +1126,7 @@ public class GameJokerService {
                 + " AND status = ? AND requestid IS NULL AND type = ?")) {
             query.setLong(1, gameSessionId);
             query.setString(2, RESERVED);
-            query.setString(3, FAKE_TIMETABLE);
+            query.setString(3, FAKE_PING);
             try (var rows = query.executeQuery()) {
                 while (rows.next()) {
                     ids.add(rows.getLong(1));
@@ -1097,7 +1135,7 @@ public class GameJokerService {
         }
         for (long id : ids) {
             Armed fake = armed(connection, gameSessionId, id);
-            if (fake == null) {
+            if (fake == null || !timetableUse(fake.plan())) {
                 continue;
             }
             long entry = fake.plan().path("entryId").asLong(0);
