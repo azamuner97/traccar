@@ -237,8 +237,10 @@ public class GameSessionResource extends BaseResource {
         if (request == null) {
             throw new BadRequestException("Timetable is required");
         }
-        return changed(service.publishTimetable(id, expected(request.expectedRevision()), request.columns(),
+        var published = changed(service.publishTimetable(id, expected(request.expectedRevision()), request.columns(),
                 request.source(), request.entries()));
+        connectionManager.updateGameMembers(true, id, GameTimetableResource.INVALIDATION);
+        return published;
     }
 
     @PUT
@@ -246,6 +248,8 @@ public class GameSessionResource extends BaseResource {
     public Response updateTimetableProgress(@PathParam("id") long id, ProgressUpdate request) throws Exception {
         checkOperator();
         service.updateTimetableProgress(id, request == null ? null : request.entries());
+        // Every member is told alike, so the moment tells nobody what a ping carried.
+        connectionManager.updateGameMembers(true, id, GameTimetableResource.INVALIDATION);
         return Response.noContent().build();
     }
 

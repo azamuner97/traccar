@@ -13,6 +13,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import jakarta.inject.Inject;
 import jakarta.inject.Singleton;
 import jakarta.ws.rs.BadRequestException;
+import jakarta.ws.rs.ForbiddenException;
 import jakarta.ws.rs.NotFoundException;
 import jakarta.ws.rs.WebApplicationException;
 
@@ -29,6 +30,7 @@ import java.util.ArrayList;
 import java.util.Calendar;
 import java.util.Collection;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -84,6 +86,13 @@ public class GameJokerService {
     /** Bound speedhunt fakes listed for an owner, and for the operators across the session. */
     private static final int BOUND_FAKES_OWN = 5;
     private static final int BOUND_FAKES_OVERVIEW = 50;
+    /**
+     * Timetable pings a member sees: the most recent past ones from this long ago (at most this many), and the
+     * upcoming ones (at most this many), so a busy past hour never crowds out what comes next.
+     */
+    static final int TIMETABLE_HISTORY_MINUTES = 60;
+    static final int TIMETABLE_PAST_PINGS = 20;
+    static final int TIMETABLE_PINGS = 200;
     /** Types an operator action may use directly (relays); other types are used only through requests. */
     private static final Set<String> OPERATOR_USES = Set.of(HUNTER_POSITIONS);
     private static final ObjectMapper CONFIG_READER = new ObjectMapper();
@@ -108,8 +117,19 @@ public class GameJokerService {
                            List<Reservation> boundFakes) { }
     /** One of the owner's upcoming timetable pings a fake can replace; {@code taken} when one is planned. */
     public record FakeEntry(long entryId, String scheduledAt, boolean taken) { }
+    /**
+     * {@code pingsPerSpeedhunt} is the stored ping limit a speedhunt fake must stay within ({@code null}: no limit,
+     * any ping up to {@link #MAX_FAKE_PING_NUMBER}).
+     */
     public record Own(List<Inventory> inventories, List<Reservation> reservations,
-                      List<FakeEntry> timetableEntries) { }
+                      List<FakeEntry> timetableEntries, Integer pingsPerSpeedhunt) { }
+    /**
+     * One timetable ping a member may see: its time, the participant's tracker and its state ({@code scheduled},
+     * {@code sent}, {@code skipped} or {@code failed}). Owners also learn whether a fake can still be planned on it.
+     * The cell content (target codes, operator coordinates) is never included.
+     */
+    public record TimetablePing(long entryId, String scheduledAt, long deviceId, String state, String stateAt,
+                                Boolean fakeAllowed) { }
     /**
      * The Tool's report on an armed fake: a timetable fake {@code used} (delivered) or {@code released}, a speedhunt
      * fake {@code bound} to the run ({@code run}) whose first ping this delivery sends.
@@ -210,6 +230,105 @@ public class GameJokerService {
 
     static boolean fakeEligible(String content) {
         return content != null && FAKE_TIMETABLE_CONTENT.contains(content.trim());
+    }
+
+    /**
+     * Whether hunters receive a position from a timetable cell: the real one (blank or a target code with hunters)
+     * or, for an operator coordinate, either its fake or the real position (the complement of its code).
+     */
+    static boolean hunterFacing(String content) {
+        String cell = content == null ? "" : content.trim();
+        return FAKE_TIMETABLE_CONTENT.contains(cell) || cell.contains(",");
+    }
+
+    /**
+     * The timetable pings a member may see. Players and supporters see their own pings that can carry a fake;
+     * hunters and spectators see every ping that reaches hunters, named only by the participant's tracker, so an
+     * operator coordinate or a fake looks exactly like a real ping.
+     */
+    public List<TimetablePing> timetable(long gameSessionId, String role, Long ownDeviceId) throws Exception {
+        boolean owner = ("player".equals(role) || "supporter".equals(role)) && ownDeviceId != null;
+        if (!owner && !"hunter".equals(role) && !"spectator".equals(role)) {
+            throw new ForbiddenException("The timetable is shown to players, supporters, hunters and spectators");
+        }
+        return transaction(connection -> {
+            Map<String, Long> trackers = new HashMap<>();
+            try (var query = connection.prepareStatement("SELECT d.id,d.name FROM tc_game_session_members m"
+                    + " JOIN tc_devices d ON d.id = m.assigneddeviceid WHERE m.gamesessionid = ?"
+                    + " AND m.role IN ('player','supporter')")) {
+                query.setLong(1, gameSessionId);
+                try (var rows = query.executeQuery()) {
+                    while (rows.next()) {
+                        trackers.put(rows.getString(2), rows.getLong(1));
+                    }
+                }
+            }
+            Set<Long> taken = new HashSet<>();
+            if (owner) {
+                for (Reservation item : reservations(connection, gameSessionId, ownDeviceId)) {
+                    if (FAKE_TIMETABLE.equals(item.type()) && item.plan().hasNonNull("entryId")) {
+                        taken.add(item.plan().get("entryId").asLong());
+                    }
+                }
+            }
+            // Owners' pings are filtered by their tracker's name, the timetable column, in the query itself.
+            String ownName = owner ? deviceName(connection, ownDeviceId) : null;
+            if (owner && ownName == null) {
+                return List.<TimetablePing>of();
+            }
+            Instant now = now();
+            Long own = owner ? ownDeviceId : null;
+            List<TimetablePing> result = timetablePings(connection, gameSessionId, ownName, now, true, own, trackers,
+                    taken);
+            java.util.Collections.reverse(result);
+            result.addAll(timetablePings(connection, gameSessionId, ownName, now, false, own, trackers, taken));
+            return result;
+        });
+    }
+
+    /**
+     * Past pings of the last {@link #TIMETABLE_HISTORY_MINUTES} (newest first, at most {@link #TIMETABLE_PAST_PINGS})
+     * or upcoming ones (oldest first, at most {@link #TIMETABLE_PINGS}) that a member may see.
+     */
+    private static List<TimetablePing> timetablePings(Connection connection, long gameSessionId, String ownName,
+            Instant now, boolean past, Long ownDeviceId, Map<String, Long> trackers, Set<Long> taken)
+            throws SQLException {
+        boolean owner = ownDeviceId != null;
+        int limit = past ? TIMETABLE_PAST_PINGS : TIMETABLE_PINGS;
+        Instant cutoff = now.plusSeconds(FAKE_TIMETABLE_CUTOFF_SECONDS);
+        List<TimetablePing> result = new ArrayList<>();
+        try (var query = connection.prepareStatement("SELECT id,scheduledat,participant,content,status,statusat"
+                + " FROM tc_game_timetable_entries WHERE gamesessionid = ? AND active = ?"
+                + (owner ? " AND participant = ?" : "")
+                + (past ? " AND scheduledat >= ? AND scheduledat < ? ORDER BY scheduledat DESC,id DESC"
+                        : " AND scheduledat >= ? ORDER BY scheduledat,id"))) {
+            int index = 1;
+            query.setLong(index++, gameSessionId);
+            query.setBoolean(index++, true);
+            if (owner) {
+                query.setString(index++, ownName);
+            }
+            if (past) {
+                query.setTimestamp(index++, Timestamp.from(now.minusSeconds(TIMETABLE_HISTORY_MINUTES * 60L)), utc());
+            }
+            query.setTimestamp(index, Timestamp.from(now), utc());
+            try (var rows = query.executeQuery()) {
+                while (rows.next() && result.size() < limit) {
+                    Long tracker = trackers.get(rows.getString("participant"));
+                    String content = rows.getString("content");
+                    if (tracker == null || owner && (!tracker.equals(ownDeviceId) || !fakeEligible(content))
+                            || !owner && !hunterFacing(content)) {
+                        continue;
+                    }
+                    long id = rows.getLong("id");
+                    Instant scheduled = rows.getTimestamp("scheduledat", utc()).toInstant();
+                    Boolean fakeAllowed = owner ? scheduled.isAfter(cutoff) && !taken.contains(id) : null;
+                    result.add(new TimetablePing(id, scheduled.toString(), tracker, rows.getString("status"),
+                            iso(rows, "statusat"), fakeAllowed));
+                }
+            }
+        }
+        return result;
     }
 
     private static JsonNode plan(String details) {
@@ -441,7 +560,8 @@ public class GameJokerService {
             List<Reservation> visible = new ArrayList<>(reservations);
             visible.addAll(boundSpeedhuntFakes(connection, gameSessionId, deviceId));
             return new Own(inventories(List.of(deviceId), tallies(connection, gameSessionId, deviceId)),
-                    visible, fakeEntries(connection, gameSessionId, deviceId, taken));
+                    visible, fakeEntries(connection, gameSessionId, deviceId, taken),
+                    pingsPerSpeedhunt(connection, gameSessionId));
         });
     }
 

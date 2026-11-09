@@ -1002,9 +1002,9 @@ def audit_participant_privacy():
     Anna is the speedhunt target, Ben is not; both must see exactly the same thing apart from their own jokers.
     """
     password = secrets.token_hex(24)
-    emails = {name: f"{api.PREFIX}-pv-{name}@example.invalid" for name in ("hunter", "anna", "ben")}
+    emails = {name: f"{api.PREFIX}-pv-{name}@example.invalid" for name in ("hunter", "anna", "ben", "spectator")}
     users = {name: create_user(f"{api.PREFIX}-pv-{name}", email, password, False) for name, email in emails.items()}
-    hunter, anna, ben = ((emails[name], password) for name in ("hunter", "anna", "ben"))
+    hunter, anna, ben, spectator = ((emails[name], password) for name in ("hunter", "anna", "ben", "spectator"))
     session = api.request("POST", "/game-sessions", {"name": api.PREFIX + "-privacy", "schemaVersion": 4,
                                                      "config": {"game_settings": {"break_duration_minutes": 10,
                                                                                   "pings_per_speedhunt": 4}}})
@@ -1026,7 +1026,9 @@ def audit_participant_privacy():
                         {"userId": users["anna"], "role": "player", "number": 1,
                          "assignedDeviceId": trackers["anna"], "login": "pv-anna"},
                         {"userId": users["ben"], "role": "player", "number": 2,
-                         "assignedDeviceId": trackers["ben"], "login": "pv-ben"}]})
+                         "assignedDeviceId": trackers["ben"], "login": "pv-ben"},
+                        {"userId": users["spectator"], "role": "spectator", "number": None,
+                         "assignedDeviceId": None, "login": "pv-spectator"}]})
         api.request("PUT", "/game-controller/session", {"gameSessionId": session_id})
 
         def publish(revision, target=None):
@@ -1126,6 +1128,7 @@ def audit_participant_privacy():
             assert len(items) == 1 and "boundTo" not in items[0]["plan"], items
             bound[name] = (sorted(items[0]), sorted(items[0]["plan"]), items[0]["status"])
         assert bound["anna"] == bound["ben"], bound
+        audit_timetable_privacy(session_id, devices, trackers, sockets, hunter, anna, ben, spectator)
     finally:
         for socket in sockets:
             socket.close()
@@ -1133,6 +1136,59 @@ def audit_participant_privacy():
             api.request("DELETE", f"/devices/{device['id']}", expected=204)
         api.sql(f"DELETE FROM tc_users WHERE id IN ({','.join(str(value) for value in users.values())}) "
                 "AND email LIKE " + api.literal(api.PREFIX + "-%") + ";")
+
+
+def audit_timetable_privacy(session_id, devices, trackers, sockets, hunter, anna, ben, spectator):
+    """Timetable pings: own fake-eligible pings for each player, every hunter-facing ping for hunters and
+    spectators, without cell content, so an operator coordinate or a fake looks exactly like a real ping."""
+    api.request("POST", f"/game-sessions/{session_id}/jokers/change",
+                {"deviceId": trackers["anna"], "type": "fakeTimetable", "quantity": 1, "reason": "audit"})
+    base = (datetime.now(timezone.utc) + timedelta(hours=1)).replace(second=0, microsecond=0)
+    names = {key: devices[key]["name"] for key in ("anna", "ben")}
+    cells = {"anna": ["", "2H", "b", "x", "47.1,8.5|2H", "2P2S"], "ben": ["", "2H"]}
+    timetable = f"/game-sessions/{session_id}/timetable"
+    published = api.request("PUT", timetable, {
+        "expectedRevision": api.request("GET", timetable)["revision"],
+        "columns": ["Time", names["anna"], names["ben"]], "source": {},
+        "entries": [{"scheduledAt": _iso(base + timedelta(minutes=10 * index)), "participant": names[key],
+                     "content": cell} for key, row in cells.items() for index, cell in enumerate(row)]})
+    ids = {(entry["participant"], entry["content"]): entry["id"] for entry in published["entries"]}
+    faked = ids[(names["anna"], "")]
+    request = api.request("POST", "/game-requests", {"type": "jokerFakeTimetable", "parameters": {
+        "entryId": faked, "latitude": PRIVATE_LATITUDE, "longitude": 8.5}}, credentials=anna)
+    api.request("POST", f"/game-sessions/{session_id}/requests/{request['id']}/claim", {})
+    api.request("POST", f"/game-sessions/{session_id}/effects", {"deliveryId": "audit" + uuid4().hex, "requests": [
+        {"id": request["id"], "status": "succeeded", "message": "Your fake ping is armed."}]})
+
+    hunter_pings = api.request("GET", "/game-timetable", credentials=hunter)
+    hunter_facing = {ids[(names["anna"], cell)] for cell in ("", "2H", "47.1,8.5|2H")} \
+        | {ids[(names["ben"], cell)] for cell in ("", "2H")}
+    assert {item["entryId"] for item in hunter_pings} == hunter_facing, hunter_pings
+    text = json.dumps(hunter_pings)
+    assert "47.1" not in text and str(PRIVATE_LATITUDE) not in text and "content" not in text, text
+    # The faked ping, the operator's coordinate and a real ping differ only in entry, time and tracker.
+    assert all(sorted(item) == sorted(hunter_pings[0]) and item["fakeAllowed"] is None
+               and item["state"] == "scheduled" and item["stateAt"] is None for item in hunter_pings), hunter_pings
+    assert api.request("GET", "/game-timetable", credentials=spectator) == hunter_pings
+    for credentials, key, expected in ((anna, "anna", [(ids[(names["anna"], "")], False),
+                                                       (ids[(names["anna"], "2H")], True)]),
+                                       (ben, "ben", [(ids[(names["ben"], "")], True),
+                                                     (ids[(names["ben"], "2H")], True)])):
+        own = api.request("GET", "/game-timetable", credentials=credentials)
+        assert [(item["entryId"], item["fakeAllowed"]) for item in own] == expected, own
+        assert {item["deviceId"] for item in own} == {trackers[key]}, own
+
+    # Progress is announced to every member alike; the faked ping is recorded like any other.
+    sockets.append(member_socket(hunter))
+    for socket in sockets:
+        invalidations(socket, 0.5)
+    api.request("PUT", f"{timetable}/progress", {"entries": [
+        {"id": faked, "status": "sent"}, {"id": ids[(names["ben"], "")], "status": "sent"}]}, expected=204)
+    announced = [invalidations(socket) for socket in sockets]
+    assert all(item == announced[0] for item in announced) and "game-timetable" in announced[0], announced
+    sent = {item["entryId"]: item for item in api.request("GET", "/game-timetable", credentials=hunter)}
+    anna_sent, ben_sent = sent[faked], sent[ids[(names["ben"], "")]]
+    assert anna_sent["state"] == ben_sent["state"] == "sent" and anna_sent["stateAt"] == ben_sent["stateAt"]
 
 
 def audit_requests(tool_source=None):
@@ -1267,7 +1323,9 @@ def main(tool_source=None):
               "released on cancellation or a changed ping, speedhunt fakes bound at a run's first ping and "
               "given to the hunters at their ping, participant privacy (own jokers, plans, requests and break "
               "only, no acting for another, and the same status, refusals, jokers and announcements for a "
-              "speedhunt's target as for everyone else)"
+              "speedhunt's target as for everyone else), and timetable pings without cell content: own fake-"
+              "eligible pings for players, every hunter-facing ping for hunters and spectators, fakes and "
+              "operator coordinates looking like real pings"
               + (", plus the Tool's repository round trip." if tool_source else "."))
     finally:
         api.delete_game_sessions()

@@ -557,16 +557,47 @@ administrators can do either.
 
 ## Game page
 
-Generated player and supporter accounts open the **Game** page (`/game`) from
-the bottom menu; it is laid out for phones and also works in the desktop
-sidebar menu. It reads only the member endpoints, so it shows nothing the
-server did not already filter for the signed-in member:
+Every generated game account opens the **Game** page (`/game`) from the bottom
+menu; it is laid out for phones and also works in the desktop sidebar menu. It
+reads only the member endpoints, so it shows nothing the server did not
+already filter for the signed-in member:
 
 - `GET /api/game-status`: whether a Tool runs the game (`controllerActive`),
-  the server's clock (`serverTime`), the anonymous speedhunt status, the own
-  break and the own armed fakes;
-- `GET /api/game-requests`: the member's own requests;
-- `GET /api/game-jokers`: the own jokers, reservations and plans.
+  the server's clock (`serverTime`), and the role-filtered status (players
+  and supporters: the anonymous speedhunt status, the own break and the own
+  armed fakes; hunters and spectators: every participant's named speedhunt
+  state and break);
+- `GET /api/game-requests`: the member's own requests (hunters and spectators:
+  every speedhunt request);
+- `GET /api/game-jokers` (players and supporters): the own jokers,
+  reservations and plans, the timetable pings a fake can replace and the
+  session's `pingsPerSpeedhunt` (null when unlimited);
+- `GET /api/game-timetable`: the timetable pings the member may see (the 20
+  most recent of the last hour and at most 200 upcoming ones), each with `entryId`, `scheduledAt`, the
+  participant's real tracker (`deviceId`) and its `state` (`scheduled`,
+  `sent`, `skipped` or `failed`, with `stateAt`). Players and supporters see
+  their own pings that can carry a fake, with `fakeAllowed`; hunters and
+  spectators see every ping that reaches hunters (blank cells, target codes
+  with hunters and operator coordinates). The cell content is never included,
+  so an operator coordinate or a fake looks exactly like a real ping. Members
+  receive `{"invalidate": ["game-timetable"]}` when a timetable is published
+  or its progress changes.
+
+The Tool records each entry's progress from what became of that
+participant's ping: `sent`, `skipped` (an `x` cell, an overdue row, the
+participant out, or a break that withheld the hunters) or `failed` (no
+position, an upload error or no recipient).
+
+Hunters see every player and supporter with the speedhunt state (open,
+running with its ping count, live until when), who is protected by a break and
+until when, the hunter-facing pings with their states, and the session's
+speedhunt requests. They request static and live pings, stop live pings and
+end speedhunts (after a confirmation) with the participant's current
+speedhunt revision; the buttons follow the Tool's own checks. Spectators see
+the same without controls. Players and supporters plan fakes on a map: a tap
+chooses the coordinate (converted to WGS84 whatever the map style uses), then
+one of their own upcoming pings that can carry a fake or a ping number of the
+next speedhunt (1 to `pingsPerSpeedhunt`).
 
 The page shows whether the game runs, is paused (no Tool controls it) or the
 page is disconnected; the anonymous speedhunt status; the own break with its
@@ -578,13 +609,16 @@ with their state, message and expiry countdown. Players and supporters use
 "Get hunter positions" and break jokers there (after a confirmation), cancel
 their open requests and cancel unbound fakes. Buttons are disabled only for
 reasons every participant sees alike (no Tool, no joker left, an open request
-of the same joker, the own break, any speedhunt running); the server checks
-everything again.
+of the same joker, the own break, any speedhunt running, no ping that can
+carry a fake, an unbound speedhunt fake); the server checks everything again.
+Pings past their time that are still scheduled show as due while a Tool runs
+and as not sent while none runs or the page is offline; hunters also see
+pings inside a participant's break as protected.
 
 The `game` store slice belongs to one account, role and assignment: data
 loaded for another is discarded. `GameController` (mounted by
 `SocketController`) reads the endpoints on sign-in, on the `game-status`,
-`game-requests` and `game-jokers` invalidations, after every WebSocket
+`game-requests`, `game-jokers` and `game-timetable` invalidations, after every WebSocket
 reconnect, when the app returns to the foreground, and every 30 seconds
 (every 5 seconds while disconnected). Game texts exist in English and German;
 other languages fall back to English.

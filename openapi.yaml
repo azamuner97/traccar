@@ -4891,6 +4891,28 @@ paths:
         '403':
           description: Only players and supporters hold jokers
           content: {}
+  /game-timetable:
+    get:
+      operationId: getGameTimetable
+      summary: >-
+        The timetable pings the signed-in member may see, with their state: the 20 most recent ones of the
+        last hour and at most 200 upcoming ones. Players and supporters see their own pings that can carry a fake; hunters and spectators see every
+        ping that reaches hunters. The cell content is never included, so operator coordinates and fakes look
+        like real pings.
+      tags:
+        - Game Requests
+      responses:
+        '200':
+          description: Oldest first
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/GameTimetablePing'
+        '403':
+          description: The account does not take part in a game
+          content: {}
   /game-jokers/reservations/{id}/cancel:
     parameters:
       - name: id
@@ -7190,8 +7212,13 @@ components:
           format: date-time
     GameJokerOwn:
       type: object
-      required: [inventories, reservations, timetableEntries]
+      required: [inventories, reservations, timetableEntries, pingsPerSpeedhunt]
       properties:
+        pingsPerSpeedhunt:
+          type: [integer, 'null']
+          description: >-
+            The session's pings per speedhunt, the highest ping a speedhunt fake may name; null when speedhunts
+            have no ping limit (any ping up to 1000)
         inventories:
           type: array
           items:
@@ -7217,6 +7244,34 @@ components:
                 format: date-time
               taken:
                 type: boolean
+    GameTimetablePing:
+      type: object
+      required: [entryId, scheduledAt, deviceId, state, stateAt, fakeAllowed]
+      properties:
+        entryId:
+          type: integer
+          format: int64
+        scheduledAt:
+          type: string
+          format: date-time
+        deviceId:
+          type: integer
+          format: int64
+          description: The participant's real tracker
+        state:
+          type: string
+          enum: [scheduled, sent, skipped, failed]
+          description: >-
+            As recorded by the Tool: sent, skipped (nothing was to be sent, the participant was out, or a break
+            withheld the hunters) or failed (no position, an upload error or no recipient)
+        stateAt:
+          type: [string, 'null']
+          format: date-time
+        fakeAllowed:
+          type: [boolean, 'null']
+          description: >-
+            For the owner: whether a fake can still be planned on this ping (at least 60 seconds ahead and none
+            planned yet); null for hunters and spectators
     GameJokerOverview:
       type: object
       required: [inventories, reservations, boundFakes]

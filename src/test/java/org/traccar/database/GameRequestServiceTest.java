@@ -572,6 +572,89 @@ public class GameRequestServiceTest {
     }
 
     @Test
+    void membersSeeTheirTimetablePingsWithoutCellContent() throws Exception {
+        var jokers = new GameJokerService(source);
+        Instant base = clock.now.truncatedTo(java.time.temporal.ChronoUnit.MINUTES).plusSeconds(3600);
+        String[] cells = {"", "2P2S", "b", "x", "47.1,8.5|2H", "2H", "46.9,7.4|2P"};
+        List<GameSessionService.EntryInput> entries = new java.util.ArrayList<>();
+        for (int index = 0; index < cells.length; index++) {
+            entries.add(new GameSessionService.EntryInput(base.plusSeconds(600L * index).toString(), "Anna",
+                    cells[index]));
+        }
+        entries.add(new GameSessionService.EntryInput(base.toString(), "Ben", ""));
+        Instant old = clock.now.truncatedTo(java.time.temporal.ChronoUnit.MINUTES).minusSeconds(7200);
+        entries.add(new GameSessionService.EntryInput(old.toString(), "Anna", ""));
+        var published = sessions.publishTimetable(sessionId, 0, mapper.readTree("[\"Time\",\"Anna\",\"Ben\"]"),
+                mapper.readTree("{}"), entries);
+        Map<String, Long> ids = new java.util.HashMap<>();
+        for (var entry : published.entries()) {
+            ids.put(entry.participant() + "@" + Instant.parse(entry.scheduledAt()), entry.id());
+        }
+        java.util.function.IntFunction<Long> anna = index -> ids.get("Anna@" + base.plusSeconds(600L * index));
+        sessions.updateTimetableProgress(sessionId, List.of(new GameSessionService.Progress(anna.apply(4), "sent")));
+
+        // Hunters and spectators see every ping that reaches hunters, an operator coordinate like any other, and
+        // never the cell content.
+        var hunters = jokers.timetable(sessionId, "hunter", null);
+        assertEquals(List.of(anna.apply(0), ids.get("Ben@" + base), anna.apply(4), anna.apply(5), anna.apply(6)),
+                hunters.stream().map(GameJokerService.TimetablePing::entryId).toList());
+        assertEquals(List.of(101L, 102L, 101L, 101L, 101L),
+                hunters.stream().map(GameJokerService.TimetablePing::deviceId).toList());
+        assertEquals("sent", hunters.get(2).state());
+        assertNotNull(hunters.get(2).stateAt());
+        assertEquals("scheduled", hunters.get(3).state());
+        assertTrue(hunters.stream().allMatch(item -> item.fakeAllowed() == null));
+        String serialized = mapper.writeValueAsString(hunters);
+        assertFalse(serialized.contains("47.1") || serialized.contains("2P") || serialized.contains("content"),
+                serialized);
+        assertEquals(hunters, jokers.timetable(sessionId, "spectator", null));
+
+        // Players see only their own pings that can carry a fake, and whether one still can.
+        jokers.change(sessionId, new GameJokerService.Change(101L, GameJokerService.FAKE_TIMETABLE, 1, null),
+                "Operator");
+        var own = jokers.timetable(sessionId, "player", 101L);
+        assertEquals(List.of(anna.apply(0), anna.apply(5)),
+                own.stream().map(GameJokerService.TimetablePing::entryId).toList());
+        assertTrue(own.stream().allMatch(item -> item.deviceId() == 101 && Boolean.TRUE.equals(item.fakeAllowed())));
+        arm(requests.membership(20), anna.apply(0), 47.2);
+        assertEquals(List.of(false, true), jokers.timetable(sessionId, "player", 101L).stream()
+                .map(GameJokerService.TimetablePing::fakeAllowed).toList());
+        assertEquals(List.of(ids.get("Ben@" + base)), jokers.timetable(sessionId, "supporter", 102L).stream()
+                .map(GameJokerService.TimetablePing::entryId).toList());
+        assertThrows(ForbiddenException.class, () -> jokers.timetable(sessionId, "operator", null));
+        assertThrows(ForbiddenException.class, () -> jokers.timetable(sessionId, "player", null));
+        assertEquals(4, jokers.own(sessionId, 101).pingsPerSpeedhunt(), "the default ping limit");
+    }
+
+    @Test
+    void aBusyPastHourNeverCrowdsOutUpcomingPings() throws Exception {
+        var jokers = new GameJokerService(source);
+        Instant now = clock.now.truncatedTo(java.time.temporal.ChronoUnit.MINUTES);
+        List<GameSessionService.EntryInput> entries = new java.util.ArrayList<>();
+        int past = GameJokerService.TIMETABLE_PAST_PINGS + 10;
+        for (int index = 1; index <= past; index++) {
+            entries.add(new GameSessionService.EntryInput(now.minusSeconds(90L * index).toString(), "Ben", ""));
+        }
+        entries.add(new GameSessionService.EntryInput(now.plusSeconds(600).toString(), "Ben", ""));
+        entries.add(new GameSessionService.EntryInput(now.plusSeconds(900).toString(), "Anna", ""));
+        sessions.publishTimetable(sessionId, 0, mapper.readTree("[\"Time\",\"Anna\",\"Ben\"]"),
+                mapper.readTree("{}"), entries);
+        for (var view : List.of(jokers.timetable(sessionId, "hunter", null),
+                jokers.timetable(sessionId, "player", 102L))) {
+            var times = view.stream().map(item -> Instant.parse(item.scheduledAt())).toList();
+            assertEquals(times.stream().sorted().toList(), times, "oldest first");
+            assertEquals(GameJokerService.TIMETABLE_PAST_PINGS,
+                    times.stream().filter(time -> time.isBefore(clock.now)).count(), "the most recent past pings");
+            assertEquals(now.minusSeconds(90L * GameJokerService.TIMETABLE_PAST_PINGS), times.getFirst());
+            assertTrue(times.contains(now.plusSeconds(600)), "upcoming pings are always listed");
+        }
+        assertEquals(2, jokers.timetable(sessionId, "hunter", null).stream()
+                .filter(item -> Instant.parse(item.scheduledAt()).isAfter(clock.now)).count());
+        assertEquals(List.of(101L), jokers.timetable(sessionId, "player", 101L).stream()
+                .map(GameJokerService.TimetablePing::deviceId).toList(), "only the owner's own pings");
+    }
+
+    @Test
     void timetableFakesAreArmedUsedReleasedAndStayPrivate() throws Exception {
         var jokers = new GameJokerService(source);
         Instant base = clock.now.truncatedTo(java.time.temporal.ChronoUnit.MINUTES).plusSeconds(3600);
