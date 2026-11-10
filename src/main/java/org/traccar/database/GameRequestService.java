@@ -74,7 +74,9 @@ public class GameRequestService {
     public static final String BREAK_UNAVAILABLE = "A break cannot start right now; try again later";
     public static final String BREAK_OVERLAP = "This break would overlap another break of yours";
     private static final Set<String> SPEEDHUNT_PINGS = Set.of("speedhuntStaticPing", "speedhuntLivePing");
-    private static final int MAX_LIVE_MINUTES = 240;
+    private static final String REPEAT_SPEEDHUNT = "The previous speedhunt was already on this participant";
+    private static final String LIVE_DURATION_REQUIRED = "Set a positive live ping duration in the game settings";
+    private static final Instant MAX_LIVE_DEADLINE = Instant.parse("9999-12-31T23:59:59Z");
 
     public record Membership(long gameSessionId, long userId, String role, Long assignedDeviceId) { }
     public record Submission(String type, Long targetDeviceId, Long baseRevision, JsonNode parameters) { }
@@ -193,6 +195,47 @@ public class GameRequestService {
             query.setLong(1, gameSessionId);
             try (var rows = query.executeQuery()) {
                 return rows.next() ? objectMapper.readTree(rows.getString(1)) : null;
+            }
+        }
+    }
+
+    private JsonNode gameSettings(Connection connection, long gameSessionId) throws Exception {
+        try (var query = connection.prepareStatement("SELECT config FROM tc_game_sessions WHERE id = ?")) {
+            query.setLong(1, gameSessionId);
+            try (var rows = query.executeQuery()) {
+                return rows.next()
+                        ? objectMapper.readTree(rows.getString(1)).path("game_settings")
+                        : JsonNodeFactory.instance.objectNode();
+            }
+        }
+    }
+
+    private void checkSpeedhuntPing(
+            Connection connection, long gameSessionId, String type, JsonNode published,
+            JsonNode target, JsonNode parameters) throws Exception {
+        JsonNode settings = gameSettings(connection, gameSessionId);
+        boolean live = "speedhuntLivePing".equals(type);
+        if (live) {
+            JsonNode minutes = settings.path("fixed_speedhunt_live_duration_minutes");
+            double seconds = minutes.asDouble() * 60;
+            if (!minutes.isNumber() || !Double.isFinite(seconds) || seconds < 0.000001
+                    || seconds > MAX_LIVE_DEADLINE.getEpochSecond() - now().getEpochSecond()) {
+                throw conflict(LIVE_DURATION_REQUIRED);
+            }
+        }
+        JsonNode speedhunt = target.path("speedhunt");
+        boolean startsRun = speedhunt.path("startsRun").asBoolean(
+                !speedhunt.path("operation").asBoolean() && !speedhunt.path("running").asBoolean()
+                        || speedhunt.path("pings").asInt() == 0);
+        if (startsRun && !settings.path("allow_consecutive_speedhunts").asBoolean(false)
+                && published.path("lastSpeedhuntDeviceId").asLong(-1) == target.path("deviceId").asLong()) {
+            String approval = live ? "speedhunt_live_ping" : "speedhunt_static_ping";
+            if ("block".equals(settings.path("limit_enforcement").asText())
+                    || !settings.path("request_approvals").path(approval).asBoolean(true)) {
+                throw conflict(REPEAT_SPEEDHUNT);
+            }
+            if (!parameters.path("confirmConsecutive").asBoolean(false)) {
+                throw conflict(REPEAT_SPEEDHUNT + "; confirm that you want to request approval");
             }
         }
     }
@@ -322,10 +365,27 @@ public class GameRequestService {
         if (("hunter".equals(role) || "spectator".equals(role)) && document != null) {
             result.set("participants", document.path("participants").deepCopy());
             result.set("limits", document.path("limits").deepCopy());
+            if ("hunter".equals(role) && document.has("lastSpeedhuntDeviceId")) {
+                result.set("lastSpeedhuntDeviceId", document.get("lastSpeedhuntDeviceId").deepCopy());
+            }
         } else if (("player".equals(role) || "supporter".equals(role)) && deviceId != null) {
             JsonNode own = participant(document, deviceId);
             if (own != null && own.path("break").isObject()) {
                 result.set("break", own.get("break").deepCopy());
+            }
+            if (active && document != null) {
+                for (JsonNode run : document.path("runningSpeedhunts")) {
+                    int first = run.path("firstPing").asInt();
+                    int last = run.path("lastPing").asInt();
+                    String token = run.path("runToken").asText();
+                    if (first > 1 && first <= last && GameJokerService.validRunToken(token)) {
+                        ObjectNode choice = result.putObject("runningFake");
+                        choice.put("runToken", token);
+                        choice.put("firstPing", first);
+                        choice.put("lastPing", last);
+                        break;
+                    }
+                }
             }
         }
         return result;
@@ -343,7 +403,16 @@ public class GameRequestService {
         if (document == null || !document.isObject()) {
             throw new BadRequestException("Status must be a JSON object");
         }
-        String serialized = objectMapper.writeValueAsString(document);
+        JsonNode status = document.deepCopy();
+        JsonNode previous = statusDocument(connection, gameSessionId);
+        for (JsonNode run : status.path("runningSpeedhunts")) {
+            JsonNode old = runningSpeedhunt(previous, run.path("runToken").asText());
+            if (old != null && run.isObject() && old.path("firstPing").asInt() > run.path("firstPing").asInt()) {
+                ((ObjectNode) run).put("firstPing", old.path("firstPing").asInt());
+            }
+        }
+        GameJokerService.releaseClosedRunningFakes(connection, gameSessionId, status);
+        String serialized = objectMapper.writeValueAsString(status);
         if (serialized.length() > 1_000_000) {
             throw new BadRequestException("Status exceeds the size limit");
         }
@@ -370,6 +439,43 @@ public class GameRequestService {
         return revision + 1;
     }
 
+    static JsonNode runningSpeedhunt(JsonNode document, String token) {
+        if (document != null && !token.isEmpty()) {
+            for (JsonNode run : document.path("runningSpeedhunts")) {
+                if (token.equals(run.path("runToken").asText())) {
+                    return run;
+                }
+            }
+        }
+        return null;
+    }
+
+    static boolean runningFakeOpen(JsonNode document, JsonNode parameters) {
+        JsonNode run = runningSpeedhunt(document, parameters.path("runToken").asText());
+        int number = parameters.path("pingNumber").asInt();
+        return run != null && number >= run.path("firstPing").asInt() && number <= run.path("lastPing").asInt();
+    }
+
+    Long advanceRunningPing(Connection connection, long gameSessionId, GameJokerService.RunningPing ping)
+            throws Exception {
+        JsonNode document = statusDocument(connection, gameSessionId);
+        JsonNode run = runningSpeedhunt(document, ping.runToken());
+        if (run == null) {
+            return null; // The Tool can send a follow-up before the new run's first status publication.
+        }
+        if (run.path("deviceId").asLong() != ping.deviceId()) {
+            throw new BadRequestException("Speedhunt run does not match the participant");
+        }
+        if (!ping.counted()) {
+            return null;
+        }
+        if (run.path("firstPing").asInt() > ping.pingNumber()) {
+            throw conflict("This speedhunt ping was already delivered");
+        }
+        ((ObjectNode) run).put("firstPing", ping.pingNumber() + 1);
+        return putStatus(connection, gameSessionId, document);
+    }
+
     // --- member requests ----------------------------------------------------------------------------------
 
     private static double coordinate(JsonNode input, String name, double limit) {
@@ -391,6 +497,9 @@ public class GameRequestService {
             throw new BadRequestException("Choose either one of your timetable pings or a ping of the next speedhunt");
         }
         if (timetable) {
+            if (input.has("runToken")) {
+                throw new BadRequestException("A timetable fake cannot name a speedhunt");
+            }
             JsonNode entry = input.get("entryId");
             if (!entry.isIntegralNumber() || !entry.canConvertToLong() || entry.asLong() <= 0) {
                 throw new BadRequestException("Choose one of your upcoming timetable pings");
@@ -407,6 +516,13 @@ public class GameRequestService {
                 throw new BadRequestException("Choose the ping of the next speedhunt the fake replaces");
             }
             result.put("pingNumber", ping.asInt());
+            if (input.has("runToken")) {
+                JsonNode token = input.get("runToken");
+                if (!token.isTextual() || !GameJokerService.validRunToken(token.asText())) {
+                    throw new BadRequestException("Choose a running speedhunt");
+                }
+                result.put("runToken", token.asText());
+            }
             result.put("latitude", coordinate(input, "latitude", 90));
             result.put("longitude", coordinate(input, "longitude", 180));
             return result;
@@ -424,15 +540,12 @@ public class GameRequestService {
             }
             return result;
         }
-        if ("speedhuntLivePing".equals(submission.type()) && submission.parameters() != null
-                && submission.parameters().has("durationMinutes")
-                && !submission.parameters().get("durationMinutes").isNull()) {
-            JsonNode minutes = submission.parameters().get("durationMinutes");
-            if (!minutes.isNumber() || minutes.asDouble() <= 0 || minutes.asDouble() > MAX_LIVE_MINUTES) {
-                throw new BadRequestException("Live ping duration must be between 0 and " + MAX_LIVE_MINUTES
-                        + " minutes");
+        if (SPEEDHUNT_PINGS.contains(submission.type()) && input != null && input.has("confirmConsecutive")) {
+            JsonNode confirmation = input.get("confirmConsecutive");
+            if (!confirmation.isBoolean()) {
+                throw new BadRequestException("The consecutive speedhunt confirmation must be true or false");
             }
-            result.put("durationMinutes", minutes.asDouble());
+            result.put("confirmConsecutive", confirmation.asBoolean());
         }
         return result;
     }
@@ -495,8 +608,11 @@ public class GameRequestService {
             if (!joker && target.path("speedhunt").path("revision").asLong(-1) != accepted.baseRevision()) {
                 throw conflict("The speedhunt changed meanwhile; refresh and try again");
             }
-            if (SPEEDHUNT_PINGS.contains(accepted.type()) && onBreak(target, now())) {
-                throw conflict("This participant is on a break");
+            if (SPEEDHUNT_PINGS.contains(accepted.type())) {
+                if (onBreak(target, now())) {
+                    throw conflict("This participant is on a break");
+                }
+                checkSpeedhuntPing(connection, member.gameSessionId(), accepted.type(), published, target, parameters);
             }
             if (BREAK_REQUEST.equals(accepted.type())) {
                 Double minutes = GameJokerService.breakMinutes(connection, member.gameSessionId());
@@ -538,8 +654,16 @@ public class GameRequestService {
                     throw conflict("A speedhunt has " + limit + " pings; choose one of them");
                 }
                 // One unbound speedhunt fake per participant; it waits for the next speedhunt, whoever it targets.
-                if (GameJokerService.speedhuntFakeHeld(connection, member.gameSessionId(),
-                        accepted.targetDeviceId())) {
+                if (parameters.has("runToken")) {
+                    if (!runningFakeOpen(published, parameters)) {
+                        throw conflict("That speedhunt ping is no longer available; choose another ping");
+                    }
+                    if (GameJokerService.speedhuntFakeHeld(connection, member.gameSessionId(),
+                            accepted.targetDeviceId(), parameters.get("runToken").asText())) {
+                        throw conflict("You already have a fake for this speedhunt");
+                    }
+                } else if (GameJokerService.speedhuntFakeHeld(connection, member.gameSessionId(),
+                        accepted.targetDeviceId(), null)) {
                     throw conflict("You already have a fake for the next speedhunt");
                 }
             }
@@ -709,6 +833,7 @@ public class GameRequestService {
 
     public Request cancel(Membership member, long id) throws Exception {
         return transaction(connection -> {
+            GameJokerService.lockSessionForCancellation(connection, member.gameSessionId());
             Request request = load(connection, member.gameSessionId(), id, true);
             if (request.requesterUserId() == null || request.requesterUserId() != member.userId()) {
                 throw new ForbiddenException("Only the requester can cancel this request");
@@ -863,6 +988,11 @@ public class GameRequestService {
                 } catch (WebApplicationException error) {
                     throw new BadRequestException("The fake cannot be armed: " + error.getMessage());
                 }
+            }
+            if (SUCCEEDED.equals(completion.status()) && FAKE_PING_REQUEST.equals(request.type())
+                    && request.parameters().hasNonNull("runToken")
+                    && !runningFakeOpen(statusDocument(connection, gameSessionId), request.parameters())) {
+                throw new BadRequestException("That speedhunt ping is no longer available; choose another ping");
             }
             update(connection, completion.id(), completion.status(), completion.message(), completion.detail(),
                     REJECTED.equals(completion.status()));

@@ -175,8 +175,9 @@ public class GameRequestServiceTest {
                 () -> requests.submit(hunter, ping(101, 2)))), "stale revision");
         assertEquals(409, status(assertThrows(WebApplicationException.class,
                 () -> requests.submit(hunter, ping(102, 1)))), "caught participant");
-        assertThrows(BadRequestException.class, () -> requests.submit(hunter, new GameRequestService.Submission(
-                "speedhuntLivePing", 101L, 3L, mapper.readTree("{\"durationMinutes\":999}"))));
+        assertEquals(409, status(assertThrows(WebApplicationException.class,
+                () -> requests.submit(hunter, new GameRequestService.Submission(
+                        "speedhuntLivePing", 101L, 3L, mapper.readTree("{\"durationMinutes\":5}"))))));
 
         var request = requests.submit(hunter, ping(101, 3));
         assertEquals("pending", request.status());
@@ -190,6 +191,50 @@ public class GameRequestServiceTest {
         assertEquals(1, requests.list(requests.membership(11), 0).size());
         assertTrue(requests.list(player, 0).isEmpty());
         assertThrows(ForbiddenException.class, () -> requests.cancel(requests.membership(11), request.id()));
+    }
+
+    @Test
+    void repeatTargetsRequireAcknowledgmentAndApprovalForThatPingType() throws Exception {
+        var hunter = requests.membership(10);
+        publish("""
+                {"lastSpeedhuntDeviceId":101,"participants":[
+                  {"deviceId":101,"name":"Anna","speedhunt":{"revision":3,"startsRun":true}},
+                  {"deviceId":102,"name":"Ben","speedhunt":{"revision":1,"startsRun":true}}]}
+                """);
+        assertEquals(101, requests.status(hunter).status().path("lastSpeedhuntDeviceId").asInt());
+        assertFalse(requests.status(requests.membership(20)).status().has("lastSpeedhuntDeviceId"));
+        sessions.updateConfig(sessionId, 1, null, mapper.readTree("""
+                {"game_settings":{"allow_consecutive_speedhunts":false,"limit_enforcement":"warn",
+                  "fixed_speedhunt_live_duration_minutes":2,
+                  "request_approvals":{"speedhunt_static_ping":true,"speedhunt_live_ping":false}}}
+                """));
+        var confirmed = mapper.readTree("{\"confirmConsecutive\":true}");
+        var repeatStatic = new GameRequestService.Submission("speedhuntStaticPing", 101L, 3L, confirmed);
+        var repeatLive = new GameRequestService.Submission("speedhuntLivePing", 101L, 3L, confirmed);
+        assertTrue(message(assertThrows(WebApplicationException.class,
+                () -> requests.submit(hunter, ping(101, 3)))).contains("confirm"));
+        assertEquals(409, status(assertThrows(WebApplicationException.class,
+                () -> requests.submit(hunter, repeatLive))));
+        var pending = requests.submit(hunter, repeatStatic);
+        assertTrue(pending.parameters().path("confirmConsecutive").asBoolean());
+        requests.cancel(hunter, pending.id());
+
+        sessions.updateConfig(sessionId, 2, null, mapper.readTree("""
+                {"game_settings":{"limit_enforcement":"block","fixed_speedhunt_live_duration_minutes":2}}
+                """));
+        assertEquals(409, status(assertThrows(WebApplicationException.class,
+                () -> requests.submit(hunter, repeatStatic))));
+        assertEquals(409, status(assertThrows(WebApplicationException.class,
+                () -> requests.submit(hunter, repeatLive))));
+        var different = requests.submit(hunter, new GameRequestService.Submission(
+                "speedhuntLivePing", 102L, 1L, mapper.readTree("{\"durationMinutes\":999}")));
+        assertFalse(different.parameters().has("durationMinutes"));
+
+        publish("""
+                {"lastSpeedhuntDeviceId":101,"participants":[
+                  {"deviceId":101,"name":"Anna","speedhunt":{"revision":4,"startsRun":false,"pings":1}}]}
+                """);
+        assertEquals("pending", requests.submit(hunter, ping(101, 4)).status());
     }
 
     @Test
@@ -738,12 +783,15 @@ public class GameRequestServiceTest {
         assertEquals(1, fakes(jokers, 101).used());
         assertEquals(4, fakes(jokers, 101).available());
 
-        // The owner may cancel until shortly before the ping; nobody else may.
+        // The owner may cancel even in the last minute before delivery; nobody else may.
         long cancelled = arm(owner, anna.apply(7), 47.2);
         // Another participant learns nothing: the answer is the same as for a reservation that does not exist.
         assertThrows(NotFoundException.class, () -> jokers.cancelFake(sessionId, 102, cancelled, "Ben"));
         assertThrows(NotFoundException.class, () -> jokers.cancelFake(sessionId, 102, cancelled + 1000, "Ben"));
+        Instant beforeLastMinute = clock.now;
+        clock.now = base.plusSeconds(600 * 7 - 30);
         assertEquals("released", jokers.cancelFake(sessionId, 101, cancelled, "Owner").status());
+        clock.now = beforeLastMinute;
         assertEquals(409, status(assertThrows(WebApplicationException.class,
                 () -> jokers.cancelFake(sessionId, 101, cancelled, "Owner"))));
 
@@ -798,6 +846,116 @@ public class GameRequestServiceTest {
         return jokers.overview(sessionId).inventories().stream()
                 .filter(item -> item.deviceId() == deviceId && item.type().equals(GameJokerService.FAKE_PING))
                 .findFirst().orElseThrow();
+    }
+
+    @Test
+    void runningFakesSettleWithTheirPingWithoutDisclosingTheTarget() throws Exception {
+        execute("CREATE TABLE tc_positions(id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,"
+                + " protocol VARCHAR(128), deviceid INT, servertime TIMESTAMP, devicetime TIMESTAMP, fixtime TIMESTAMP,"
+                + " valid BOOLEAN, latitude DOUBLE, longitude DOUBLE, altitude FLOAT, speed FLOAT, course FLOAT,"
+                + " address VARCHAR(512), attributes VARCHAR(4000), accuracy DOUBLE, network VARCHAR(4000),"
+                + " geofenceids VARCHAR(128))");
+        execute("CREATE TABLE tc_game_push_outbox(id BIGINT, deliveryrowid BIGINT, userid INT,"
+                + " status VARCHAR(16), detail VARCHAR(512))");
+        execute("INSERT INTO tc_devices VALUES(201,'hunter-mirror',NULL,'{}',NULL,'Hunter mirror'),"
+                + "(202,'player-mirror',NULL,'{}',NULL,'Player mirror')");
+        execute("UPDATE tc_game_sessions SET resources = "
+                + "'{\"devices\":{\"mirroring\":{\"hunter\":201,\"player\":202}}}'");
+        var jokers = new GameJokerService(source);
+        String token = "a123456789abcdef0123456789abcdef";
+        String other = "b123456789abcdef0123456789abcdef";
+        String active = """
+                {"participants":[{"deviceId":101,"name":"Anna","speedhunt":{"running":true}},
+                                 {"deviceId":102,"name":"Ben","speedhunt":{"running":true}}],
+                 "runningSpeedhunts":[
+                   {"deviceId":101,"runToken":"%s","firstPing":2,"lastPing":4},
+                   {"deviceId":102,"runToken":"%s","firstPing":2,"lastPing":4}]}
+                """.formatted(token, other);
+        publish(active);
+        var anna = requests.membership(20);
+        var ben = requests.membership(21);
+        var choice = requests.status(anna).status().get("runningFake");
+        assertEquals(mapper.readTree("{\"runToken\":\"" + token + "\",\"firstPing\":2,\"lastPing\":4}"), choice);
+        assertEquals(choice, requests.status(ben).status().get("runningFake"));
+        assertFalse(requests.status(requests.membership(10)).status().has("runningSpeedhunts"));
+        assertFalse(requests.status(requests.membership(10)).status().has("runningFake"));
+
+        for (var owner : List.of(anna, ben)) {
+            jokers.change(sessionId, new GameJokerService.Change(
+                    owner.assignedDeviceId(), GameJokerService.FAKE_PING, 2, null), "Operator");
+            long id = requests.submit(owner, runningFake(token, 2, owner == anna ? 47.3 : 47.4)).id();
+            requests.claim(sessionId, id, epoch);
+            deliver(List.of(new GameRequestService.Completion(id, "succeeded", "Armed", null)), null);
+            assertEquals(1, speedhuntFakes(jokers, owner.assignedDeviceId()).reserved());
+            assertEquals(409, status(assertThrows(WebApplicationException.class,
+                    () -> requests.submit(owner, runningFake(token, 3, 47.2)))));
+        }
+
+        var positions = List.of(
+                new GameEffectsService.PositionInput(null, "hunter-mirror", 47.0, 8.0, null, null),
+                new GameEffectsService.PositionInput(null, "player-mirror", 47.0, 8.0, null, null));
+        var ping = new GameJokerService.RunningPing(token, 101, 2, true, true, "hunter-mirror", false);
+        var invalid = new GameEffectsService.Delivery("running-ping-0002", List.of(
+                new GameEffectsService.PositionInput(null, "unknown-mirror", 47.0, 8.0, null, null)),
+                null, null, null, null, null, null, null, null, null, ping);
+        assertThrows(BadRequestException.class, () -> effects.apply(sessionId, epoch, invalid, effects.validate(invalid)));
+        assertEquals(1, speedhuntFakes(jokers, 101).reserved());
+        assertEquals(1, speedhuntFakes(jokers, 102).reserved());
+        var delivery = new GameEffectsService.Delivery("running-ping-0002", positions,
+                null, null, null, null, null, null, null, null, null, ping);
+        var applied = effects.apply(sessionId, epoch, delivery, effects.validate(delivery));
+        assertEquals(List.of("consumed", "consumed"),
+                applied.outcome().fakes().stream().map(GameJokerService.FakeOutcome::status).toList());
+        assertEquals(47.3, applied.latest().get(0).getLatitude(), 0.001);
+        assertEquals(47.0, applied.latest().get(1).getLatitude(), 0);
+        assertTrue(effects.apply(sessionId, epoch, delivery, effects.validate(delivery)).outcome().replayed());
+        for (var owner : List.of(anna, ben)) {
+            assertEquals(1, speedhuntFakes(jokers, owner.assignedDeviceId()).used());
+        }
+
+        // A stale publication cannot reopen a slot, even when another hunt overlaps it.
+        publish(active);
+        assertEquals(3, requests.status(ben).status().get("runningFake").get("firstPing").asInt());
+        assertEquals(409, status(assertThrows(WebApplicationException.class,
+                () -> requests.submit(ben, runningFake(token, 2, 47.2)))));
+        var repeat = new GameEffectsService.Delivery("running-live-repeat", positions,
+                null, null, null, null, null, null, null, null, null,
+                new GameJokerService.RunningPing(token, 101, 2, false, true, "hunter-mirror", false));
+        var repeated = effects.apply(sessionId, epoch, repeat, effects.validate(repeat));
+        assertTrue(repeated.outcome().fakes().isEmpty());
+        assertEquals(47.3, repeated.latest().get(0).getLatitude(), 0.001);
+
+        long future = requests.submit(ben, runningFake(token, 4, 47.4)).id();
+        requests.claim(sessionId, future, epoch);
+        deliver(List.of(new GameRequestService.Completion(future, "succeeded", "Armed", null)), null);
+        long waiting = requests.submit(anna, runningFake(token, 3, 47.3)).id();
+        publish(active.replace(
+                "{\"deviceId\":101,\"runToken\":\"" + token + "\",\"firstPing\":2,\"lastPing\":4},", ""));
+        assertEquals(0, speedhuntFakes(jokers, 102).reserved());
+        requests.claim(sessionId, waiting, epoch);
+        assertThrows(BadRequestException.class, () -> deliver(List.of(
+                new GameRequestService.Completion(waiting, "succeeded", "Armed", null)), null));
+        deliver(List.of(new GameRequestService.Completion(waiting, "failed", "Too late", null)), null);
+        assertEquals(0, speedhuntFakes(jokers, 101).reserved());
+        assertEquals(other, requests.status(anna).status().get("runningFake").get("runToken").asText());
+    }
+
+    private GameRequestService.Submission runningFake(String token, int number, double latitude) {
+        var parameters = mapper.createObjectNode().put("runToken", token).put("pingNumber", number)
+                .put("latitude", latitude).put("longitude", 8.5);
+        return new GameRequestService.Submission("jokerFakePing", null, null, parameters);
+    }
+
+    @Test
+    void runningLiveFakeCoordinatesStayInsideTheMapAtThePolesAndDateLine() {
+        for (var point : List.of(new double[] {90, 180}, new double[] {-90, -180}, new double[] {0, 180})) {
+            var plan = mapper.createObjectNode().put("latitude", point[0]).put("longitude", point[1]);
+            for (int i = 0; i < 100; i++) {
+                var coordinate = GameJokerService.runningFakeCoordinate(plan, true);
+                assertTrue(Math.abs(coordinate[0]) <= 90);
+                assertTrue(Math.abs(coordinate[1]) <= 180);
+            }
+        }
     }
 
     @Test
@@ -1004,10 +1162,15 @@ public class GameRequestServiceTest {
         // The Tool starts Anna's planned break: its joker is used with that delivery; it cannot be bound.
         assertThrows(BadRequestException.class, () -> deliverFakes(List.of(
                 new GameJokerService.FakeSettlement(plan.id(), "bound", null, "run")), null));
+        String deadline = base.plusSeconds(1200).toString();
         assertEquals("consumed", deliverFakes(List.of(new GameJokerService.FakeSettlement(plan.id(), "used",
-                "The break started")), null).fakes().getFirst().status());
+                "The break started", null, deadline)), null).fakes().getFirst().status());
         assertEquals(1, breaks(jokers, 101).used());
         assertEquals(0, breaks(jokers, 101).reserved());
+        var confirmed = jokers.overview(sessionId).confirmedBreaks().getFirst();
+        assertEquals(plan.id(), confirmed.reservationId());
+        assertEquals(101, confirmed.deviceId());
+        assertEquals(deadline, confirmed.endsAt());
         assertEquals(409, status(assertThrows(WebApplicationException.class,
                 () -> jokers.cancelFake(sessionId, 101, plan.id(), "Anna"))), "a started break is not cancelled");
 
@@ -1016,6 +1179,20 @@ public class GameRequestServiceTest {
         assertEquals("released", jokers.cancelFake(sessionId, 102, benPlan.id(), "Ben").status());
         assertEquals(0, breaks(jokers, 102).reserved());
         assertEquals(0, breaks(jokers, 102).overAllocated());
+        var late = requests.planBreak(sessionId, new GameJokerService.BreakPlan(102L, in30, true), "Operator");
+        assertEquals("released", deliverFakes(List.of(new GameJokerService.FakeSettlement(
+                late.id(), "used", null, null, base.minusSeconds(1).toString())), null).fakes().getFirst().status());
+        assertEquals(0, breaks(jokers, 102).used());
+        var shortBreak = requests.planBreak(sessionId, new GameJokerService.BreakPlan(102L, null, true), "Operator");
+        var started = deliverFakes(List.of(new GameJokerService.FakeSettlement(
+                shortBreak.id(), "used", null, null, null, 1L)), null).fakes().getFirst();
+        assertEquals("consumed", started.status());
+        assertEquals(Instant.parse(started.startedAt()).plusSeconds(1), Instant.parse(started.endsAt()));
+        var caught = new GameEffectsService.Delivery("catch-confirmed-break",
+                null, null, null, null, null, null, null, null, List.of(101L, 102L));
+        effects.apply(sessionId, epoch, caught, effects.validate(caught));
+        assertTrue(jokers.overview(sessionId).confirmedBreaks().isEmpty());
+        assertEquals(1, breaks(jokers, 101).used());
 
         // Catching a participant releases their planned breaks.
         requests.planBreak(sessionId, new GameJokerService.BreakPlan(101L, base.plusSeconds(7200).toString(), false),
@@ -1026,6 +1203,6 @@ public class GameRequestServiceTest {
         assertEquals(1, breaks(jokers, 101).used());
         var kinds = jokers.ledger(sessionId, 0).stream().filter(item -> item.deviceId() == 102)
                 .map(GameJokerService.LedgerEntry::kind).toList();
-        assertEquals(List.of("release", "arm"), kinds);
+        assertEquals(List.of("use", "arm", "release", "arm", "release", "arm"), kinds);
     }
 }

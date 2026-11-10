@@ -6,6 +6,7 @@
  */
 package org.traccar.database;
 
+import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.inject.Inject;
@@ -53,7 +54,16 @@ public class GameEffectsService {
     private static final int MAX_ATTRIBUTES = 64;
 
     public record PositionInput(Long deviceId, String uniqueId, Double latitude, Double longitude, String fixTime,
-                                Map<String, Object> attributes) { }
+                                Map<String, Object> attributes,
+                                @JsonInclude(JsonInclude.Include.NON_NULL) Long fakeReservationId,
+                                @JsonInclude(JsonInclude.Include.NON_NULL) Double fallbackLatitude,
+                                @JsonInclude(JsonInclude.Include.NON_NULL) Double fallbackLongitude) {
+
+        public PositionInput(Long deviceId, String uniqueId, Double latitude, Double longitude, String fixTime,
+                             Map<String, Object> attributes) {
+            this(deviceId, uniqueId, latitude, longitude, fixTime, attributes, null, null, null);
+        }
+    }
     public record RuntimeInput(Long expectedRevision, JsonNode document) { }
     public record NotificationInput(Long sessionDeviceId, String generation,
                                     List<GameNotificationService.Alert> alerts) { }
@@ -63,7 +73,26 @@ public class GameEffectsService {
                            List<GameSessionService.LogInput> logs,
                            List<GameRequestService.Completion> requests, JsonNode status,
                            List<GameJokerService.Use> jokers, List<Long> caughtParticipants,
-                           List<GameJokerService.FakeSettlement> fakes) {
+                           List<GameJokerService.FakeSettlement> fakes,
+                           @JsonInclude(JsonInclude.Include.NON_NULL) GameJokerService.RunningPing speedhuntPing,
+                           @JsonInclude(JsonInclude.Include.NON_NULL) Boolean fakePositionsGuarded) {
+        public Delivery(String deliveryId, List<PositionInput> positions, RuntimeInput runtime,
+                        NotificationInput notifications, List<PushInput> pushes,
+                        List<GameSessionService.LogInput> logs, List<GameRequestService.Completion> requests,
+                        JsonNode status, List<GameJokerService.Use> jokers, List<Long> caughtParticipants,
+                        List<GameJokerService.FakeSettlement> fakes, GameJokerService.RunningPing speedhuntPing) {
+            this(deliveryId, positions, runtime, notifications, pushes, logs, requests, status, jokers,
+                    caughtParticipants, fakes, speedhuntPing, null);
+        }
+
+        public Delivery(String deliveryId, List<PositionInput> positions, RuntimeInput runtime,
+                        NotificationInput notifications, List<PushInput> pushes,
+                        List<GameSessionService.LogInput> logs, List<GameRequestService.Completion> requests,
+                        JsonNode status, List<GameJokerService.Use> jokers, List<Long> caughtParticipants,
+                        List<GameJokerService.FakeSettlement> fakes) {
+            this(deliveryId, positions, runtime, notifications, pushes, logs, requests, status, jokers,
+                    caughtParticipants, fakes, null);
+        }
         public Delivery(String deliveryId, List<PositionInput> positions, RuntimeInput runtime,
                         NotificationInput notifications, List<PushInput> pushes,
                         List<GameSessionService.LogInput> logs) {
@@ -253,13 +282,49 @@ public class GameEffectsService {
         }
     }
 
-    private Position insertPosition(Connection connection, long deviceId, PositionInput input, Instant now)
-            throws Exception {
-        if (input.latitude() == null || input.longitude() == null
-                || Math.abs(input.latitude()) > 90 || Math.abs(input.longitude()) > 180
-                || input.latitude().isNaN() || input.longitude().isNaN()) {
+    private static void checkCoordinates(Double latitude, Double longitude) {
+        if (latitude == null || longitude == null
+                || Math.abs(latitude) > 90 || Math.abs(longitude) > 180 || latitude.isNaN() || longitude.isNaN()) {
             throw new BadRequestException("Invalid position coordinates");
         }
+    }
+
+    /** The reservation lock orders owner cancellation and the choice of position in the same transaction. */
+    private static PositionInput deliveredPosition(
+            PositionInput input, Set<Long> guardedReservations, Set<Long> consumedReservations) {
+        if (input.fakeReservationId() == null
+                && input.fallbackLatitude() == null && input.fallbackLongitude() == null) {
+            return input;
+        }
+        if (!guardedReservations.contains(input.fakeReservationId())) {
+            throw new BadRequestException("A guarded position needs a matching fake settlement");
+        }
+        checkCoordinates(input.fallbackLatitude(), input.fallbackLongitude());
+        if (consumedReservations.contains(input.fakeReservationId())) {
+            return input;
+        }
+        return new PositionInput(input.deviceId(), input.uniqueId(),
+                input.fallbackLatitude(), input.fallbackLongitude(), input.fixTime(), input.attributes());
+    }
+
+    /** Older Tools may have sent a cancelled fake's coordinate without its real fallback. */
+    private static void checkLegacyPositions(
+            List<PositionInput> positions, Set<Long> guardedReservations, Set<Long> consumedReservations) {
+        Set<Long> unsettled = new LinkedHashSet<>(guardedReservations);
+        unsettled.removeAll(consumedReservations);
+        for (PositionInput position : positions) {
+            if (position != null) {
+                unsettled.remove(position.fakeReservationId());
+            }
+        }
+        if (!unsettled.isEmpty()) {
+            throw new WebApplicationException("A fake was cancelled. Update the Tool to send its fallback.", 409);
+        }
+    }
+
+    private Position insertPosition(Connection connection, long deviceId, PositionInput input, Instant now)
+            throws Exception {
+        checkCoordinates(input.latitude(), input.longitude());
         Position position = new Position(PROTOCOL);
         position.setDeviceId(deviceId);
         Date fix = Date.from(fixTime(input.fixTime(), now));
@@ -409,11 +474,48 @@ public class GameEffectsService {
             }
         }
 
+        // Settle before writing the positions. A cancelled or released reservation can only send its fallback.
+        List<GameJokerService.FakeOutcome> fakeOutcomes = delivery.fakes() == null || delivery.fakes().isEmpty()
+                ? List.of() : GameJokerService.settleFakes(connection, gameSessionId, delivery.fakes());
+        var runningPing = delivery.speedhuntPing();
+        double[] runningCoordinate = null;
+        if (runningPing != null) {
+            if (delivery.positions() == null || delivery.positions().isEmpty()) {
+                throw new BadRequestException("A speedhunt ping must deliver a position");
+            }
+            var running = GameJokerService.deliverRunningFakes(connection, gameSessionId, runningPing);
+            if (!running.outcomes().isEmpty()) {
+                var outcomes = new ArrayList<>(fakeOutcomes);
+                outcomes.addAll(running.outcomes());
+                fakeOutcomes = outcomes;
+            }
+            if (running.coordinate() != null) {
+                runningCoordinate = GameJokerService.runningFakeCoordinate(running.coordinate(), runningPing.live());
+            }
+        }
+        Set<Long> guardedReservations = new LinkedHashSet<>();
+        if (delivery.fakes() != null) {
+            for (var fake : delivery.fakes()) {
+                if (GameJokerService.USED.equals(fake.outcome()) || GameJokerService.BOUND.equals(fake.outcome())) {
+                    guardedReservations.add(fake.reservationId());
+                }
+            }
+        }
+        Set<Long> consumedReservations = new LinkedHashSet<>();
+        for (var fake : fakeOutcomes) {
+            if (GameJokerService.CONSUMED.equals(fake.status())) {
+                consumedReservations.add(fake.reservationId());
+            }
+        }
+
         List<PositionOutcome> positionOutcomes = new ArrayList<>();
         List<Position> latest = new ArrayList<>();
         Set<Long> devices = new LinkedHashSet<>();
         List<PositionInput> positions = delivery.positions() == null ? List.of() : delivery.positions();
         if (!positions.isEmpty()) {
+            if (!Boolean.TRUE.equals(delivery.fakePositionsGuarded())) {
+                checkLegacyPositions(positions, guardedReservations, consumedReservations);
+            }
             Map<Long, Boolean> allowed = sessions.effectDevices(connection, gameSessionId);
             for (PositionInput input : positions) {
                 if (input == null) {
@@ -425,7 +527,12 @@ public class GameEffectsService {
                             "Device " + deviceId + " is not a mirror or the game-state device of this session");
                 }
                 Instant previous = latestFix(connection, deviceId);
-                Position position = insertPosition(connection, deviceId, input, now);
+                PositionInput delivered = deliveredPosition(input, guardedReservations, consumedReservations);
+                if (runningCoordinate != null && runningPing.hunterMirror().equals(input.uniqueId())) {
+                    delivered = new PositionInput(input.deviceId(), input.uniqueId(), runningCoordinate[0],
+                            runningCoordinate[1], input.fixTime(), input.attributes());
+                }
+                Position position = insertPosition(connection, deviceId, delivered, now);
                 boolean becomesLatest = previous == null || !position.getFixTime().toInstant().isBefore(previous);
                 if (becomesLatest) {
                     try (var query = connection.prepareStatement(
@@ -520,9 +627,6 @@ public class GameEffectsService {
         for (var use : delivery.jokers() == null ? List.<GameJokerService.Use>of() : delivery.jokers()) {
             jokerOutcomes.add(GameJokerService.use(connection, gameSessionId, use, "Operator"));
         }
-        // Fakes delivered with this delivery's positions are used together with them; skipped ones released.
-        List<GameJokerService.FakeOutcome> fakeOutcomes = delivery.fakes() == null || delivery.fakes().isEmpty()
-                ? List.of() : GameJokerService.settleFakes(connection, gameSessionId, delivery.fakes());
         boolean caught = delivery.caughtParticipants() != null && !delivery.caughtParticipants().isEmpty();
         if (caught) {
             GameJokerService.participantsCaught(connection, gameSessionId, delivery.caughtParticipants(), now);
@@ -546,8 +650,11 @@ public class GameEffectsService {
                 }
             }
         }
-        Long statusRevision = delivery.status() == null ? null
-                : requests.putStatus(connection, gameSessionId, delivery.status());
+        Long statusRevision = runningPing == null ? null : requests.advanceRunningPing(
+                connection, gameSessionId, runningPing);
+        if (delivery.status() != null) {
+            statusRevision = requests.putStatus(connection, gameSessionId, delivery.status());
+        }
 
         Outcome outcome = new Outcome(delivery.deliveryId(), false, epoch, positionOutcomes, runtimeRevision,
                 generation, alertOutcomes, pushOutcomes, requestOutcomes, statusRevision, jokerOutcomes, fakeOutcomes);

@@ -14,6 +14,9 @@ import java.util.Base64;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -265,6 +268,101 @@ public class GameEffectsServiceTest {
         assertEquals(1, failing.sendQueued());
         assertEquals("failed", query("SELECT status FROM tc_game_push_outbox ORDER BY id DESC LIMIT 1"));
         assertEquals("No token", query("SELECT detail FROM tc_game_push_outbox ORDER BY id DESC LIMIT 1"));
+    }
+
+    private long armTimetableFake() throws Exception {
+        try (var connection = source.getConnection(); var statement = connection.prepareStatement(
+                "INSERT INTO tc_game_joker_reservations"
+                        + " (gamesessionid,deviceid,type,status,details,createdat,updatedat)"
+                        + " VALUES (?,100,'fakePing','reserved',?,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)",
+                java.sql.Statement.RETURN_GENERATED_KEYS)) {
+            statement.setLong(1, sessionId);
+            statement.setString(2, "{\"entryId\":5,\"scheduledAt\":\"2026-01-01T00:00:00Z\"}");
+            statement.executeUpdate();
+            try (var keys = statement.getGeneratedKeys()) {
+                keys.next();
+                return keys.getLong(1);
+            }
+        }
+    }
+
+    private GameEffectsService.Delivery guardedFake(String deliveryId, long reservationId) {
+        var guarded = new GameEffectsService.PositionInput(
+                null, "mirror-1", 46.2, 7.3, null, null, reservationId, 47.1, 8.5);
+        return new GameEffectsService.Delivery(deliveryId, List.of(guarded),
+                null, null, null, null, null, null, null, null,
+                List.of(new GameJokerService.FakeSettlement(reservationId, GameJokerService.USED, null)));
+    }
+
+    @Test
+    void guardedPositionsUseFakeOrFallbackAccordingToTheReservationLock() throws Exception {
+        var jokers = new GameJokerService(source);
+        long cancelled = armTimetableFake();
+        assertEquals("released", jokers.cancelFake(sessionId, 100, cancelled, "Owner").status());
+        var fallback = guardedFake("cancel-before-delivery", cancelled);
+        var cancelledDelivery = apply(fallback);
+        assertEquals("skipped", cancelledDelivery.outcome().fakes().getFirst().status());
+        assertEquals(47.1, cancelledDelivery.latest().getFirst().getLatitude());
+        assertEquals(8.5, cancelledDelivery.latest().getFirst().getLongitude());
+        assertTrue(apply(fallback).outcome().replayed());
+
+        long consumed = armTimetableFake();
+        var sent = guardedFake("cancel-after-delivery", consumed);
+        var sentDelivery = apply(sent);
+        assertEquals("consumed", sentDelivery.outcome().fakes().getFirst().status());
+        assertEquals(46.2, sentDelivery.latest().getFirst().getLatitude());
+        assertEquals(7.3, sentDelivery.latest().getFirst().getLongitude());
+        assertEquals(409, assertThrows(WebApplicationException.class,
+                () -> jokers.cancelFake(sessionId, 100, consumed, "Owner")).getResponse().getStatus());
+        assertTrue(apply(sent).outcome().replayed());
+        assertEquals("2", query("SELECT COUNT(*) FROM tc_positions"));
+    }
+
+    @Test
+    void concurrentCancellationAndDeliveryAgreeOnWhetherTheFakeWasUsed() throws Exception {
+        var jokers = new GameJokerService(source);
+        long reservation = armTimetableFake();
+        var start = new CountDownLatch(1);
+        try (var executor = Executors.newFixedThreadPool(2)) {
+            var cancellation = executor.submit(() -> {
+                start.await();
+                try {
+                    return jokers.cancelFake(sessionId, 100, reservation, "Owner").status();
+                } catch (WebApplicationException error) {
+                    assertEquals(409, error.getResponse().getStatus());
+                    return "already-used";
+                }
+            });
+            var delivery = executor.submit(() -> {
+                start.await();
+                return apply(guardedFake("concurrent-cancellation", reservation));
+            });
+            start.countDown();
+            boolean cancelled = "released".equals(cancellation.get(5, TimeUnit.SECONDS));
+            var applied = delivery.get(5, TimeUnit.SECONDS);
+            assertEquals(cancelled ? "skipped" : "consumed", applied.outcome().fakes().getFirst().status());
+            assertEquals(cancelled ? 47.1 : 46.2, applied.latest().getFirst().getLatitude());
+            assertEquals("1", query("SELECT COUNT(*) FROM tc_positions"));
+        }
+    }
+
+    @Test
+    void aCancelledFakeWithInvalidCoordinatesStillSendsTheFallback() throws Exception {
+        long reservation = armTimetableFake();
+        new GameJokerService(source).cancelFake(sessionId, 100, reservation, "Owner");
+        var position = new GameEffectsService.PositionInput(
+                null, "mirror-1", 91.0, 180.1, null, null, reservation, 47.1, 8.5);
+        var delivery = new GameEffectsService.Delivery("cancelled-invalid-coordinate", List.of(position),
+                null, null, null, null, null, null, null, null,
+                List.of(new GameJokerService.FakeSettlement(reservation, GameJokerService.USED, null)));
+        assertEquals(47.1, apply(delivery).latest().getFirst().getLatitude());
+    }
+
+    @Test
+    void ordinaryPositionStillSerializesLikePreGuardDeliveries() throws Exception {
+        assertEquals("{\"deviceId\":null,\"uniqueId\":\"mirror-1\",\"latitude\":47.1,\"longitude\":8.5,"
+                        + "\"fixTime\":null,\"attributes\":null}",
+                mapper.writeValueAsString(position("mirror-1", null)));
     }
 
     @Test
