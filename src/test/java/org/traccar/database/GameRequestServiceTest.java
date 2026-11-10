@@ -2,6 +2,7 @@ package org.traccar.database;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import jakarta.ws.rs.BadRequestException;
 import jakarta.ws.rs.ForbiddenException;
 import jakarta.ws.rs.NotFoundException;
@@ -366,6 +367,50 @@ public class GameRequestServiceTest {
         assertTrue(forPlayer.get("speedhunt").get("active").asBoolean());
         assertFalse(forPlayer.has("participants"), "players never learn whom a speedhunt targets");
         assertFalse(forPlayer.has("limits"));
+    }
+
+    @Test
+    void participantOverviewShowsCatchStateForCurrentMembersOnly() throws Exception {
+        long otherSession = sessions.create("Other game", 4, mapper.readTree("{}")).id();
+        execute("UPDATE tc_game_session_members SET role = 'supporter' WHERE userid = 21");
+        execute("UPDATE tc_game_session_members SET assigneddeviceid = 104 WHERE userid = 10");
+        execute("INSERT INTO tc_game_session_members VALUES("
+                + otherSession + ",30,'player',1,103,'other-player')");
+        var player = requests.membership(20);
+        var supporter = requests.membership(21);
+        var document = mapper.readTree("""
+                {"lastSpeedhuntDeviceId":101,"participants":[
+                  {"deviceId":101,"name":"Anna","role":"player","caught":false,
+                   "speedhunt":{"running":true,"pings":1},"break":{"active":false}},
+                  {"deviceId":102,"name":"Ben","role":"supporter","caught":true,
+                   "break":{"active":true},"fakes":[{"id":1}],"location":{"latitude":47}},
+                  {"deviceId":103,"name":"Other session","role":"player","caught":false},
+                  {"deviceId":104,"name":"Hunter","role":"player","caught":false},
+                  {"deviceId":105,"name":"Removed participant","role":"supporter","caught":false},
+                  {"deviceId":102,"name":"Duplicate","role":"supporter","caught":false}]}
+                """);
+        deliver(null, document);
+
+        var expected = mapper.readTree("""
+                [{"deviceId":101,"name":"Anna","role":"player","caught":false},
+                 {"deviceId":102,"name":"Ben","role":"supporter","caught":true}]
+                """);
+        for (var member : List.of(player, supporter)) {
+            var view = requests.status(member).status();
+            assertEquals(expected, mapper.readTree(view.path("participantOverview").toString()));
+            assertFalse(view.has("participants"));
+            assertFalse(view.has("lastSpeedhuntDeviceId"));
+        }
+        assertFalse(requests.status(requests.membership(10)).status().has("participantOverview"));
+        var spectator = new GameRequestService.Membership(sessionId, 31, "spectator", null);
+        assertFalse(requests.status(spectator).status().has("participantOverview"));
+        assertEquals(mapper.createArrayNode(),
+                requests.status(requests.membership(30)).status().path("participantOverview"));
+
+        var ben = (ObjectNode) document.path("participants").get(1);
+        ben.put("caught", false);
+        deliver(null, document);
+        assertFalse(requests.status(player).status().path("participantOverview").get(1).get("caught").booleanValue());
     }
 
     @Test

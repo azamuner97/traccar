@@ -8,6 +8,7 @@ package org.traccar.database;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import jakarta.inject.Inject;
@@ -466,7 +467,7 @@ public class GameRequestService {
 
     /**
      * Hunters and spectators see per-participant speedhunt state and breaks, with roster labels for hunters;
-     * players and supporters see anonymous speedhunt progress and their own break.
+     * players and supporters see the catch roster, anonymous speedhunt progress and their own break.
      */
     public Status status(Membership member) throws Exception {
         return transaction(connection -> {
@@ -521,14 +522,50 @@ public class GameRequestService {
                     }
                 }
             }
-            if (("player".equals(member.role()) || "supporter".equals(member.role()))
-                    && member.assignedDeviceId() != null) {
-                // Owners see their own armed fake plans; nobody else ever does.
-                filtered.set("fakes",
-                        GameJokerService.ownFakes(connection, member.gameSessionId(), member.assignedDeviceId()));
+            if ("player".equals(member.role()) || "supporter".equals(member.role())) {
+                filtered.set("participantOverview", participantOverview(connection, member.gameSessionId(), document));
+                if (member.assignedDeviceId() != null) {
+                    // Owners see their own armed fake plans; nobody else ever does.
+                    filtered.set("fakes",
+                            GameJokerService.ownFakes(connection, member.gameSessionId(), member.assignedDeviceId()));
+                }
             }
             return new Status(member.gameSessionId(), member.role(), active, now().toString(), revision, filtered);
         });
+    }
+
+    private static ArrayNode participantOverview(Connection connection, long gameSessionId, JsonNode document)
+            throws SQLException {
+        ArrayNode result = JsonNodeFactory.instance.arrayNode();
+        if (document == null || !document.path("participants").isArray()) {
+            return result;
+        }
+        Map<Long, String> roles = new HashMap<>();
+        try (var query = connection.prepareStatement("SELECT assigneddeviceid,role FROM tc_game_session_members"
+                + " WHERE gamesessionid = ? AND role IN ('player','supporter') AND assigneddeviceid IS NOT NULL"
+                + " ORDER BY userid")) {
+            query.setLong(1, gameSessionId);
+            try (var rows = query.executeQuery()) {
+                while (rows.next()) {
+                    roles.putIfAbsent(rows.getLong("assigneddeviceid"), rows.getString("role"));
+                }
+            }
+        }
+        for (JsonNode item : document.path("participants")) {
+            JsonNode id = item.path("deviceId");
+            JsonNode caught = item.path("caught");
+            if (id.isIntegralNumber() && id.canConvertToLong() && id.asLong() > 0 && caught.isBoolean()) {
+                long deviceId = id.asLong();
+                String role = roles.remove(deviceId);
+                if (role != null) {
+                    String name = text(item.path("name").textValue(), 128);
+                    result.addObject().put("deviceId", deviceId)
+                            .put("name", name == null || name.isBlank() ? "#" + deviceId : name)
+                            .put("role", role).put("caught", caught.booleanValue());
+                }
+            }
+        }
+        return result;
     }
 
     private static boolean liveShareUnexpired(JsonNode end, Instant now) {
