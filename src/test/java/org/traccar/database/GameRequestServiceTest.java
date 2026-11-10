@@ -125,7 +125,9 @@ public class GameRequestServiceTest {
         sessions = new GameSessionService(source, mapper,
                 new GameCredentialCipher(Base64.getEncoder().encodeToString(new byte[32])));
         sessionId = sessions.create("Night", 4, mapper.readTree("{}")).id();
-        sessions.updateResources(sessionId, 1, 900L, mapper.readTree("{}"), List.of(
+        sessions.updateResources(sessionId, 1, 900L, mapper.readTree("""
+                {"groups":{"player_group":{"name":"Anarchist:in"},"hunter_group":{"name":"Tschugger"}}}
+                """), List.of(
                 new GameSessionService.Member(10, "hunter", 1, null, "hunter1"),
                 new GameSessionService.Member(11, "hunter", 2, null, "hunter2"),
                 new GameSessionService.Member(20, "player", 1, 101L, "player1"),
@@ -181,8 +183,10 @@ public class GameRequestServiceTest {
 
         var request = requests.submit(hunter, ping(101, 3));
         assertEquals("pending", request.status());
-        assertEquals("Anna", request.targetLabel());
-        assertEquals("Hunter One", request.requesterLabel());
+        assertEquals("Anarchist:in 1", request.targetLabel());
+        assertEquals("Tschugger 1", request.requesterLabel());
+        assertEquals(101L, request.targetDeviceId());
+        assertEquals(3L, request.baseRevision());
         // Simultaneous hunters cannot queue a second action on the same participant.
         assertEquals(409, status(assertThrows(WebApplicationException.class,
                 () -> requests.submit(requests.membership(11), ping(101, 3)))));
@@ -248,29 +252,45 @@ public class GameRequestServiceTest {
     void lifecycleThroughDecisionClaimAndEffects() throws Exception {
         var hunter = requests.membership(10);
         long id = requests.submit(hunter, ping(101, 3)).id();
-        assertTrue(requests.decide(sessionId, id, "await", "Waiting for the operator", null).approvalRequired());
+        assertTrue(requests.decide(sessionId, id, "await", "Waiting for Anna", null).approvalRequired());
+        var awaiting = requests.list(hunter, 0).getFirst();
+        assertTrue(awaiting.approvalRequired());
+        assertNull(awaiting.message());
         assertEquals("approved", requests.decide(sessionId, id, "approve", null, null).status());
         assertEquals("executing", requests.claim(sessionId, id, epoch).status());
         assertEquals(409, status(assertThrows(WebApplicationException.class,
                 () -> requests.claim(sessionId, id, epoch))));
 
-        var outcome = deliver(List.of(new GameRequestService.Completion(id, "succeeded", "Ping 2 of 4 sent",
+        var outcome = deliver(List.of(new GameRequestService.Completion(id, "succeeded", "Ping sent for Anna",
                 "operator detail")), mapper.readTree("{\"participants\":[{\"deviceId\":101,\"name\":\"Anna\","
                 + "\"speedhunt\":{\"revision\":4,\"running\":true}}]}"));
         assertEquals(List.of(new GameEffectsService.RequestOutcome(id, "succeeded")), outcome.requests());
         assertEquals(2L, outcome.statusRevision());
         var seen = requests.list(hunter, 0).getFirst();
         assertEquals("succeeded", seen.status());
-        assertEquals("Ping 2 of 4 sent", seen.message());
+        assertEquals("Anarchist:in 1", seen.targetLabel());
+        assertEquals("Tschugger 1", seen.requesterLabel());
+        assertNull(seen.message());
         assertNull(seen.detail(), "operator detail stays private");
-        assertEquals("operator detail", requests.operatorList(sessionId, false, 0).getFirst().detail());
+        var operator = requests.operatorList(sessionId, false, 0).getFirst();
+        assertEquals("operator detail", operator.detail());
+        assertEquals("Anna", operator.targetLabel());
+        assertEquals("Hunter One", operator.requesterLabel());
+        var spectator = new GameRequestService.Membership(sessionId, 30, "spectator", null);
+        var spectatorRequest = requests.list(spectator, 0).getFirst();
+        assertEquals("Anna", spectatorRequest.targetLabel());
+        assertEquals("Ping sent for Anna", spectatorRequest.message());
 
         // Cancelling and rejecting only apply to open requests.
         assertEquals(409, status(assertThrows(WebApplicationException.class, () -> requests.cancel(hunter, id))));
         long second = requests.submit(hunter, new GameRequestService.Submission(
                 "speedhuntTerminate", 101L, 4L, null)).id();
         assertThrows(ForbiddenException.class, () -> requests.cancel(requests.membership(11), second));
-        assertEquals("cancelled", requests.cancel(hunter, second).status());
+        var cancelled = requests.cancel(hunter, second);
+        assertEquals("cancelled", cancelled.status());
+        assertEquals("Anarchist:in 1", cancelled.targetLabel());
+        assertEquals("Tschugger 1", cancelled.requesterLabel());
+        assertNull(cancelled.message());
     }
 
     @Test
@@ -300,12 +320,40 @@ public class GameRequestServiceTest {
         var forHunter = requests.status(requests.membership(10));
         assertTrue(forHunter.controllerActive());
         assertEquals(2, forHunter.status().get("participants").size());
+        assertEquals("Anarchist:in 1", forHunter.status().path("participants").path(0).path("name").asText());
         assertTrue(forHunter.status().get("speedhunt").get("active").asBoolean());
 
         var forPlayer = requests.status(requests.membership(21)).status();
         assertTrue(forPlayer.get("speedhunt").get("active").asBoolean());
         assertFalse(forPlayer.has("participants"), "players never learn whom a speedhunt targets");
         assertFalse(forPlayer.has("limits"));
+    }
+
+    @Test
+    void hunterStatusUsesRosterLabelsEvenWhenPublishedNamesAndMetadataDiffer() throws Exception {
+        execute("UPDATE tc_game_session_members SET role = 'supporter', number = NULL WHERE userid = 21");
+        publish("""
+                {"lastSpeedhuntDeviceId":101,"participants":[
+                  {"deviceId":101,"name":"Anarchist:in 1 (Anna)","role":"player","caught":false,
+                   "speedhunt":{"revision":3,"running":true,"pings":1,
+                    "pingHistory":[{"number":1,"sentAt":"2026-11-09T12:00:00Z","name":"Anna"}]},
+                   "break":{"active":true,"endsAt":"2026-11-09T12:30:00Z","name":"Anna"}},
+                  {"deviceId":102,"name":"Ben","role":"supporter"},
+                  {"deviceId":103,"name":"Cleo"}]}
+                """);
+        var hunter = requests.status(requests.membership(10)).status();
+        assertEquals(101, hunter.path("lastSpeedhuntDeviceId").asInt());
+        assertEquals(mapper.readTree("""
+                [{"deviceId":101,"name":"Anarchist:in 1","role":"player","caught":false,
+                  "speedhunt":{"revision":3,"running":true,"pings":1,
+                   "pingHistory":[{"number":1,"sentAt":"2026-11-09T12:00:00Z"}]},
+                  "break":{"active":true,"endsAt":"2026-11-09T12:30:00Z"}},
+                 {"deviceId":102,"name":"Supporter","role":"supporter"},
+                 {"deviceId":103,"name":"Participant"}]
+                """), hunter.path("participants"));
+        var spectator = new GameRequestService.Membership(sessionId, 30, "spectator", null);
+        assertEquals("Anarchist:in 1 (Anna)", requests.status(spectator).status()
+                .path("participants").path(0).path("name").asText());
     }
 
     @Test
@@ -687,6 +735,7 @@ public class GameRequestServiceTest {
                     cells[index]));
         }
         entries.add(new GameSessionService.EntryInput(base.toString(), "Ben", ""));
+        entries.add(new GameSessionService.EntryInput(base.plusSeconds(4200).toString(), "Unknown", ""));
         Instant old = clock.now.truncatedTo(java.time.temporal.ChronoUnit.MINUTES).minusSeconds(7200);
         entries.add(new GameSessionService.EntryInput(old.toString(), "Anna", ""));
         var published = sessions.publishTimetable(sessionId, 0, mapper.readTree("[\"Time\",\"Anna\",\"Ben\"]"),
@@ -698,21 +747,26 @@ public class GameRequestServiceTest {
         java.util.function.IntFunction<Long> anna = index -> ids.get("Anna@" + base.plusSeconds(600L * index));
         sessions.updateTimetableProgress(sessionId, List.of(new GameSessionService.Progress(anna.apply(4), "sent")));
 
-        // Hunters and spectators see every ping that reaches hunters, an operator coordinate like any other, and
-        // never the cell content.
-        var hunters = jokers.timetable(sessionId, "hunter", null);
+        // Spectators still see each ping that reaches hunters, including operator coordinates as ordinary pings.
+        var spectators = jokers.timetable(sessionId, "spectator", null);
         assertEquals(List.of(anna.apply(0), ids.get("Ben@" + base), anna.apply(4), anna.apply(5), anna.apply(6)),
-                hunters.stream().map(GameJokerService.TimetablePing::entryId).toList());
+                spectators.stream().map(GameJokerService.TimetablePing::entryId).toList());
         assertEquals(List.of(101L, 102L, 101L, 101L, 101L),
-                hunters.stream().map(GameJokerService.TimetablePing::deviceId).toList());
-        assertEquals("sent", hunters.get(2).state());
-        assertNotNull(hunters.get(2).stateAt());
-        assertEquals("scheduled", hunters.get(3).state());
-        assertTrue(hunters.stream().allMatch(item -> item.fakeAllowed() == null));
-        String serialized = mapper.writeValueAsString(hunters);
+                spectators.stream().map(GameJokerService.TimetablePing::deviceId).toList());
+        assertEquals("sent", spectators.get(2).state());
+        assertNotNull(spectators.get(2).stateAt());
+        assertEquals("scheduled", spectators.get(3).state());
+        assertTrue(spectators.stream().allMatch(item -> item.fakeAllowed() == null));
+        String serialized = mapper.writeValueAsString(spectators);
         assertFalse(serialized.contains("47.1") || serialized.contains("2P") || serialized.contains("content"),
                 serialized);
-        assertEquals(hunters, jokers.timetable(sessionId, "spectator", null));
+
+        var hunters = jokers.hunterTimetable(sessionId);
+        assertEquals(List.of(base, base.plusSeconds(2400), base.plusSeconds(3000), base.plusSeconds(3600)),
+                hunters.stream().map(slot -> Instant.parse(slot.scheduledAt())).toList());
+        for (var slot : hunters) {
+            assertEquals(mapper.createObjectNode().put("scheduledAt", slot.scheduledAt()), mapper.valueToTree(slot));
+        }
 
         // Players see only their own pings that can carry a fake, and whether one still can.
         jokers.change(sessionId, new GameJokerService.Change(101L, GameJokerService.FAKE_PING, 1, null),
@@ -744,7 +798,7 @@ public class GameRequestServiceTest {
         entries.add(new GameSessionService.EntryInput(now.plusSeconds(900).toString(), "Anna", ""));
         sessions.publishTimetable(sessionId, 0, mapper.readTree("[\"Time\",\"Anna\",\"Ben\"]"),
                 mapper.readTree("{}"), entries);
-        for (var view : List.of(jokers.timetable(sessionId, "hunter", null),
+        for (var view : List.of(jokers.timetable(sessionId, "spectator", null),
                 jokers.timetable(sessionId, "player", 102L))) {
             var times = view.stream().map(item -> Instant.parse(item.scheduledAt())).toList();
             assertEquals(times.stream().sorted().toList(), times, "oldest first");
@@ -753,10 +807,32 @@ public class GameRequestServiceTest {
             assertEquals(now.minusSeconds(90L * GameJokerService.TIMETABLE_PAST_PINGS), times.getFirst());
             assertTrue(times.contains(now.plusSeconds(600)), "upcoming pings are always listed");
         }
-        assertEquals(2, jokers.timetable(sessionId, "hunter", null).stream()
+        assertEquals(2, jokers.hunterTimetable(sessionId).stream()
                 .filter(item -> Instant.parse(item.scheduledAt()).isAfter(clock.now)).count());
         assertEquals(List.of(101L), jokers.timetable(sessionId, "player", 101L).stream()
                 .map(GameJokerService.TimetablePing::deviceId).toList(), "only the owner's own pings");
+    }
+
+    @Test
+    void hunterTimetableAppliesBothLimitsAfterCollapsingSimultaneousPings() throws Exception {
+        var jokers = new GameJokerService(source);
+        Instant now = clock.now.truncatedTo(java.time.temporal.ChronoUnit.MINUTES);
+        List<GameSessionService.EntryInput> entries = new java.util.ArrayList<>();
+        for (int index = -GameJokerService.TIMETABLE_PAST_PINGS - 1;
+                index <= GameJokerService.TIMETABLE_PINGS + 1; index++) {
+            if (index != 0) {
+                String time = now.plusSeconds(60L * index).toString();
+                entries.add(new GameSessionService.EntryInput(time, "Anna", ""));
+                entries.add(new GameSessionService.EntryInput(time, "Ben", "2H"));
+            }
+        }
+        sessions.publishTimetable(sessionId, 0, mapper.readTree("[\"Time\",\"Anna\",\"Ben\"]"),
+                mapper.readTree("{}"), entries);
+
+        var times = jokers.hunterTimetable(sessionId).stream().map(slot -> Instant.parse(slot.scheduledAt())).toList();
+        assertEquals(java.util.stream.IntStream.rangeClosed(-GameJokerService.TIMETABLE_PAST_PINGS,
+                        GameJokerService.TIMETABLE_PINGS).filter(index -> index != 0)
+                .mapToObj(index -> now.plusSeconds(60L * index)).toList(), times);
     }
 
     @Test

@@ -144,12 +144,13 @@ public class GameJokerService {
     public record Own(List<Inventory> inventories, List<Reservation> reservations,
                       List<FakeEntry> timetableEntries, Integer pingsPerSpeedhunt) { }
     /**
-     * One timetable ping a member may see: its time, the participant's tracker and its state ({@code scheduled},
-     * {@code sent}, {@code skipped} or {@code failed}). Owners also learn whether a fake can still be planned on it.
-     * The cell content (target codes, operator coordinates) is never included.
+     * One timetable ping an owner or spectator may see: its time, the participant's tracker and its state
+     * ({@code scheduled}, {@code sent}, {@code skipped} or {@code failed}). Owners also learn whether a fake can
+     * still be planned on it. The cell content (target codes, operator coordinates) is never included.
      */
     public record TimetablePing(long entryId, String scheduledAt, long deviceId, String state, String stateAt,
                                 Boolean fakeAllowed) { }
+    public record TimetableSlot(String scheduledAt) { }
     /**
      * The Tool's report on an armed fake: a timetable fake {@code used} (delivered) or {@code released}, a speedhunt
      * fake {@code bound} to the run ({@code run}) whose first ping this delivery sends.
@@ -377,15 +378,26 @@ public class GameJokerService {
     }
 
     /**
-     * The timetable pings a member may see. Players and supporters see their own pings that can carry a fake;
-     * hunters and spectators see every ping that reaches hunters, named only by the participant's tracker, so an
-     * operator coordinate or a fake looks exactly like a real ping.
+     * The timetable pings for players and supporters (their own pings that can carry a fake) and spectators
+     * (every ping that reaches hunters).
      */
     public List<TimetablePing> timetable(long gameSessionId, String role, Long ownDeviceId) throws Exception {
         boolean owner = ("player".equals(role) || "supporter".equals(role)) && ownDeviceId != null;
-        if (!owner && !"hunter".equals(role) && !"spectator".equals(role)) {
+        if (!owner && !"spectator".equals(role)) {
             throw new ForbiddenException("The timetable is shown to players, supporters, hunters and spectators");
         }
+        return timetable(gameSessionId, owner ? ownDeviceId : null, false);
+    }
+
+    /** Hunters see only the distinct times at which at least one ping reaches them. */
+    public List<TimetableSlot> hunterTimetable(long gameSessionId) throws Exception {
+        return timetable(gameSessionId, null, true).stream()
+                .map(ping -> new TimetableSlot(ping.scheduledAt())).toList();
+    }
+
+    private List<TimetablePing> timetable(long gameSessionId, Long ownDeviceId, boolean distinctTimes)
+            throws Exception {
+        boolean owner = ownDeviceId != null;
         return transaction(connection -> {
             Map<String, Long> trackers = new HashMap<>();
             try (var query = connection.prepareStatement("SELECT d.id,d.name FROM tc_game_session_members m"
@@ -412,11 +424,11 @@ public class GameJokerService {
                 return List.<TimetablePing>of();
             }
             Instant now = now();
-            Long own = owner ? ownDeviceId : null;
-            List<TimetablePing> result = timetablePings(connection, gameSessionId, ownName, now, true, own, trackers,
-                    taken);
+            List<TimetablePing> result = timetablePings(connection, gameSessionId, ownName, now, true, ownDeviceId,
+                    trackers, taken, distinctTimes);
             java.util.Collections.reverse(result);
-            result.addAll(timetablePings(connection, gameSessionId, ownName, now, false, own, trackers, taken));
+            result.addAll(timetablePings(connection, gameSessionId, ownName, now, false, ownDeviceId, trackers, taken,
+                    distinctTimes));
             return result;
         });
     }
@@ -426,7 +438,8 @@ public class GameJokerService {
      * or upcoming ones (oldest first, at most {@link #TIMETABLE_PINGS}) that a member may see.
      */
     private static List<TimetablePing> timetablePings(Connection connection, long gameSessionId, String ownName,
-            Instant now, boolean past, Long ownDeviceId, Map<String, Long> trackers, Set<Long> taken)
+            Instant now, boolean past, Long ownDeviceId, Map<String, Long> trackers, Set<Long> taken,
+            boolean distinctTimes)
             throws SQLException {
         boolean owner = ownDeviceId != null;
         int limit = past ? TIMETABLE_PAST_PINGS : TIMETABLE_PINGS;
@@ -448,15 +461,20 @@ public class GameJokerService {
             }
             query.setTimestamp(index, Timestamp.from(now), utc());
             try (var rows = query.executeQuery()) {
-                while (rows.next() && result.size() < limit) {
+                Instant previous = null;
+                while (result.size() < limit && rows.next()) {
                     Long tracker = trackers.get(rows.getString("participant"));
                     String content = rows.getString("content");
                     if (tracker == null || owner && (!tracker.equals(ownDeviceId) || !fakeEligible(content))
                             || !owner && !hunterFacing(content)) {
                         continue;
                     }
-                    long id = rows.getLong("id");
                     Instant scheduled = rows.getTimestamp("scheduledat", utc()).toInstant();
+                    if (distinctTimes && scheduled.equals(previous)) {
+                        continue;
+                    }
+                    previous = scheduled;
+                    long id = rows.getLong("id");
                     Boolean fakeAllowed = owner ? scheduled.isAfter(cutoff) && !taken.contains(id) : null;
                     result.add(new TimetablePing(id, scheduled.toString(), tracker, rows.getString("status"),
                             iso(rows, "statusat"), fakeAllowed));

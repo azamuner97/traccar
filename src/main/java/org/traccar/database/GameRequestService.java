@@ -29,6 +29,7 @@ import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Calendar;
+import java.util.HashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -89,6 +90,8 @@ public class GameRequestService {
     public record Completion(Long id, String status, String message, String detail) { }
     public record Status(long gameSessionId, String role, boolean controllerActive, String serverTime,
                          long revision, JsonNode status) { }
+
+    private record HunterLabels(Map<Long, String> byDevice, Map<Long, String> byUser) { }
 
     @FunctionalInterface
     private interface Work<T> {
@@ -167,13 +170,65 @@ public class GameRequestService {
                 iso(rows, "createdat"), iso(rows, "expiresat"), iso(rows, "decidedat"), iso(rows, "completedat"));
     }
 
-    /** The view a member sees: the operator-only detail is removed. */
-    private static Request memberView(Request request) {
+    /** Hunters receive roster labels and structured request status instead of free-text outcomes. */
+    private static Request memberView(Request request, HunterLabels labels) {
+        String requester = labels == null ? request.requesterLabel()
+                : labels.byUser().getOrDefault(request.requesterUserId(), roleName(request.requesterRole()));
+        String target = labels == null ? request.targetLabel()
+                : labels.byDevice().getOrDefault(request.targetDeviceId(), "Participant");
         return new Request(request.id(), request.gameSessionId(), request.type(), request.requesterUserId(),
-                request.requesterLabel(), request.requesterRole(), request.targetDeviceId(), request.targetLabel(),
+                requester, request.requesterRole(), request.targetDeviceId(), target,
                 request.baseRevision(), request.parameters(), request.status(), request.approvalRequired(),
-                request.message(), null, request.createdAt(), request.expiresAt(), request.decidedAt(),
-                request.completedAt());
+                labels == null ? request.message() : null, null, request.createdAt(), request.expiresAt(),
+                request.decidedAt(), request.completedAt());
+    }
+
+    private static String roleName(String role) {
+        return switch (role) {
+            case "player" -> "Player";
+            case "supporter" -> "Supporter";
+            case "hunter" -> "Hunter";
+            default -> "Participant";
+        };
+    }
+
+    private HunterLabels hunterLabels(Connection connection, Membership member) throws Exception {
+        if (!"hunter".equals(member.role())) {
+            return null;
+        }
+        JsonNode groups = JsonNodeFactory.instance.objectNode();
+        try (var query = connection.prepareStatement("SELECT resources FROM tc_game_sessions WHERE id = ?")) {
+            query.setLong(1, member.gameSessionId());
+            try (var rows = query.executeQuery()) {
+                if (rows.next()) {
+                    groups = objectMapper.readTree(rows.getString(1)).path("groups");
+                }
+            }
+        }
+        Map<Long, String> byDevice = new HashMap<>();
+        Map<Long, String> byUser = new HashMap<>();
+        try (var query = connection.prepareStatement("SELECT userid,role,number,assigneddeviceid"
+                + " FROM tc_game_session_members WHERE gamesessionid = ?"
+                + " AND role IN ('player','supporter','hunter') ORDER BY userid")) {
+            query.setLong(1, member.gameSessionId());
+            try (var rows = query.executeQuery()) {
+                while (rows.next()) {
+                    String role = rows.getString("role");
+                    String group = groups.path(role + "_group").path("name").asText("").strip();
+                    int number = rows.getInt("number");
+                    String label = group.isEmpty() ? roleName(role) : group;
+                    if (number > 0) {
+                        label += " " + number;
+                    }
+                    byUser.put(rows.getLong("userid"), label);
+                    Long device = nullableLong(rows, "assigneddeviceid");
+                    if (device != null && !"hunter".equals(role)) {
+                        byDevice.putIfAbsent(device, label);
+                    }
+                }
+            }
+        }
+        return new HunterLabels(byDevice, byUser);
     }
 
     private Request load(Connection connection, long gameSessionId, long id, boolean lock) throws Exception {
@@ -299,7 +354,15 @@ public class GameRequestService {
         if (limit > 0) {
             result.put("pingLimit", limit);
         }
-        if (includeHistory && hunt.path("pingHistory").isArray()) {
+        if (includeHistory) {
+            copyPingHistory(hunt, result);
+        }
+        return result;
+    }
+
+    private static void copyPingHistory(JsonNode hunt, ObjectNode result) {
+        if (hunt.path("pingHistory").isArray()) {
+            int count = positiveInt(hunt.path("pings"));
             var pings = new TreeMap<Integer, Instant>();
             for (JsonNode ping : hunt.get("pingHistory")) {
                 int number = positiveInt(ping.path("number"));
@@ -314,7 +377,6 @@ public class GameRequestService {
             var history = result.putArray("pingHistory");
             pings.forEach((number, time) -> history.addObject().put("number", number).put("sentAt", time.toString()));
         }
-        return result;
     }
 
     /**
@@ -387,7 +449,7 @@ public class GameRequestService {
     }
 
     /**
-     * The status a member may see. Hunters and spectators see the named speedhunt state and who is on a break;
+     * Hunters and spectators see per-participant speedhunt state and breaks, with roster labels for hunters;
      * players and supporters see anonymous speedhunt progress and their own break.
      */
     public Status status(Membership member) throws Exception {
@@ -405,7 +467,8 @@ public class GameRequestService {
                 }
             }
             boolean active = executing(connection, member.gameSessionId());
-            JsonNode filtered = filter(document, member.role(), active, member.assignedDeviceId());
+            JsonNode filtered = filter(document, member.role(), active, member.assignedDeviceId(),
+                    document == null ? null : hunterLabels(connection, member));
             if (("player".equals(member.role()) || "supporter".equals(member.role()))
                     && member.assignedDeviceId() != null) {
                 // Owners see their own armed fake plans; nobody else ever does.
@@ -426,15 +489,47 @@ public class GameRequestService {
         });
     }
 
-    static JsonNode filter(JsonNode document, String role, boolean active, Long deviceId) {
+    private static ObjectNode fields(JsonNode source, String... names) {
+        ObjectNode result = JsonNodeFactory.instance.objectNode();
+        for (String name : names) {
+            JsonNode value = source.path(name);
+            if (value.isValueNode()) {
+                result.set(name, value);
+            }
+        }
+        return result;
+    }
+
+    private static JsonNode filter(JsonNode document, String role, boolean active, Long deviceId, HunterLabels labels) {
         ObjectNode result = JsonNodeFactory.instance.objectNode();
         result.set("speedhunt", speedhuntView(active ? document : null, true));
-        if (("hunter".equals(role) || "spectator".equals(role)) && document != null) {
+        if (labels != null) {
+            var participants = result.putArray("participants");
+            for (JsonNode item : document.path("participants")) {
+                JsonNode device = item.path("deviceId");
+                if (device.isIntegralNumber() && device.canConvertToLong() && device.asLong() > 0) {
+                    ObjectNode participant = fields(item, "deviceId", "role", "caught");
+                    participant.put("name", labels.byDevice().getOrDefault(device.asLong(), "Participant"));
+                    JsonNode hunt = item.path("speedhunt");
+                    if (hunt.isObject()) {
+                        ObjectNode speedhunt = fields(hunt, "operation", "running", "pings", "startsRun", "live",
+                                "liveUntil", "revision");
+                        copyPingHistory(hunt, speedhunt);
+                        participant.set("speedhunt", speedhunt);
+                    }
+                    if (item.path("break").isObject()) {
+                        participant.set("break", fields(item.get("break"), "active", "startedAt", "endsAt"));
+                    }
+                    participants.add(participant);
+                }
+            }
+            result.set("limits", document.path("limits").deepCopy());
+            if (document.has("lastSpeedhuntDeviceId")) {
+                result.set("lastSpeedhuntDeviceId", document.get("lastSpeedhuntDeviceId"));
+            }
+        } else if ("spectator".equals(role) && document != null) {
             result.set("participants", document.path("participants").deepCopy());
             result.set("limits", document.path("limits").deepCopy());
-            if ("hunter".equals(role) && document.has("lastSpeedhuntDeviceId")) {
-                result.set("lastSpeedhuntDeviceId", document.get("lastSpeedhuntDeviceId").deepCopy());
-            }
         } else if (("player".equals(role) || "supporter".equals(role)) && deviceId != null) {
             JsonNode own = participant(document, deviceId);
             if (own != null && own.path("break").isObject()) {
@@ -794,7 +889,7 @@ public class GameRequestService {
                 GameJokerService.reserve(connection, member.gameSessionId(), accepted.targetDeviceId(), jokerType, id,
                         userLabel(connection, member.userId()), withPlan ? parameters : null);
             }
-            return memberView(load(connection, member.gameSessionId(), id, false));
+            return memberView(load(connection, member.gameSessionId(), id, false), hunterLabels(connection, member));
         });
     }
 
@@ -878,6 +973,7 @@ public class GameRequestService {
         int limit = requestedLimit <= 0 ? 50 : Math.min(requestedLimit, 200);
         boolean shared = "hunter".equals(member.role()) || "spectator".equals(member.role());
         return transaction(connection -> {
+            HunterLabels labels = hunterLabels(connection, member);
             List<Request> result = new ArrayList<>();
             String sql = "SELECT * FROM tc_game_requests WHERE gamesessionid = ?"
                     + (shared ? " AND (requesteruserid = ? OR type IN ("
@@ -890,7 +986,7 @@ public class GameRequestService {
                 query.setMaxRows(limit);
                 try (var rows = query.executeQuery()) {
                     while (rows.next()) {
-                        result.add(memberView(request(rows)));
+                        result.add(memberView(request(rows), labels));
                     }
                 }
             }
@@ -909,7 +1005,7 @@ public class GameRequestService {
                 throw conflict("The request can no longer be cancelled");
             }
             update(connection, id, CANCELLED, "Cancelled by the requester", null, false);
-            return memberView(load(connection, member.gameSessionId(), id, false));
+            return memberView(load(connection, member.gameSessionId(), id, false), hunterLabels(connection, member));
         });
     }
 

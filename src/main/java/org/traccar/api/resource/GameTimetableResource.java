@@ -18,9 +18,8 @@ import org.traccar.database.GameRequestService;
 import java.util.List;
 
 /**
- * The timetable pings the signed-in member may see, with their state. Players and supporters see their own pings
- * that can carry a fake; hunters and spectators see every ping that reaches hunters, without its cell content, so
- * operator coordinates and fakes look like real pings.
+ * The timetable pings the signed-in member may see. Hunters see distinct scheduled times. Spectators see each
+ * ping that reaches hunters, and players and supporters see their own pings that can carry a fake.
  */
 @Path("game-timetable")
 @Produces(MediaType.APPLICATION_JSON)
@@ -35,8 +34,11 @@ public class GameTimetableResource extends BaseResource {
     private GameJokerService jokers;
 
     @GET
-    public List<GameJokerService.TimetablePing> timetable() throws Exception {
+    public List<?> timetable() throws Exception {
         var member = requests.membership(getUserId());
+        if ("hunter".equals(member.role())) {
+            return jokers.hunterTimetable(member.gameSessionId());
+        }
         return jokers.timetable(member.gameSessionId(), member.role(), member.assignedDeviceId());
     }
 }

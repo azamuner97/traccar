@@ -4912,10 +4912,10 @@ paths:
     get:
       operationId: getGameTimetable
       summary: >-
-        The timetable pings the signed-in member may see, with their state: the 20 most recent ones of the
-        last hour and at most 200 upcoming ones. Players and supporters see their own pings that can carry a fake; hunters and spectators see every
-        ping that reaches hunters. The cell content is never included, so operator coordinates and fakes look
-        like real pings.
+        Hunters see only distinct scheduled times for pings that reach them. Spectators see each of those
+        pings with its state, and players and supporters see their own pings that can carry a fake. For each
+        role, the response includes up to 20 entries from the last hour and 200 upcoming entries. Cell contents
+        are excluded for all roles.
       tags:
         - Game Requests
       responses:
@@ -4926,7 +4926,9 @@ paths:
               schema:
                 type: array
                 items:
-                  $ref: '#/components/schemas/GameTimetablePing'
+                  oneOf:
+                    - $ref: '#/components/schemas/GameTimetableSlot'
+                    - $ref: '#/components/schemas/GameTimetablePing'
         '403':
           description: The account does not take part in a game
           content: {}
@@ -7013,6 +7015,7 @@ components:
           format: int64
         requesterLabel:
           type: [string, 'null']
+          description: The requester’s group and roster number in hunter responses
         requesterRole:
           type: string
         targetDeviceId:
@@ -7020,6 +7023,7 @@ components:
           format: int64
         targetLabel:
           type: [string, 'null']
+          description: The target’s group and roster number in hunter responses
         baseRevision:
           type: [integer, 'null']
           format: int64
@@ -7033,7 +7037,7 @@ components:
           description: True once the Tool queued it for the operator's approval
         message:
           type: [string, 'null']
-          description: Outcome or progress message for the requester
+          description: Outcome or progress message, null in hunter responses
         detail:
           type: [string, 'null']
           description: Operator-only detail; always null for members
@@ -7170,9 +7174,9 @@ components:
         status:
           type: object
           description: >-
-            Anonymous speedhunt progress for everyone; participants (with per-participant speedhunt revision and break) and
-            limits only for hunters and spectators; players and supporters see only their own break and their
-            own armed fake plans, which nobody else ever sees
+            Anonymous speedhunt progress for everyone. Hunters and spectators also see participants with
+            per-participant speedhunt revisions and breaks, and game limits. Hunters receive group and roster
+            number in the participant name field. Players and supporters see only their own break and armed fake plans.
           properties:
             speedhunt:
               allOf:
@@ -7323,9 +7327,6 @@ components:
         requestId:
           type: integer
           format: int64
-        armedAt:
-          type: string
-          format: date-time
     GameJokerOwn:
       type: object
       required: [inventories, reservations, timetableEntries, pingsPerSpeedhunt]
@@ -7360,6 +7361,15 @@ components:
                 format: date-time
               taken:
                 type: boolean
+    GameTimetableSlot:
+      type: object
+      description: One distinct scheduled time in a hunter's timetable
+      required: [scheduledAt]
+      additionalProperties: false
+      properties:
+        scheduledAt:
+          type: string
+          format: date-time
     GameTimetablePing:
       type: object
       required: [entryId, scheduledAt, deviceId, state, stateAt, fakeAllowed]
@@ -7387,7 +7397,7 @@ components:
           type: [boolean, 'null']
           description: >-
             For the owner: whether a fake can still be planned on this ping (at least 60 seconds ahead and none
-            planned yet); null for hunters and spectators
+            planned yet); null for spectators
     GameJokerOverview:
       type: object
       required: [inventories, reservations, boundFakes]
