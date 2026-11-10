@@ -7216,6 +7216,10 @@ components:
                   name:
                     type: string
                     description: Hunter-facing roster label
+                  reason:
+                    type: string
+                    maxLength: 500
+                    description: Live tracking reason supplied by the Tool, when available
                   endsAt:
                     type: string
                     format: date-time

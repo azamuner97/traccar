@@ -507,6 +507,11 @@ public class GameRequestService {
                             if (end.isTextual()) {
                                 item.set("endsAt", end);
                             }
+                            String reason = share.path("reason").asText("").strip();
+                            if (share.path("reason").isTextual() && !reason.isEmpty()
+                                    && reason.codePointCount(0, reason.length()) <= 500) {
+                                item.put("reason", reason);
+                            }
                         }
                     }
                 }
