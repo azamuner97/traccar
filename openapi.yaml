@@ -7219,7 +7219,11 @@ components:
                   reason:
                     type: string
                     maxLength: 500
-                    description: Live tracking reason supplied by the Tool, when available
+                    description: Operator-entered live tracking reason, when available
+                  source:
+                    type: string
+                    enum: [manual, geofence, speedhunt]
+                    description: How the share started, when published by the Tool
                   endsAt:
                     type: string
                     format: date-time

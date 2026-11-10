@@ -159,7 +159,8 @@ public class GameRequestServiceTest {
                   {"deviceId":101,"name":"Private Anna","role":"player"},
                   {"deviceId":102,"name":"Private Ben","role":"player","caught":true}],
                  "liveShares":[
-                  {"deviceId":101,"endsAt":"%s","name":"Private Anna","reason":" Public transport "},
+                  {"deviceId":101,"endsAt":"%s","name":"Private Anna","source":"geofence",
+                   "reason":" Public transport "},
                   {"deviceId":102},
                   {"deviceId":999}]}""".formatted(clock.now.plusSeconds(5));
         publish(status);
@@ -167,6 +168,7 @@ public class GameRequestServiceTest {
         var view = requests.status(hunter).status();
         assertEquals(1, view.path("liveShares").size());
         assertEquals("Anarchist:in 1", view.path("liveShares").get(0).path("name").asText());
+        assertEquals("geofence", view.path("liveShares").get(0).path("source").asText());
         assertEquals("Public transport", view.path("liveShares").get(0).path("reason").asText());
         assertFalse(view.has("liveShareExecution"));
         for (String role : List.of("player", "supporter", "spectator")) {

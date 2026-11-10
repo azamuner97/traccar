@@ -77,6 +77,7 @@ public class GameRequestService {
     public static final String BREAK_UNAVAILABLE = "A break cannot start right now; try again later";
     public static final String BREAK_OVERLAP = "This break would overlap another break of yours";
     private static final Set<String> SPEEDHUNT_PINGS = Set.of("speedhuntStaticPing", "speedhuntLivePing");
+    private static final Set<String> LIVE_SHARE_SOURCES = Set.of("manual", "geofence", "speedhunt");
     private static final String REPEAT_SPEEDHUNT = "The previous speedhunt was already on this participant";
     private static final String LIVE_DURATION_REQUIRED = "Set a positive live ping duration in the game settings";
     private static final Instant MAX_LIVE_DEADLINE = Instant.parse("9999-12-31T23:59:59Z");
@@ -506,6 +507,10 @@ public class GameRequestService {
                             ObjectNode item = shares.addObject().put("deviceId", device).put("name", name);
                             if (end.isTextual()) {
                                 item.set("endsAt", end);
+                            }
+                            String source = share.path("source").asText("");
+                            if (LIVE_SHARE_SOURCES.contains(source)) {
+                                item.put("source", source);
                             }
                             String reason = share.path("reason").asText("").strip();
                             if (share.path("reason").isTextual() && !reason.isEmpty()
