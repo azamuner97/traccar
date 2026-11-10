@@ -7203,6 +7203,22 @@ components:
               description: The member's own armed fakes (players and supporters only)
               items:
                 $ref: '#/components/schemas/GameJokerFakePlan'
+            liveShares:
+              type: array
+              description: Active participant live shares confirmed for hunters in the current execution (hunters only)
+              items:
+                type: object
+                required: [deviceId, name]
+                properties:
+                  deviceId:
+                    type: integer
+                    format: int64
+                  name:
+                    type: string
+                    description: Hunter-facing roster label
+                  endsAt:
+                    type: string
+                    format: date-time
     GameBreak:
       type: object
       required: [active]

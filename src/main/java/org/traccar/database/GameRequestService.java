@@ -30,6 +30,7 @@ import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Calendar;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -418,6 +419,20 @@ public class GameRequestService {
         return session != null && session == gameSessionId;
     }
 
+    private long liveShareExecution(Connection connection, long gameSessionId) throws SQLException {
+        try (var query = connection.prepareStatement("SELECT MAX(h.id) FROM tc_game_controller c"
+                + " JOIN tc_game_controller_history h ON h.epoch = c.epoch AND h.gamesessionid = c.gamesessionid"
+                + " WHERE c.id = 1 AND c.gamesessionid = ? AND c.state = ? AND c.expiresat > ?"
+                + " AND h.event = 'executing'")) {
+            query.setLong(1, gameSessionId);
+            query.setString(2, GameControllerService.STATE_ACTIVE);
+            query.setTimestamp(3, Timestamp.from(now()), utc());
+            try (var rows = query.executeQuery()) {
+                return rows.next() ? rows.getLong(1) : 0;
+            }
+        }
+    }
+
     private static String userLabel(Connection connection, long userId) throws SQLException {
         try (var query = connection.prepareStatement("SELECT name,email FROM tc_users WHERE id = ?")) {
             query.setLong(1, userId);
@@ -467,16 +482,54 @@ public class GameRequestService {
                 }
             }
             boolean active = executing(connection, member.gameSessionId());
-            JsonNode filtered = filter(document, member.role(), active, member.assignedDeviceId(),
-                    document == null ? null : hunterLabels(connection, member));
+            HunterLabels labels = document == null ? null : hunterLabels(connection, member);
+            ObjectNode filtered = filter(document, member.role(), active, member.assignedDeviceId(), labels);
+            if ("hunter".equals(member.role())) {
+                var shares = filtered.putArray("liveShares");
+                if (active && labels != null && document.path("liveShareExecution").asLong() > 0
+                        && document.path("liveShareExecution").asLong()
+                                == liveShareExecution(connection, member.gameSessionId())) {
+                    Instant current = now();
+                    Set<Long> included = new HashSet<>();
+                    for (JsonNode share : document.path("liveShares")) {
+                        JsonNode id = share.path("deviceId");
+                        if (!id.isIntegralNumber() || !id.canConvertToLong()) {
+                            continue;
+                        }
+                        long device = id.asLong();
+                        String name = labels.byDevice().get(device);
+                        JsonNode participant = participant(document, device);
+                        JsonNode end = share.path("endsAt");
+                        if (name != null && participant != null && !participant.path("caught").asBoolean()
+                                && !onBreak(participant, current) && liveShareUnexpired(end, current)
+                                && included.add(device)) {
+                            ObjectNode item = shares.addObject().put("deviceId", device).put("name", name);
+                            if (end.isTextual()) {
+                                item.set("endsAt", end);
+                            }
+                        }
+                    }
+                }
+            }
             if (("player".equals(member.role()) || "supporter".equals(member.role()))
                     && member.assignedDeviceId() != null) {
                 // Owners see their own armed fake plans; nobody else ever does.
-                ((ObjectNode) filtered).set("fakes",
+                filtered.set("fakes",
                         GameJokerService.ownFakes(connection, member.gameSessionId(), member.assignedDeviceId()));
             }
             return new Status(member.gameSessionId(), member.role(), active, now().toString(), revision, filtered);
         });
+    }
+
+    private static boolean liveShareUnexpired(JsonNode end, Instant now) {
+        if (end.isMissingNode() || end.isNull()) {
+            return true;
+        }
+        try {
+            return end.isTextual() && Instant.parse(end.asText()).isAfter(now);
+        } catch (java.time.format.DateTimeParseException error) {
+            return false;
+        }
     }
 
     /** Anonymous speedhunt progress in the requested session. Administrators may omit the session filter. */
@@ -500,7 +553,8 @@ public class GameRequestService {
         return result;
     }
 
-    private static JsonNode filter(JsonNode document, String role, boolean active, Long deviceId, HunterLabels labels) {
+    private static ObjectNode filter(
+            JsonNode document, String role, boolean active, Long deviceId, HunterLabels labels) {
         ObjectNode result = JsonNodeFactory.instance.objectNode();
         result.set("speedhunt", speedhuntView(active ? document : null, true));
         if (labels != null) {
@@ -565,7 +619,11 @@ public class GameRequestService {
         if (document == null || !document.isObject()) {
             throw new BadRequestException("Status must be a JSON object");
         }
-        JsonNode status = document.deepCopy();
+        ObjectNode status = document.deepCopy();
+        status.remove("liveShareExecution");
+        if (status.path("liveShares").isArray() && !status.path("liveShares").isEmpty()) {
+            status.put("liveShareExecution", liveShareExecution(connection, gameSessionId));
+        }
         JsonNode previous = statusDocument(connection, gameSessionId);
         for (JsonNode run : status.path("runningSpeedhunts")) {
             JsonNode old = runningSpeedhunt(previous, run.path("runToken").asText());

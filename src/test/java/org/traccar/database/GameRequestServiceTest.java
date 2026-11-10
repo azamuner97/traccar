@@ -151,6 +151,42 @@ public class GameRequestServiceTest {
         return deliver(null, mapper.readTree(status));
     }
 
+    @Test
+    void liveSharesUseHunterLabelsAndBelongToOneExecution() throws Exception {
+        clock.now = clock.now.truncatedTo(java.time.temporal.ChronoUnit.MILLIS);
+        String status = """
+                {"participants":[
+                  {"deviceId":101,"name":"Private Anna","role":"player"},
+                  {"deviceId":102,"name":"Private Ben","role":"player","caught":true}],
+                 "liveShares":[
+                  {"deviceId":101,"endsAt":"%s","name":"Private Anna"},
+                  {"deviceId":102},
+                  {"deviceId":999}]}""".formatted(clock.now.plusSeconds(5));
+        publish(status);
+        var hunter = requests.membership(10);
+        var view = requests.status(hunter).status();
+        assertEquals(1, view.path("liveShares").size());
+        assertEquals("Anarchist:in 1", view.path("liveShares").get(0).path("name").asText());
+        assertFalse(view.has("liveShareExecution"));
+        for (String role : List.of("player", "supporter", "spectator")) {
+            var member = new GameRequestService.Membership(sessionId, 20, role, 101L);
+            assertFalse(requests.status(member).status().has("liveShares"));
+        }
+
+        controller.setExecuting(1, epoch, null);
+        controller.setExecuting(1, epoch, sessionId);
+        assertTrue(requests.status(hunter).status().path("liveShares").isEmpty());
+        publish(status);
+        assertEquals(1, requests.status(hunter).status().path("liveShares").size());
+        var takeover = controller.takeover(1, "tool-instance-2", "Desk");
+        epoch = takeover.lease().epoch();
+        controller.setExecuting(1, epoch, sessionId);
+        assertTrue(requests.status(hunter).status().path("liveShares").isEmpty());
+        publish(status);
+        clock.now = clock.now.plusSeconds(5);
+        assertTrue(requests.status(hunter).status().path("liveShares").isEmpty());
+    }
+
     private GameEffectsService.Outcome deliver(List<GameRequestService.Completion> completions, JsonNode status)
             throws Exception {
         var delivery = new GameEffectsService.Delivery("delivery-" + UUID.randomUUID(), null, null, null, null,
