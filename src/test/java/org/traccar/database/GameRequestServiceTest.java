@@ -311,29 +311,61 @@ public class GameRequestServiceTest {
     @Test
     void speedhuntAlertFollowsPublishedStatusAndTheExecutingSession() throws Exception {
         long otherSession = sessions.create("Other game", 4, mapper.readTree("{}")).id();
-        assertTrue(requests.speedhuntActive(null));
-        assertTrue(requests.speedhuntActive(sessionId));
-        assertFalse(requests.speedhuntActive(otherSession));
+        var active = mapper.readTree("""
+                {"active":true,"pingCount":1,"pingLimit":4}
+                """);
+        var inactive = mapper.readTree("""
+                {"active":false}
+                """);
+        assertEquals(active, requests.speedhuntStatus(null));
+        assertEquals(active, requests.speedhuntStatus(sessionId));
+        assertEquals(inactive, requests.speedhuntStatus(otherSession));
 
         publish("""
                 {"participants":[{"deviceId":101,"speedhunt":{"operation":true,"running":false,"live":false}}]}
                 """);
-        assertFalse(requests.speedhuntActive(null));
-        assertFalse(requests.speedhuntActive(sessionId));
+        assertEquals(inactive, requests.speedhuntStatus(null));
+        assertEquals(inactive, requests.speedhuntStatus(sessionId));
 
         publish("""
                 {"participants":[{"deviceId":101,"speedhunt":{"running":false,"live":true}}]}
                 """);
-        assertTrue(requests.speedhuntActive(null));
-        assertTrue(requests.speedhuntActive(sessionId));
+        var pendingLive = mapper.readTree("""
+                {"active":true}
+                """);
+        assertEquals(pendingLive, requests.speedhuntStatus(null));
+        assertEquals(pendingLive, requests.speedhuntStatus(sessionId));
 
         controller.setExecuting(1, epoch, otherSession);
-        assertFalse(requests.speedhuntActive(null));
-        assertFalse(requests.speedhuntActive(sessionId));
+        assertEquals(inactive, requests.speedhuntStatus(null));
+        assertEquals(inactive, requests.speedhuntStatus(sessionId));
         controller.setExecuting(1, epoch, sessionId);
         clock.now = clock.now.plusSeconds(30);
-        assertFalse(requests.speedhuntActive(null));
-        assertFalse(requests.speedhuntActive(sessionId));
+        assertEquals(inactive, requests.speedhuntStatus(null));
+        assertEquals(inactive, requests.speedhuntStatus(sessionId));
+    }
+
+    @Test
+    void sharedSpeedhuntProgressUsesOnlyTheSelectedHuntsNumberAndSendTime() throws Exception {
+        publish("""
+                {"lastSpeedhuntDeviceId":102,"participants":[
+                  {"deviceId":101,"name":"Anna","speedhunt":{"running":true,"pings":1,
+                   "pingHistory":[{"number":1,"sentAt":"2026-11-09T12:00:00Z"}]}},
+                  {"deviceId":102,"name":"Ben","speedhunt":{"running":true,"pings":2,
+                   "pingHistory":[{"number":2,"sentAt":"2026-11-09T12:02:00Z","source":"fake"},
+                                  {"number":1,"sentAt":"2026-11-09T12:01:00Z","deviceId":102},
+                                  {"number":3,"sentAt":"2026-11-09T12:03:00Z"}]}}]}
+                """);
+        var player = requests.status(requests.membership(20)).status();
+        assertFalse(player.has("participants"));
+        assertEquals(mapper.readTree("""
+                {"active":true,"pingCount":2,"pingHistory":[
+                  {"number":1,"sentAt":"2026-11-09T12:01:00Z"},
+                  {"number":2,"sentAt":"2026-11-09T12:02:00Z"}]}
+                """), player.get("speedhunt"));
+        assertEquals(mapper.readTree("""
+                {"active":true,"pingCount":2}
+                """), requests.speedhuntStatus(sessionId));
     }
 
     private GameJokerService.Inventory hunterPositions(GameJokerService jokers, long deviceId) throws Exception {

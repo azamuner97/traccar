@@ -389,9 +389,12 @@ its history.
 The Tool publishes a status document with each effects delivery that changes
 it (`status`, stored in `tc_game_session_status`). `GET /api/game-status`
 returns the member's role-filtered view: hunters and spectators see each
-player's and supporter's speedhunt state with its revision and break; players
-and supporters only learn whether a speedhunt runs, never whom it targets, and
-their own break.
+player's and supporter's speedhunt state with its revision, ping times and break.
+Players and supporters see the current speedhunt's anonymous ping count and
+send times, plus their own break. If several hunts are running, the shared
+status follows the most recently started active hunt. The lightweight
+`GET /api/game-status/speedhunt` gives members and administrators the active
+hunt's count and configured limit for the red frame.
 Members' and administrators' WebSocket clients receive
 `{"invalidate": ["game-requests"]}` and `["game-status"]` when these change.
 

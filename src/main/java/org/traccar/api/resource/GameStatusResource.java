@@ -26,8 +26,6 @@ public class GameStatusResource extends BaseResource {
 
     public static final String INVALIDATION = "game-status";
 
-    public record Speedhunt(boolean active) { }
-
     @Inject
     private GameRequestService requests;
 
@@ -41,7 +39,7 @@ public class GameStatusResource extends BaseResource {
     public Response speedhunt() throws Exception {
         long userId = getUserId();
         Long sessionId = permissionsService.notAdmin(userId) ? requests.membership(userId).gameSessionId() : null;
-        return Response.ok(new Speedhunt(requests.speedhuntActive(sessionId)))
+        return Response.ok(requests.speedhuntStatus(sessionId))
                 .header(HttpHeaders.CACHE_CONTROL, "no-store").build();
     }
 }

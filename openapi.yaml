@@ -4765,7 +4765,7 @@ paths:
   /game-status/speedhunt:
     get:
       operationId: getGameSpeedhuntStatus
-      summary: Whether a speedhunt is running in the viewer's game session
+      summary: Anonymous speedhunt progress in the viewer's game session
       description: Administrators see the status of the currently executing session.
       tags:
         - Game Requests
@@ -4775,11 +4775,7 @@ paths:
           content:
             application/json:
               schema:
-                type: object
-                required: [active]
-                properties:
-                  active:
-                    type: boolean
+                $ref: '#/components/schemas/GameSpeedhuntProgress'
         '403':
           description: The account is neither a game member nor an administrator
           content: {}
@@ -7138,6 +7134,20 @@ components:
           type: [string, 'null']
         detail:
           type: [string, 'null']
+    GameSpeedhuntProgress:
+      type: object
+      required: [active]
+      properties:
+        active:
+          type: boolean
+        pingCount:
+          type: integer
+          minimum: 1
+          description: Number of confirmed pings in the current hunt, when available
+        pingLimit:
+          type: integer
+          minimum: 1
+          description: Configured pings per hunt, when limited
     GameStatus:
       type: object
       required: [gameSessionId, role, controllerActive, serverTime, revision, status]
@@ -7160,10 +7170,28 @@ components:
         status:
           type: object
           description: >-
-            speedhunt.active for everyone; participants (with per-participant speedhunt revision and break) and
+            Anonymous speedhunt progress for everyone; participants (with per-participant speedhunt revision and break) and
             limits only for hunters and spectators; players and supporters see only their own break and their
             own armed fake plans, which nobody else ever sees
           properties:
+            speedhunt:
+              allOf:
+                - $ref: '#/components/schemas/GameSpeedhuntProgress'
+                - type: object
+                  properties:
+                    pingHistory:
+                      type: array
+                      description: Confirmed pings of the current hunt in ping order, when published by the Tool
+                      items:
+                        type: object
+                        required: [number, sentAt]
+                        properties:
+                          number:
+                            type: integer
+                            minimum: 1
+                          sentAt:
+                            type: string
+                            format: date-time
             break:
               $ref: '#/components/schemas/GameBreak'
             fakes:

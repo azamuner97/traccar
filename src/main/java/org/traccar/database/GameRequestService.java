@@ -34,6 +34,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.TimeZone;
+import java.util.TreeMap;
 
 /**
  * Self-service game requests and the status document the controlling Tool publishes.
@@ -253,18 +254,67 @@ public class GameRequestService {
         return null;
     }
 
-    /** Whether any participant's speedhunt runs (a run or a live ping), as published by the Tool. */
-    static boolean speedhuntRunning(JsonNode status) {
+    /** Select the most recently started active hunt using the Tool's published order. */
+    private static JsonNode currentSpeedhunt(JsonNode status) {
         if (status == null || !status.path("participants").isArray()) {
-            return false;
+            return null;
         }
+        long lastTarget = status.path("lastSpeedhuntDeviceId").asLong(-1);
+        long newestRunning = status.path("runningSpeedhunts").path(0).path("deviceId").asLong(-1);
+        JsonNode fallback = null;
         for (JsonNode item : status.get("participants")) {
             JsonNode speedhunt = item.path("speedhunt");
             if (speedhunt.path("running").asBoolean(false) || speedhunt.path("live").asBoolean(false)) {
-                return true;
+                long deviceId = item.path("deviceId").asLong();
+                if (deviceId == lastTarget) {
+                    return speedhunt;
+                }
+                if (fallback == null || deviceId == newestRunning) {
+                    fallback = speedhunt;
+                }
             }
         }
-        return false;
+        return fallback;
+    }
+
+    static boolean speedhuntRunning(JsonNode status) {
+        return currentSpeedhunt(status) != null;
+    }
+
+    private static int positiveInt(JsonNode value) {
+        return value.isIntegralNumber() && value.canConvertToInt() ? Math.max(0, value.intValue()) : 0;
+    }
+
+    private static ObjectNode speedhuntView(JsonNode document, boolean includeHistory) {
+        JsonNode hunt = currentSpeedhunt(document);
+        ObjectNode result = JsonNodeFactory.instance.objectNode().put("active", hunt != null);
+        if (hunt == null) {
+            return result;
+        }
+        int count = positiveInt(hunt.path("pings"));
+        int limit = positiveInt(document.path("limits").path("pingsPerSpeedhunt"));
+        if (count > 0) {
+            result.put("pingCount", count);
+        }
+        if (limit > 0) {
+            result.put("pingLimit", limit);
+        }
+        if (includeHistory && hunt.path("pingHistory").isArray()) {
+            var pings = new TreeMap<Integer, Instant>();
+            for (JsonNode ping : hunt.get("pingHistory")) {
+                int number = positiveInt(ping.path("number"));
+                if (number > 0 && number <= count && ping.path("sentAt").isTextual()) {
+                    try {
+                        pings.putIfAbsent(number, Instant.parse(ping.get("sentAt").textValue()));
+                    } catch (java.time.format.DateTimeParseException ignored) {
+                        // Skip a ping without a valid send time.
+                    }
+                }
+            }
+            var history = result.putArray("pingHistory");
+            pings.forEach((number, time) -> history.addObject().put("number", number).put("sentAt", time.toString()));
+        }
+        return result;
     }
 
     /**
@@ -338,7 +388,7 @@ public class GameRequestService {
 
     /**
      * The status a member may see. Hunters and spectators see the named speedhunt state and who is on a break;
-     * players and supporters only learn whether any speedhunt runs, never whom it targets, and their own break.
+     * players and supporters see anonymous speedhunt progress and their own break.
      */
     public Status status(Membership member) throws Exception {
         return transaction(connection -> {
@@ -366,18 +416,19 @@ public class GameRequestService {
         });
     }
 
-    /** Whether a speedhunt is active in the requested session. Administrators may omit the session filter. */
-    public boolean speedhuntActive(Long gameSessionId) throws Exception {
+    /** Anonymous speedhunt progress in the requested session. Administrators may omit the session filter. */
+    public JsonNode speedhuntStatus(Long gameSessionId) throws Exception {
         return transaction(connection -> {
             Long session = executingSession(connection);
-            return session != null && (gameSessionId == null || gameSessionId.equals(session))
-                    && speedhuntRunning(statusDocument(connection, session));
+            JsonNode document = session != null && (gameSessionId == null || gameSessionId.equals(session))
+                    ? statusDocument(connection, session) : null;
+            return speedhuntView(document, false);
         });
     }
 
     static JsonNode filter(JsonNode document, String role, boolean active, Long deviceId) {
         ObjectNode result = JsonNodeFactory.instance.objectNode();
-        result.putObject("speedhunt").put("active", active && speedhuntRunning(document));
+        result.set("speedhunt", speedhuntView(active ? document : null, true));
         if (("hunter".equals(role) || "spectator".equals(role)) && document != null) {
             result.set("participants", document.path("participants").deepCopy());
             result.set("limits", document.path("limits").deepCopy());

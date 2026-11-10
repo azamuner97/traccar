@@ -1,5 +1,6 @@
 package org.traccar.api.resource;
 
+import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import jakarta.ws.rs.ForbiddenException;
 import jakarta.ws.rs.core.HttpHeaders;
 import org.junit.jupiter.api.Test;
@@ -43,26 +44,28 @@ public class GameStatusResourceTest {
     }
 
     @Test
-    void membersReceiveOnlyTheBooleanForTheirSession() throws Exception {
+    void membersReceiveProgressForTheirSession() throws Exception {
         var resource = resource(false);
-        when(requests.speedhuntActive(SESSION_ID)).thenReturn(true);
+        var progress = JsonNodeFactory.instance.objectNode().put("active", true).put("pingCount", 1);
+        when(requests.speedhuntStatus(SESSION_ID)).thenReturn(progress);
         for (String role : List.of("player", "supporter", "hunter", "spectator")) {
             when(requests.membership(USER_ID)).thenReturn(
                     new GameRequestService.Membership(SESSION_ID, USER_ID, role, null));
             try (var response = resource.speedhunt()) {
-                assertEquals(new GameStatusResource.Speedhunt(true), response.getEntity());
+                assertEquals(progress, response.getEntity());
                 assertEquals("no-store", response.getHeaderString(HttpHeaders.CACHE_CONTROL));
             }
         }
-        verify(requests, never()).speedhuntActive(null);
+        verify(requests, never()).speedhuntStatus(null);
     }
 
     @Test
     void administratorsReceiveTheExecutingSessionStatus() throws Exception {
         var resource = resource(true);
-        when(requests.speedhuntActive(null)).thenReturn(true);
+        var progress = JsonNodeFactory.instance.objectNode().put("active", true).put("pingCount", 2);
+        when(requests.speedhuntStatus(null)).thenReturn(progress);
         try (var response = resource.speedhunt()) {
-            assertEquals(new GameStatusResource.Speedhunt(true), response.getEntity());
+            assertEquals(progress, response.getEntity());
         }
         verify(requests, never()).membership(USER_ID);
     }
@@ -72,6 +75,6 @@ public class GameStatusResourceTest {
         var resource = resource(false);
         when(requests.membership(USER_ID)).thenThrow(new ForbiddenException());
         assertThrows(ForbiddenException.class, resource::speedhunt);
-        verify(requests, never()).speedhuntActive(any());
+        verify(requests, never()).speedhuntStatus(any());
     }
 }
