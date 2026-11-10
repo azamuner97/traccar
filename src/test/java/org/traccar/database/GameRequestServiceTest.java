@@ -308,6 +308,34 @@ public class GameRequestServiceTest {
         assertFalse(forPlayer.has("limits"));
     }
 
+    @Test
+    void speedhuntAlertFollowsPublishedStatusAndTheExecutingSession() throws Exception {
+        long otherSession = sessions.create("Other game", 4, mapper.readTree("{}")).id();
+        assertTrue(requests.speedhuntActive(null));
+        assertTrue(requests.speedhuntActive(sessionId));
+        assertFalse(requests.speedhuntActive(otherSession));
+
+        publish("""
+                {"participants":[{"deviceId":101,"speedhunt":{"operation":true,"running":false,"live":false}}]}
+                """);
+        assertFalse(requests.speedhuntActive(null));
+        assertFalse(requests.speedhuntActive(sessionId));
+
+        publish("""
+                {"participants":[{"deviceId":101,"speedhunt":{"running":false,"live":true}}]}
+                """);
+        assertTrue(requests.speedhuntActive(null));
+        assertTrue(requests.speedhuntActive(sessionId));
+
+        controller.setExecuting(1, epoch, otherSession);
+        assertFalse(requests.speedhuntActive(null));
+        assertFalse(requests.speedhuntActive(sessionId));
+        controller.setExecuting(1, epoch, sessionId);
+        clock.now = clock.now.plusSeconds(30);
+        assertFalse(requests.speedhuntActive(null));
+        assertFalse(requests.speedhuntActive(sessionId));
+    }
+
     private GameJokerService.Inventory hunterPositions(GameJokerService jokers, long deviceId) throws Exception {
         return jokers.overview(sessionId).inventories().stream()
                 .filter(item -> item.deviceId() == deviceId && item.type().equals(GameJokerService.HUNTER_POSITIONS))

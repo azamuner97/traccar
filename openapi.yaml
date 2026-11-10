@@ -4762,6 +4762,27 @@ paths:
         '403':
           description: The account does not take part in a game
           content: {}
+  /game-status/speedhunt:
+    get:
+      operationId: getGameSpeedhuntStatus
+      summary: Whether a speedhunt is running in the viewer's game session
+      description: Administrators see the status of the currently executing session.
+      tags:
+        - Game Requests
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [active]
+                properties:
+                  active:
+                    type: boolean
+        '403':
+          description: The account is neither a game member nor an administrator
+          content: {}
   /game-sessions/{id}/requests:
     parameters:
       - $ref: '#/components/parameters/GameSessionId'

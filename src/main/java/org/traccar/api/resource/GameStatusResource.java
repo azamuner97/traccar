@@ -10,7 +10,9 @@ import jakarta.inject.Inject;
 import jakarta.ws.rs.GET;
 import jakarta.ws.rs.Path;
 import jakarta.ws.rs.Produces;
+import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MediaType;
+import jakarta.ws.rs.core.Response;
 import org.traccar.api.BaseResource;
 import org.traccar.database.GameRequestService;
 
@@ -24,11 +26,22 @@ public class GameStatusResource extends BaseResource {
 
     public static final String INVALIDATION = "game-status";
 
+    public record Speedhunt(boolean active) { }
+
     @Inject
     private GameRequestService requests;
 
     @GET
     public GameRequestService.Status status() throws Exception {
         return requests.status(requests.membership(getUserId()));
+    }
+
+    @GET
+    @Path("speedhunt")
+    public Response speedhunt() throws Exception {
+        long userId = getUserId();
+        Long sessionId = permissionsService.notAdmin(userId) ? requests.membership(userId).gameSessionId() : null;
+        return Response.ok(new Speedhunt(requests.speedhuntActive(sessionId)))
+                .header(HttpHeaders.CACHE_CONTROL, "no-store").build();
     }
 }

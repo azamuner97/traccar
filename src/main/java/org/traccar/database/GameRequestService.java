@@ -283,20 +283,27 @@ public class GameRequestService {
         }
     }
 
-    /** Whether the controller lease is active and executes the given session. */
-    private boolean executing(Connection connection, long gameSessionId) throws SQLException {
+    /** The session of the active controller lease, or null. */
+    private Long executingSession(Connection connection) throws SQLException {
         try (var query = connection.prepareStatement(
                 "SELECT state,expiresat,gamesessionid FROM tc_game_controller WHERE id = 1")) {
             try (var rows = query.executeQuery()) {
                 if (!rows.next()) {
-                    return false;
+                    return null;
                 }
                 Timestamp expires = rows.getTimestamp("expiresat", utc());
-                Long session = nullableLong(rows, "gamesessionid");
-                return GameControllerService.STATE_ACTIVE.equals(rows.getString("state")) && expires != null
-                        && expires.toInstant().isAfter(now()) && session != null && session == gameSessionId;
+                if (GameControllerService.STATE_ACTIVE.equals(rows.getString("state"))
+                        && expires != null && expires.toInstant().isAfter(now())) {
+                    return nullableLong(rows, "gamesessionid");
+                }
+                return null;
             }
         }
+    }
+
+    private boolean executing(Connection connection, long gameSessionId) throws SQLException {
+        Long session = executingSession(connection);
+        return session != null && session == gameSessionId;
     }
 
     private static String userLabel(Connection connection, long userId) throws SQLException {
@@ -356,6 +363,15 @@ public class GameRequestService {
                         GameJokerService.ownFakes(connection, member.gameSessionId(), member.assignedDeviceId()));
             }
             return new Status(member.gameSessionId(), member.role(), active, now().toString(), revision, filtered);
+        });
+    }
+
+    /** Whether a speedhunt is active in the requested session. Administrators may omit the session filter. */
+    public boolean speedhuntActive(Long gameSessionId) throws Exception {
+        return transaction(connection -> {
+            Long session = executingSession(connection);
+            return session != null && (gameSessionId == null || gameSessionId.equals(session))
+                    && speedhuntRunning(statusDocument(connection, session));
         });
     }
 
