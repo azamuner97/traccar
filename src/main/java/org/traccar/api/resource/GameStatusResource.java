@@ -35,6 +35,13 @@ public class GameStatusResource extends BaseResource {
     }
 
     @GET
+    @Path("speedhunt-history")
+    public Response speedhuntHistory() throws Exception {
+        return Response.ok(requests.speedhuntHistory(getUserId()))
+                .header(HttpHeaders.CACHE_CONTROL, "no-store").build();
+    }
+
+    @GET
     @Path("speedhunt")
     public Response speedhunt() throws Exception {
         long userId = getUserId();

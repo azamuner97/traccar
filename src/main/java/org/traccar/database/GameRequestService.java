@@ -19,6 +19,7 @@ import jakarta.ws.rs.NotFoundException;
 import jakarta.ws.rs.WebApplicationException;
 
 import javax.sql.DataSource;
+import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
@@ -27,9 +28,12 @@ import java.sql.Statement;
 import java.sql.Timestamp;
 import java.time.Clock;
 import java.time.Instant;
+import java.time.OffsetDateTime;
+import java.time.format.DateTimeParseException;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Calendar;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashSet;
@@ -38,6 +42,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.TimeZone;
 import java.util.TreeMap;
+import java.util.UUID;
 
 /**
  * Self-service game requests and the status document the controlling Tool publishes.
@@ -93,6 +98,9 @@ public class GameRequestService {
     public record Completion(Long id, String status, String message, String detail) { }
     public record Status(long gameSessionId, String role, boolean controllerActive, String serverTime,
                          long revision, JsonNode status) { }
+    public record SpeedhuntHistory(long gameSessionId, List<SpeedhuntHistoryRun> runs) { }
+    public record SpeedhuntHistoryRun(String id, String startedAt, String status, List<SpeedhuntHistoryPing> pings) { }
+    public record SpeedhuntHistoryPing(int number, String sentAt, String type) { }
 
     private record HunterLabels(Map<Long, String> byDevice, Map<Long, String> byUser) { }
 
@@ -463,6 +471,84 @@ public class GameRequestService {
                         nullableLong(rows, "assigneddeviceid"));
             }
         }
+    }
+
+    /** A session's saved runs, with the same anonymous projection for every member. */
+    public SpeedhuntHistory speedhuntHistory(long userId) throws Exception {
+        try (var connection = dataSource.getConnection();
+             var query = connection.prepareStatement("SELECT s.id,s.runtime FROM tc_game_session_members m"
+                     + " JOIN tc_game_sessions s ON s.id = m.gamesessionid WHERE m.userid = ?")) {
+            query.setLong(1, userId);
+            try (var rows = query.executeQuery()) {
+                if (!rows.next()) {
+                    throw new ForbiddenException("This account does not take part in a game");
+                }
+                long sessionId = rows.getLong(1);
+                JsonNode gameStatus = objectMapper.readTree(rows.getString(2)).path("game_status");
+                return new SpeedhuntHistory(sessionId, speedhuntHistoryRuns(sessionId, gameStatus));
+            }
+        }
+    }
+
+    private static List<SpeedhuntHistoryRun> speedhuntHistoryRuns(long sessionId, JsonNode gameStatus) {
+        record SavedRun(
+                long participantId, Instant startedAt, String status, Map<Integer, SpeedhuntHistoryPing> pings) {
+        }
+        Map<String, SavedRun> runs = new HashMap<>();
+        gameStatus.path("speedhunt_runs").properties().forEach(entry -> {
+            JsonNode record = entry.getValue();
+            Instant startedAt = historyTime(record.path("started_at"));
+            long participantId = historyParticipant(record);
+            String status = switch (record.path("status").asText()) {
+                case "running" -> "inProgress";
+                case "completed", "terminated" -> "finished";
+                default -> null;
+            };
+            if (!entry.getKey().isBlank() && participantId > 0 && startedAt != null && status != null) {
+                runs.put(entry.getKey(), new SavedRun(participantId, startedAt, status, new TreeMap<>()));
+            }
+        });
+        gameStatus.path("speedhunt_pings").properties().forEach(entry -> {
+            JsonNode record = entry.getValue();
+            SavedRun run = runs.get(record.path("run_id").textValue());
+            if (run != null && run.participantId() == historyParticipant(record)) {
+                int number = positiveInt(record.path("number"));
+                Instant sentAt = historyTime(record.path("sent_at"));
+                String type = record.path("delivery").asText();
+                if (number > 0 && sentAt != null && ("live".equals(type) || "static".equals(type))) {
+                    run.pings().merge(number, new SpeedhuntHistoryPing(number, sentAt.toString(), type),
+                            (previous, ping) -> sentAt.isBefore(Instant.parse(previous.sentAt())) ? ping : previous);
+                }
+            }
+        });
+        return runs.entrySet().stream()
+                .sorted(Comparator
+                        .comparing((Map.Entry<String, SavedRun> entry) -> entry.getValue().startedAt())
+                        .reversed().thenComparing(Map.Entry::getKey))
+                .map(entry -> {
+                    SavedRun run = entry.getValue();
+                    String key = "speedhunt-history:" + sessionId + ":" + entry.getKey();
+                    String id = UUID.nameUUIDFromBytes(key.getBytes(StandardCharsets.UTF_8)).toString();
+                    return new SpeedhuntHistoryRun(
+                            id, run.startedAt().toString(), run.status(), List.copyOf(run.pings().values()));
+                })
+                .toList();
+    }
+
+    private static long historyParticipant(JsonNode record) {
+        JsonNode id = record.path("participant_id");
+        return id.isIntegralNumber() && id.canConvertToLong() ? id.longValue() : 0;
+    }
+
+    private static Instant historyTime(JsonNode value) {
+        if (value.isTextual()) {
+            try {
+                return OffsetDateTime.parse(value.textValue()).toInstant();
+            } catch (DateTimeParseException ignored) {
+                // Older or incomplete records may have no usable timestamp.
+            }
+        }
+        return null;
     }
 
     /**

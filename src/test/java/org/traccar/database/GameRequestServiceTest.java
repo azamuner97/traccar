@@ -500,6 +500,64 @@ public class GameRequestServiceTest {
                 """), requests.speedhuntStatus(sessionId));
     }
 
+    @Test
+    void speedhuntHistoryIsAnonymousAndRestrictedToTheMembersSession() throws Exception {
+        long otherSession = sessions.create("Other game", 4, mapper.readTree("{}")).id();
+        execute("INSERT INTO tc_game_session_members(gamesessionid,userid,role,login) VALUES"
+                + "(" + sessionId + ",30,'supporter','supporter1'),"
+                + "(" + sessionId + ",31,'spectator','spectator1'),"
+                + "(" + otherSession + ",32,'player','otherPlayer')");
+        sessions.updateRuntime(sessionId, 1, mapper.readTree("""
+                {"game_status":{
+                  "speedhunt_runs":{
+                    "finished-token":{"participant_id":101,"status":"terminated",
+                      "started_at":"2026-11-09T14:00:00+02:00","ended_at":"2026-11-09T13:01:00Z",
+                      "end_reason":"caught"},
+                    "active-token":{"participant_id":102,"status":"running",
+                      "started_at":"2026-11-09T13:00:00Z","fake":{"latitude":47,"longitude":8}},
+                    "broken-run":{"participant_id":101,"status":"running","started_at":"yesterday"}},
+                  "speedhunt_pings":{
+                    "live-update":{"run_id":"active-token","participant_id":102,"number":2,
+                      "sent_at":"2026-11-09T13:03:30Z","delivery":"live"},
+                    "second":{"run_id":"active-token","participant_id":102,"number":2,
+                      "sent_at":"2026-11-09T14:03:00+01:00","delivery":"live","targets":{"hunters":true}},
+                    "first":{"run_id":"active-token","participant_id":102,"number":1,
+                      "sent_at":"2026-11-09T13:00:00Z","delivery":"static","source":"operator_fake"},
+                    "old":{"run_id":"finished-token","participant_id":101,"number":1,
+                      "sent_at":"2026-11-09T12:00:00Z","delivery":"static"},
+                    "invalid-time":{"run_id":"active-token","participant_id":102,"number":3,
+                      "sent_at":"2026-11-09T13:04:00","delivery":"static"},
+                    "wrong-participant":{"run_id":"active-token","participant_id":101,"number":4,
+                      "sent_at":"2026-11-09T13:05:00Z","delivery":"static"},
+                    "orphan":{"run_id":"missing-token","participant_id":101,"number":1,
+                      "sent_at":"2026-11-09T13:05:00Z","delivery":"static"}}}}
+                """));
+
+        var history = requests.speedhuntHistory(20);
+        assertEquals(sessionId, history.gameSessionId());
+        assertEquals(2, history.runs().size());
+        var active = history.runs().getFirst();
+        var finished = history.runs().getLast();
+        assertNotEquals("active-token", active.id());
+        assertNotEquals("finished-token", finished.id());
+        assertEquals(mapper.readTree("""
+                {"gameSessionId":%d,"runs":[
+                  {"id":"%s","startedAt":"2026-11-09T13:00:00Z","status":"inProgress","pings":[
+                    {"number":1,"sentAt":"2026-11-09T13:00:00Z","type":"static"},
+                    {"number":2,"sentAt":"2026-11-09T13:03:00Z","type":"live"}]},
+                  {"id":"%s","startedAt":"2026-11-09T12:00:00Z","status":"finished","pings":[
+                    {"number":1,"sentAt":"2026-11-09T12:00:00Z","type":"static"}]}]}
+                """.formatted(sessionId, active.id(), finished.id())), mapper.readTree(mapper.writeValueAsString(history)));
+        for (long user : List.of(10L, 30L, 31L)) {
+            assertEquals(history, requests.speedhuntHistory(user));
+        }
+        assertEquals(new GameRequestService.SpeedhuntHistory(otherSession, List.of()), requests.speedhuntHistory(32));
+        assertThrows(ForbiddenException.class, () -> requests.speedhuntHistory(1));
+
+        controller.setExecuting(1, epoch, null);
+        assertEquals(history, requests.speedhuntHistory(20));
+    }
+
     private GameJokerService.Inventory hunterPositions(GameJokerService jokers, long deviceId) throws Exception {
         return jokers.overview(sessionId).inventories().stream()
                 .filter(item -> item.deviceId() == deviceId && item.type().equals(GameJokerService.HUNTER_POSITIONS))
