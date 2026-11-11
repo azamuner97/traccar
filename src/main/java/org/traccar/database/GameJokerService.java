@@ -60,6 +60,12 @@ import java.util.concurrent.ThreadLocalRandom;
  * through a request or by an operator for a participant. It stays reserved until the Tool starts the break (used)
  * or the plan is cancelled, its owner caught, or its time missed (released). Plans are private like fake plans.
  * <p>
+ * Speedhunt jokers are held in one shared pool by the session's hunters (device {@link #HUNTER_POOL}). A hunter's
+ * ping that would start a speedhunt reserves a pool joker; its succeeded request arms it. The delivery of a run's
+ * first ping uses one pool joker ({@code jokers} with type {@link #SPEEDHUNT} and the target): the reservation held
+ * for that target, or, for a speedhunt the operator starts, a pool joker (beyond the allocation when none is left).
+ * The Tool releases an armed one whose live ping ended before any upload reached anyone.
+ * <p>
  * Sessions saved before the two fake types were merged into {@link #FAKE_PING} were migrated forward
  * ({@code changelog-game-jokers-fake-ping.xml}); their ledger keeps the earlier type names.
  */
@@ -70,9 +76,16 @@ public class GameJokerService {
     /** One fake ping, used on a timetable or speedhunt ping. */
     public static final String FAKE_PING = "fakePing";
     public static final String BREAK = "break";
-    public static final List<String> TYPES = List.of(HUNTER_POSITIONS, FAKE_PING, BREAK);
+    /** A speedhunt joker of the hunters' shared pool. */
+    public static final String SPEEDHUNT = "speedhunt";
+    /** The holder of the hunters' shared pool: no tracker, one pool per session. */
+    public static final long HUNTER_POOL = 0;
+    /** Types players and supporters hold, and types the hunters' pool holds. */
+    public static final List<String> PARTICIPANT_TYPES = List.of(HUNTER_POSITIONS, FAKE_PING, BREAK);
+    public static final List<String> POOL_TYPES = List.of(SPEEDHUNT);
+    public static final List<String> TYPES = List.of(HUNTER_POSITIONS, FAKE_PING, BREAK, SPEEDHUNT);
     /** Types that can be granted and used in this version. */
-    public static final Set<String> ENABLED = Set.of(HUNTER_POSITIONS, BREAK, FAKE_PING);
+    public static final Set<String> ENABLED = Set.of(HUNTER_POSITIONS, BREAK, FAKE_PING, SPEEDHUNT);
     /** Request type of each joker type. */
     public static final Map<String, String> REQUEST_TYPES = Map.of(
             "jokerHunterPositions", HUNTER_POSITIONS, "jokerBreak", BREAK, "jokerFakePing", FAKE_PING);
@@ -107,8 +120,8 @@ public class GameJokerService {
     static final int TIMETABLE_HISTORY_MINUTES = 60;
     static final int TIMETABLE_PAST_PINGS = 20;
     static final int TIMETABLE_PINGS = 200;
-    /** Types an operator action may use directly (relays); other types are used only through requests. */
-    private static final Set<String> OPERATOR_USES = Set.of(HUNTER_POSITIONS);
+    /** Types an effects delivery may use directly (relays, a run's first ping); others only through requests. */
+    private static final Set<String> OPERATOR_USES = Set.of(HUNTER_POSITIONS, SPEEDHUNT);
     private static final ObjectMapper CONFIG_READER = new ObjectMapper();
 
     public static final String RESERVED = "reserved";
@@ -273,9 +286,24 @@ public class GameJokerService {
         return BREAK.equals(type) && plan != null && plan.hasNonNull("startsAt");
     }
 
-    /** Whether a succeeded request arms its joker instead of using it: fakes and planned breaks. */
+    /**
+     * Whether a succeeded request arms its joker instead of using it: fakes, planned breaks, and speedhunt jokers,
+     * which the run's first ping uses.
+     */
     static boolean armable(String type, JsonNode plan) {
-        return FAKE_TYPES.contains(type) || plannedBreak(type, plan);
+        return FAKE_TYPES.contains(type) || plannedBreak(type, plan) || SPEEDHUNT.equals(type);
+    }
+
+    /** The joker types a holder can have: the hunters' pool holds speedhunt jokers, participants the others. */
+    static List<String> holderTypes(long deviceId) {
+        return deviceId == HUNTER_POOL ? POOL_TYPES : PARTICIPANT_TYPES;
+    }
+
+    /** Available jokers of one holder and type (granted minus used and reserved, never below zero). */
+    static int available(Connection connection, long gameSessionId, long deviceId, String type)
+            throws SQLException {
+        int[] counts = counts(connection, gameSessionId, deviceId, type, true);
+        return Math.max(0, counts[0] - counts[1] - counts[2]);
     }
 
     /** A break lasts whole seconds, at least one (the Tool's {@code break_length}). */
@@ -683,7 +711,7 @@ public class GameJokerService {
         List<Inventory> result = new ArrayList<>();
         for (long deviceId : devices) {
             Map<String, int[]> byType = tallies.getOrDefault(deviceId, Map.of());
-            for (String type : TYPES) {
+            for (String type : holderTypes(deviceId)) {
                 result.add(inventory(deviceId, type, byType.getOrDefault(type, new int[3])));
             }
         }
@@ -693,6 +721,7 @@ public class GameJokerService {
     public Overview overview(long gameSessionId) throws Exception {
         return transaction(connection -> {
             Set<Long> devices = participants(connection, gameSessionId);
+            devices.add(HUNTER_POOL);
             var tallies = tallies(connection, gameSessionId, null);
             devices.addAll(tallies.keySet());
             return new Overview(inventories(devices, tallies), reservations(connection, gameSessionId, null),
@@ -748,6 +777,17 @@ public class GameJokerService {
                     visible, fakeEntries(connection, gameSessionId, deviceId, taken),
                     pingsPerSpeedhunt(connection, gameSessionId));
         });
+    }
+
+    /**
+     * The hunters' shared pool of speedhunt jokers, for the hunters: its inventory and the uses held by their
+     * requests or armed for a live ping. Hunters share speedhunt control, so every hunter sees the pool.
+     */
+    public Own pool(long gameSessionId) throws Exception {
+        return transaction(connection -> new Own(
+                inventories(List.of(HUNTER_POOL), tallies(connection, gameSessionId, HUNTER_POOL)),
+                reservations(connection, gameSessionId, HUNTER_POOL), List.of(),
+                pingsPerSpeedhunt(connection, gameSessionId)));
     }
 
     /**
@@ -871,7 +911,12 @@ public class GameJokerService {
         }
         String type = type(change.type());
         return transaction(connection -> {
-            if (!participants(connection, gameSessionId).contains(change.deviceId())) {
+            if (SPEEDHUNT.equals(type) != (change.deviceId() == HUNTER_POOL)) {
+                throw new BadRequestException("Speedhunt jokers belong to the hunters' pool (device 0); other jokers"
+                        + " to players and supporters");
+            }
+            if (change.deviceId() != HUNTER_POOL && !participants(connection, gameSessionId).contains(
+                    change.deviceId())) {
                 throw new BadRequestException("Jokers belong to players and supporters of this session");
             }
             if (BREAK.equals(type) && change.quantity() > 0 && breakMinutes(connection, gameSessionId) == null) {
@@ -999,10 +1044,13 @@ public class GameJokerService {
         }
         String type = type(use.type());
         if (!OPERATOR_USES.contains(type)) {
-            throw new BadRequestException("Operator actions only use Get hunter positions jokers");
+            throw new BadRequestException("Operator actions only use Get hunter positions and speedhunt jokers");
         }
         if (!participants(connection, gameSessionId).contains(use.deviceId())) {
             throw new BadRequestException("Jokers belong to players and supporters of this session");
+        }
+        if (SPEEDHUNT.equals(type)) {
+            return useSpeedhunt(connection, gameSessionId, use, actor);
         }
         int[] counts = counts(connection, gameSessionId, use.deviceId(), type, true);
         boolean over = counts[0] - counts[1] - counts[2] <= 0;
@@ -1014,6 +1062,61 @@ public class GameJokerService {
         ledger(connection, gameSessionId, use.deviceId(), type, over ? "overuse" : "use", 1, null, null, actor,
                 use.detail());
         return new UseOutcome(use.deviceId(), type, over);
+    }
+
+    /**
+     * A speedhunt starts on the participant {@code use.deviceId()}: it uses the pool joker a hunter's request
+     * reserved for that participant (held by the open request or armed), or else one pool joker for a speedhunt the
+     * operator started, beyond the allocation when none is left (with {@code overAllocate}).
+     */
+    private static UseOutcome useSpeedhunt(Connection connection, long gameSessionId, Use use, String actor)
+            throws SQLException {
+        long held = 0;
+        Long requestId = null;
+        try (var query = connection.prepareStatement("SELECT id,requestid,details FROM tc_game_joker_reservations"
+                + " WHERE gamesessionid = ? AND deviceid = ? AND type = ? AND status = ? ORDER BY id FOR UPDATE")) {
+            query.setLong(1, gameSessionId);
+            query.setLong(2, HUNTER_POOL);
+            query.setString(3, SPEEDHUNT);
+            query.setString(4, RESERVED);
+            try (var rows = query.executeQuery()) {
+                while (rows.next()) {
+                    if (plan(rows.getString("details")).path("targetDeviceId").asLong(-1) == use.deviceId()) {
+                        held = rows.getLong("id");
+                        long request = rows.getLong("requestid");
+                        requestId = rows.wasNull() ? null : request;
+                        JsonNode details = plan(rows.getString("details"));
+                        if (requestId == null && details.hasNonNull("requestId")) {
+                            requestId = details.get("requestId").asLong();
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+        int[] counts = counts(connection, gameSessionId, HUNTER_POOL, SPEEDHUNT, true);
+        if (held != 0) {
+            try (var query = connection.prepareStatement(
+                    "UPDATE tc_game_joker_reservations SET status = ?, updatedat = ? WHERE id = ?")) {
+                query.setString(1, CONSUMED);
+                query.setTimestamp(2, Timestamp.from(now()), utc());
+                query.setLong(3, held);
+                query.executeUpdate();
+            }
+            store(connection, gameSessionId, HUNTER_POOL, SPEEDHUNT, counts[0], counts[1] + 1);
+            ledger(connection, gameSessionId, HUNTER_POOL, SPEEDHUNT, "use", 1, requestId, held, actor,
+                    use.detail());
+            return new UseOutcome(HUNTER_POOL, SPEEDHUNT, false);
+        }
+        boolean over = counts[0] - counts[1] - counts[2] <= 0;
+        if (over && !Boolean.TRUE.equals(use.overAllocate())) {
+            throw new WebApplicationException(
+                    "No speedhunt joker is left in the hunters' pool; confirm a use beyond the allocation", 409);
+        }
+        store(connection, gameSessionId, HUNTER_POOL, SPEEDHUNT, counts[0], counts[1] + 1);
+        ledger(connection, gameSessionId, HUNTER_POOL, SPEEDHUNT, over ? "overuse" : "use", 1, null, null, actor,
+                use.detail());
+        return new UseOutcome(HUNTER_POOL, SPEEDHUNT, over);
     }
 
     private record Armed(long id, long gameSessionId, long deviceId, String type, JsonNode plan) { }
@@ -1098,9 +1201,10 @@ public class GameJokerService {
                 result.add(new FakeOutcome(fake.id(), CONSUMED));
                 continue;
             }
-            if (!timetableUse(fake.plan()) && !plannedBreak(fake.type(), fake.plan())) {
-                throw new BadRequestException("Only timetable fakes and planned breaks are used or released by"
-                        + " deliveries");
+            if (!timetableUse(fake.plan()) && !plannedBreak(fake.type(), fake.plan())
+                    && !SPEEDHUNT.equals(fake.type())) {
+                throw new BadRequestException("Only timetable fakes, planned breaks and speedhunt jokers are used or"
+                        + " released by deliveries");
             }
             boolean used = USED.equals(item.outcome());
             String detail = text(item.detail(), 512);
@@ -1180,19 +1284,25 @@ public class GameJokerService {
         });
     }
 
-    /** The member accounts of the players and supporters holding the given trackers. */
+    /**
+     * The member accounts of the players and supporters holding the given trackers, and every hunter of the session
+     * when the hunters' pool ({@link #HUNTER_POOL}) is among them.
+     */
     static Set<Long> ownerUsers(Connection connection, long gameSessionId, Collection<Long> deviceIds)
             throws SQLException {
         Set<Long> result = new java.util.LinkedHashSet<>();
         if (deviceIds.isEmpty()) {
             return result;
         }
-        try (var query = connection.prepareStatement("SELECT userid,assigneddeviceid FROM tc_game_session_members"
-                + " WHERE gamesessionid = ? AND role IN ('player','supporter') AND assigneddeviceid IS NOT NULL")) {
+        boolean pool = deviceIds.contains(HUNTER_POOL);
+        try (var query = connection.prepareStatement("SELECT userid,role,assigneddeviceid FROM tc_game_session_members"
+                + " WHERE gamesessionid = ? AND role IN ('player','supporter','hunter')")) {
             query.setLong(1, gameSessionId);
             try (var rows = query.executeQuery()) {
                 while (rows.next()) {
-                    if (deviceIds.contains(rows.getLong(2))) {
+                    long device = rows.getLong(3);
+                    boolean assigned = !rows.wasNull();
+                    if ("hunter".equals(rows.getString(2)) ? pool : assigned && deviceIds.contains(device)) {
                         result.add(rows.getLong(1));
                     }
                 }

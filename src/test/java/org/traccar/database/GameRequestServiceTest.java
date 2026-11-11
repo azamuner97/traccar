@@ -139,6 +139,9 @@ public class GameRequestServiceTest {
                 requests);
         epoch = controller.acquire(1, "tool-instance-1", "Laptop").lease().epoch();
         controller.setExecuting(1, epoch, sessionId);
+        // Hunters' pings that start a speedhunt need a joker of their pool; tests about other rules have plenty.
+        new GameJokerService(source).change(sessionId, new GameJokerService.Change(GameJokerService.HUNTER_POOL,
+                GameJokerService.SPEEDHUNT, 100, null), "Operator");
         publish("""
                 {"participants":[
                   {"deviceId":101,"name":"Anna","role":"player","caught":false,
@@ -625,7 +628,9 @@ public class GameRequestServiceTest {
         var released = hunterPositions(jokers, 101);
         assertEquals(1, released.used());
         assertEquals(1, released.available());
-        var kinds = jokers.ledger(sessionId, 0).stream().map(GameJokerService.LedgerEntry::kind).toList();
+        var kinds = jokers.ledger(sessionId, 0).stream()
+                .filter(item -> item.deviceId() != GameJokerService.HUNTER_POOL)
+                .map(GameJokerService.LedgerEntry::kind).toList();
         assertEquals(List.of("release", "reserve", "release", "reserve", "release", "reserve", "use", "reserve",
                 "grant"), kinds);
 
@@ -1484,5 +1489,94 @@ public class GameRequestServiceTest {
         var kinds = jokers.ledger(sessionId, 0).stream().filter(item -> item.deviceId() == 102)
                 .map(GameJokerService.LedgerEntry::kind).toList();
         assertEquals(List.of("use", "arm", "release", "arm", "release", "arm"), kinds);
+    }
+
+    private GameJokerService.Inventory pool(GameJokerService jokers) throws Exception {
+        return jokers.overview(sessionId).inventories().stream()
+                .filter(item -> item.deviceId() == GameJokerService.HUNTER_POOL)
+                .findFirst().orElseThrow();
+    }
+
+    @Test
+    void speedhuntJokersComeFromTheHuntersPoolAndAreUsedWhenARunStarts() throws Exception {
+        var jokers = new GameJokerService(source);
+        var hunter = requests.membership(10);
+        jokers.change(sessionId, new GameJokerService.Change(GameJokerService.HUNTER_POOL,
+                GameJokerService.SPEEDHUNT, -100, null), "Operator");
+        sessions.updateConfig(sessionId, 1, null, mapper.readTree(
+                "{\"game_settings\":{\"fixed_speedhunt_live_duration_minutes\":5}}"));
+        publish("""
+                {"participants":[
+                  {"deviceId":101,"name":"Anna","role":"player","caught":false,
+                   "speedhunt":{"revision":3,"running":false,"pings":0,"live":false}},
+                  {"deviceId":102,"name":"Ben","role":"player","caught":false,
+                   "speedhunt":{"revision":1,"running":true,"pings":1,"live":false}}]}""");
+
+        // Speedhunt jokers belong to the hunters' pool only; the pool holds nothing else.
+        assertThrows(BadRequestException.class, () -> jokers.change(sessionId,
+                new GameJokerService.Change(101L, GameJokerService.SPEEDHUNT, 1, null), "Operator"));
+        assertThrows(BadRequestException.class, () -> jokers.change(sessionId,
+                new GameJokerService.Change(GameJokerService.HUNTER_POOL, GameJokerService.BREAK, 1, null),
+                "Operator"));
+        assertEquals(List.of(GameJokerService.SPEEDHUNT), jokers.overview(sessionId).inventories().stream()
+                .filter(item -> item.deviceId() == GameJokerService.HUNTER_POOL)
+                .map(GameJokerService.Inventory::type).toList());
+
+        // A hunter's ping that would start a speedhunt needs a pool joker; one on a running speedhunt does not.
+        assertEquals(GameRequestService.NO_SPEEDHUNT_JOKER,
+                message(assertThrows(WebApplicationException.class, () -> requests.submit(hunter, ping(101, 3)))));
+        var onRunning = requests.submit(hunter, ping(102, 1));
+        requests.cancel(hunter, onRunning.id());
+        jokers.change(sessionId, new GameJokerService.Change(GameJokerService.HUNTER_POOL,
+                GameJokerService.SPEEDHUNT, 3, null), "Operator");
+        var request = requests.submit(hunter, ping(101, 3));
+        assertEquals(1, pool(jokers).reserved());
+        // Every hunter sees the shared pool; players never see it.
+        var shared = jokers.pool(sessionId);
+        assertEquals(List.of(GameJokerService.SPEEDHUNT), shared.inventories().stream()
+                .map(GameJokerService.Inventory::type).toList());
+        assertEquals(request.id(), shared.reservations().getFirst().requestId());
+        assertTrue(jokers.own(sessionId, 101).inventories().stream()
+                .noneMatch(item -> GameJokerService.SPEEDHUNT.equals(item.type())));
+        assertEquals(java.util.Set.of(10L, 11L), jokers.owners(sessionId, List.of(GameJokerService.HUNTER_POOL)));
+
+        // The run's first ping uses the joker the request holds for its target; the success changes nothing more.
+        requests.claim(sessionId, request.id(), epoch);
+        var start = deliverJokers(List.of(new GameJokerService.Use(101L, GameJokerService.SPEEDHUNT, true,
+                "Speedhunt started")), null).jokers().getFirst();
+        assertEquals(GameJokerService.HUNTER_POOL, start.deviceId());
+        assertFalse(start.overAllocated());
+        deliver(List.of(new GameRequestService.Completion(request.id(), "succeeded", "Ping 1 sent", null)), null);
+        assertEquals(1, pool(jokers).used());
+        assertEquals(0, pool(jokers).reserved());
+
+        // A live ping arms its joker until its first upload; it returns when no upload reached anyone.
+        var live = requests.submit(hunter, new GameRequestService.Submission("speedhuntLivePing", 101L, 3L, null));
+        requests.claim(sessionId, live.id(), epoch);
+        deliver(List.of(new GameRequestService.Completion(live.id(), "succeeded", "Live ping started", null)), null);
+        var armed = jokers.pool(sessionId).reservations().getFirst();
+        assertTrue(armed.armed());
+        assertEquals(101L, armed.plan().get("targetDeviceId").asLong());
+        assertEquals(1, pool(jokers).reserved());
+        assertEquals("released", deliverFakes(List.of(new GameJokerService.FakeSettlement(armed.id(), "released",
+                "No upload reached anyone")), null).fakes().getFirst().status());
+        assertEquals(2, pool(jokers).available());
+
+        // A speedhunt the operator starts uses a pool joker; with none left only beyond the allocation.
+        deliverJokers(List.of(new GameJokerService.Use(102L, GameJokerService.SPEEDHUNT, false, "Operator")), null);
+        deliverJokers(List.of(new GameJokerService.Use(102L, GameJokerService.SPEEDHUNT, false, "Operator")), null);
+        assertEquals(409, status(assertThrows(WebApplicationException.class, () -> deliverJokers(List.of(
+                new GameJokerService.Use(102L, GameJokerService.SPEEDHUNT, false, "Operator")), null))));
+        assertTrue(deliverJokers(List.of(new GameJokerService.Use(102L, GameJokerService.SPEEDHUNT, true,
+                "Operator")), null).jokers().getFirst().overAllocated());
+        assertEquals(1, pool(jokers).overAllocated());
+        assertThrows(BadRequestException.class, () -> deliverJokers(List.of(new GameJokerService.Use(
+                GameJokerService.HUNTER_POOL, GameJokerService.SPEEDHUNT, true, "Operator")), null),
+                "a speedhunt starts on a participant");
+        var kinds = jokers.ledger(sessionId, 0).stream()
+                .filter(item -> item.deviceId() == GameJokerService.HUNTER_POOL)
+                .map(GameJokerService.LedgerEntry::kind).toList();
+        assertEquals(List.of("overuse", "use", "use", "release", "arm", "reserve", "use", "reserve", "grant"),
+                kinds.subList(0, 9));
     }
 }

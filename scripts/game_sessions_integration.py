@@ -37,7 +37,7 @@ def create_user(name, email, password, administrator):
 def audit_http(user_credentials, device_ids):
     """Admin-only access, revisions, encryption at rest, timetable identity, history retention."""
     api.request("GET", "/game-sessions", credentials=user_credentials, expected=403)
-    assert api.request("GET", "/game-sessions/capabilities")["apiVersion"] == 3
+    assert api.request("GET", "/game-sessions/capabilities")["apiVersion"] == 4
     session = api.request("POST", "/game-sessions", {
         "name": api.PREFIX + "-http", "schemaVersion": 4, "config": {"game_settings": {"pings": 4}}})
     session_id = session["id"]
@@ -343,7 +343,9 @@ def audit_jokers(session_id, tracker_id, mirror_id, hunter, player):
     api.request("POST", change, grant, epoch=False, expected=423)
     api.request("POST", change, {**grant, "type": "teleport"}, expected=400)
     api.request("POST", change, grant)
-    api.request("GET", "/game-jokers", credentials=hunter, expected=403)
+    # Hunters read only the speedhunt jokers of their shared pool, never a participant's jokers.
+    pool_view = api.request("GET", "/game-jokers", credentials=hunter)
+    assert [item["type"] for item in pool_view["inventories"]] == ["speedhunt"], pool_view
 
     def inventory():
         own = api.request("GET", "/game-jokers", credentials=player)
@@ -395,6 +397,59 @@ def audit_jokers(session_id, tracker_id, mirror_id, hunter, player):
 
 
 BREAK_UNAVAILABLE = "A break cannot start right now; try again later"
+
+
+def audit_speedhunt_jokers(session_id, tracker_id, hunter, player):
+    """Speedhunt jokers: one pool shared by the hunters, reserved by a ping that starts a speedhunt, used by the
+    run's first ping, and used by the operator's speedhunts beyond the allocation only when confirmed."""
+    change = f"/game-sessions/{session_id}/jokers/change"
+    effects = f"/game-sessions/{session_id}/effects"
+    revision = 40
+    api.request("POST", effects, {"deliveryId": "audit" + uuid4().hex, "status": {
+        "version": 1, "limits": {}, "participants": [
+            {"deviceId": tracker_id, "name": "Anna", "role": "player", "caught": False,
+             "speedhunt": {"revision": revision, "running": False, "pings": 0, "live": False},
+             "break": {"active": False}}]}})
+
+    def pool():
+        own = api.request("GET", "/game-jokers", credentials=hunter)
+        return next(item for item in own["inventories"] if item["type"] == "speedhunt")
+
+    def start(over):
+        return api.request("POST", effects, {"deliveryId": "audit" + uuid4().hex, "jokers": [
+            {"deviceId": tracker_id, "type": "speedhunt", "overAllocate": over, "detail": "Speedhunt started"}]})
+
+    # Speedhunt jokers belong to the hunters' pool (device 0) only.
+    api.request("POST", change, {"deviceId": tracker_id, "type": "speedhunt", "quantity": 1}, expected=400)
+    ping = {"type": "speedhuntStaticPing", "targetDeviceId": tracker_id, "baseRevision": revision}
+    assert refusal("/game-requests", ping, hunter) == "No speedhunt joker is left; ask the operator for more"
+    api.request("POST", change, {"deviceId": 0, "type": "speedhunt", "quantity": 2, "reason": "audit"})
+    assert pool()["available"] == 2, pool()
+    # Players never see the hunters' pool.
+    own = api.request("GET", "/game-jokers", credentials=player)
+    assert all(item["type"] != "speedhunt" for item in own["inventories"]), own
+
+    # A hunter's ping that would start a speedhunt reserves a pool joker; the run's first ping uses it.
+    request = api.request("POST", "/game-requests", ping, credentials=hunter)
+    assert pool()["reserved"] == 1, pool()
+    api.request("POST", f"/game-sessions/{session_id}/requests/{request['id']}/claim", {})
+    used = start(True)
+    assert used["jokers"] == [{"deviceId": 0, "type": "speedhunt", "overAllocated": False}], used
+    api.request("POST", effects, {"deliveryId": "audit" + uuid4().hex, "requests": [
+        {"id": request["id"], "status": "succeeded", "message": "Ping 1 of 4 sent."}]})
+    assert pool()["used"] == 1 and pool()["reserved"] == 0 and pool()["available"] == 1, pool()
+
+    # A speedhunt the operator starts uses the pool too; with none left only beyond the allocation.
+    start(False)
+    api.request("POST", effects, {"deliveryId": "audit" + uuid4().hex, "jokers": [
+        {"deviceId": tracker_id, "type": "speedhunt", "overAllocate": False}]}, expected=409)
+    assert start(True)["jokers"][0]["overAllocated"] is True
+    assert pool()["overAllocated"] == 1 and pool()["available"] == 0, pool()
+    kinds = [entry["kind"] for entry in api.request("GET", f"/game-sessions/{session_id}/jokers/ledger")
+             if entry["type"] == "speedhunt"]
+    assert kinds[:5] == ["overuse", "use", "use", "reserve", "grant"], kinds
+    # The following audits ping too: leave a joker in the pool.
+    api.request("POST", change, {"deviceId": 0, "type": "speedhunt", "quantity": 3, "reason": "audit"})
 
 
 def refusal(path, body, credentials, expected=409):
@@ -602,7 +657,9 @@ def audit_planned_breaks(session_id, tracker_id, hunter, player, publish, breaks
         overview = api.request("GET", f"/game-sessions/{session_id}/jokers")
         known = planned_breaks(overview)
         assert sorted(known) == sorted([first["id"], second["id"]]), known
-        used, released = known[first["id"]].used(), known[second["id"]].released("Cancelled by the operator")
+        # The break starts now and lasts its full duration (15 minutes in this session).
+        used = known[first["id"]].used(None, timedelta(minutes=15))
+        released = known[second["id"]].released("Cancelled by the operator")
     else:
         used = {"reservationId": first["id"], "outcome": "used", "detail": "The break started"}
         released = {"reservationId": second["id"], "outcome": "released", "detail": "Cancelled by the operator"}
@@ -1116,7 +1173,8 @@ def audit_participant_privacy():
             api.request("POST", effects, {"deliveryId": "audit" + uuid4().hex, "status": {
                 "version": 1, "limits": {"pingsPerSpeedhunt": 4}, "participants": [
                     {"deviceId": trackers[name], "name": name.title(), "role": "player", "caught": False,
-                     "speedhunt": {"revision": revision, "running": name == target, "pings": 0, "live": False},
+                     "speedhunt": {"revision": revision, "running": name == target,
+                                   "pings": 1 if name == target else 0, "live": False},
                      "break": {"active": False}} for name in ("anna", "ben")]}})
 
         publish(1)
@@ -1157,9 +1215,9 @@ def audit_participant_privacy():
                    for item in api.request("GET", "/game-jokers", credentials=anna)["reservations"])
         assert next(item for item in api.request("GET", "/game-requests", credentials=anna)
                     if item["id"] == anna_request["id"])["status"] == "pending"
-        api.request("GET", "/game-jokers", credentials=hunter, expected=403)
         hunter_view = json.dumps([api.request("GET", "/game-status", credentials=hunter),
-                                  api.request("GET", "/game-requests", credentials=hunter)])
+                                  api.request("GET", "/game-requests", credentials=hunter),
+                                  api.request("GET", "/game-jokers", credentials=hunter)])
         assert str(PRIVATE_LATITUDE) not in hunter_view and '"fakes"' not in hunter_view \
             and "jokerHunterPositions" not in hunter_view, hunter_view
         for credentials, request in ((anna, anna_request), (ben, ben_request)):
@@ -1183,7 +1241,8 @@ def audit_participant_privacy():
             view = api.request("GET", "/game-status", credentials=credentials)
             view["status"].pop("fakes")
             views[name] = {key: value for key, value in view.items() if key != "serverTime"}
-        assert views["anna"] == views["ben"] and views["anna"]["status"]["speedhunt"] == {"active": True}, views
+        # The anonymous speedhunt status (active, ping progress) is the same for the target and everyone else.
+        assert views["anna"] == views["ben"] and views["anna"]["status"]["speedhunt"]["active"] is True, views
         assert own_views() == before, "a participant's jokers or requests changed when a speedhunt started"
         assert refusal("/game-requests", {"type": "jokerBreak"}, anna) \
             == refusal("/game-requests", {"type": "jokerBreak"}, ben) == BREAK_UNAVAILABLE
@@ -1241,16 +1300,22 @@ def audit_timetable_privacy(session_id, devices, trackers, sockets, hunter, anna
     api.request("POST", f"/game-sessions/{session_id}/effects", {"deliveryId": "audit" + uuid4().hex, "requests": [
         {"id": request["id"], "status": "succeeded", "message": "Your fake ping is armed."}]})
 
-    hunter_pings = api.request("GET", "/game-timetable", credentials=hunter)
     hunter_facing = {ids[(names["anna"], cell)] for cell in ("", "2H", "47.1,8.5|2H")} \
         | {ids[(names["ben"], cell)] for cell in ("", "2H")}
-    assert {item["entryId"] for item in hunter_pings} == hunter_facing, hunter_pings
-    text = json.dumps(hunter_pings)
+    # Hunters see only the distinct times of the pings that reach them: no entry, participant or state.
+    hunter_pings = api.request("GET", "/game-timetable", credentials=hunter)
+    facing_times = sorted({_iso(base + timedelta(minutes=10 * index)) for index in (0, 1, 4)})
+    assert [item["scheduledAt"][:16] for item in hunter_pings] == [time[:16] for time in facing_times], hunter_pings
+    assert all(sorted(item) == ["scheduledAt"] for item in hunter_pings), hunter_pings
+    # Spectators see each of those pings with its state; the faked ping, the operator's coordinate and a real
+    # ping differ only in entry, time and tracker.
+    spectator_pings = api.request("GET", "/game-timetable", credentials=spectator)
+    assert {item["entryId"] for item in spectator_pings} == hunter_facing, spectator_pings
+    text = json.dumps([hunter_pings, spectator_pings])
     assert "47.1" not in text and str(PRIVATE_LATITUDE) not in text and "content" not in text, text
-    # The faked ping, the operator's coordinate and a real ping differ only in entry, time and tracker.
-    assert all(sorted(item) == sorted(hunter_pings[0]) and item["fakeAllowed"] is None
-               and item["state"] == "scheduled" and item["stateAt"] is None for item in hunter_pings), hunter_pings
-    assert api.request("GET", "/game-timetable", credentials=spectator) == hunter_pings
+    assert all(sorted(item) == sorted(spectator_pings[0]) and item["fakeAllowed"] is None
+               and item["state"] == "scheduled" and item["stateAt"] is None for item in spectator_pings), \
+        spectator_pings
     for credentials, key, expected in ((anna, "anna", [(ids[(names["anna"], "")], False),
                                                        (ids[(names["anna"], "2H")], True)]),
                                        (ben, "ben", [(ids[(names["ben"], "")], True),
@@ -1267,7 +1332,7 @@ def audit_timetable_privacy(session_id, devices, trackers, sockets, hunter, anna
         {"id": faked, "status": "sent"}, {"id": ids[(names["ben"], "")], "status": "sent"}]}, expected=204)
     announced = [invalidations(socket) for socket in sockets]
     assert all(item == announced[0] for item in announced) and "game-timetable" in announced[0], announced
-    sent = {item["entryId"]: item for item in api.request("GET", "/game-timetable", credentials=hunter)}
+    sent = {item["entryId"]: item for item in api.request("GET", "/game-timetable", credentials=spectator)}
     anna_sent, ben_sent = sent[faked], sent[ids[(names["ben"], "")]]
     assert anna_sent["state"] == ben_sent["state"] == "sent" and anna_sent["stateAt"] == ben_sent["stateAt"]
 
@@ -1306,7 +1371,9 @@ def audit_requests(tool_source=None):
                 "deliveryId": "audit" + uuid4().hex,
                 "status": {"version": 1, "limits": {"pingsPerSpeedhunt": 4}, "participants": [
                     {"deviceId": tracker["id"], "name": "Anna", "role": "player", "caught": False,
-                     "speedhunt": {"revision": revision, "running": running, "pings": 0, "live": False}}]}})
+                     "speedhunt": {"revision": revision, "running": running, "pings": 1 if running else 0,
+                                   "live": False}}]}})
+        # A running speedhunt: hunters' pings on it need no joker of their pool.
         publish(1, running=True)
 
         hunter_view = api.request("GET", "/game-status", credentials=hunter)
@@ -1320,7 +1387,8 @@ def audit_requests(tool_source=None):
         api.request("POST", "/game-requests", submission, credentials=player, expected=403)
         api.request("POST", "/game-requests", {**submission, "baseRevision": 0}, credentials=hunter, expected=409)
         pending = api.request("POST", "/game-requests", submission, credentials=hunter)
-        assert pending["status"] == "pending" and pending["targetLabel"] == "Anna"
+        # Hunters see participants by their game label (group and number), never their names.
+        assert pending["status"] == "pending" and pending["targetLabel"] == "Player 1", pending
         api.request("POST", "/game-requests", submission, credentials=hunter, expected=409)
         assert api.request("GET", "/game-requests", credentials=player) == []
 
@@ -1342,10 +1410,13 @@ def audit_requests(tool_source=None):
                  "speedhunt": {"revision": 2, "running": True, "pings": 1, "live": False}}]}})
         assert outcome["requests"] == [{"id": pending["id"], "status": "succeeded"}], outcome
         seen = api.request("GET", "/game-requests", credentials=hunter)[0]
-        assert seen["status"] == "succeeded" and seen["message"] == "Ping 1 of 4 sent." and seen["detail"] is None
-        assert api.request("GET", f"/game-sessions/{session_id}/requests?state=all")[0]["detail"] == "operator only"
+        # Hunters see the outcome; the Tool's message and the detail stay with the operators.
+        assert seen["status"] == "succeeded" and seen["message"] is None and seen["detail"] is None, seen
+        operator_view = api.request("GET", f"/game-sessions/{session_id}/requests?state=all")[0]
+        assert operator_view["detail"] == "operator only" and operator_view["message"] == "Ping 1 of 4 sent."
 
         audit_jokers(session_id, tracker["id"], mirror["id"], hunter, player)
+        audit_speedhunt_jokers(session_id, tracker["id"], hunter, player)
         audit_breaks(session_id, tracker["id"], hunter, player, tool_source)
         audit_mirror_only_access(session_id, tracker["id"], hunter_id, player_id)
         audit_timetable_fakes(session_id, tracker, mirror, hunter, player, tool_source)
@@ -1365,7 +1436,7 @@ def audit_requests(tool_source=None):
         epoch = api.CONTROLLER["epoch"]
         api.request("POST", "/game-controller/takeover", {"instanceId": "audit-req-" + uuid4().hex[:16],
                                                           "label": "Other PC"}, epoch=False)
-        expired = next(item for item in api.request("GET", "/game-requests", credentials=hunter)
+        expired = next(item for item in api.request("GET", f"/game-sessions/{session_id}/requests?state=all")
                        if item["id"] == third["id"])
         assert expired["status"] == "expired" and "Control of the game changed" in expired["message"]
         api.request("POST", "/game-controller/release", {}, epoch=epoch + 1)

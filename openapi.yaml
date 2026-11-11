@@ -4895,7 +4895,8 @@ paths:
       operationId: getGameJokers
       summary: >-
         The signed-in player's or supporter's own jokers, open reservations and armed fake plans, and the
-        timetable pings a fake can replace
+        timetable pings a fake can replace. For hunters, the hunters' shared pool of speedhunt jokers (deviceId
+        0) with the uses their requests hold or arm.
       tags:
         - Game Requests
       responses:
@@ -4906,7 +4907,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/GameJokerOwn'
         '403':
-          description: Only players and supporters hold jokers
+          description: Only players, supporters and hunters see jokers
           content: {}
   /game-timetable:
     get:
@@ -6833,9 +6834,12 @@ components:
         jokers:
           type: [array, 'null']
           description: >-
-            Operator joker uses (manual and live hunter relay). A use without an available joker needs
-            overAllocate and is recorded beyond the allocation; reserved uses are never taken. Only Get hunter
-            positions jokers are used this way; breaks start only through a participant's request.
+            Joker uses of this delivery. Get hunter positions jokers for manual and live hunter relay (deviceId
+            is the participant): a use without an available joker needs overAllocate and is recorded beyond the
+            allocation; reserved uses are never taken. A speedhunt joker with the delivery of a run's first ping
+            (deviceId is the participant the speedhunt targets): it uses the pool joker a hunter's request holds
+            or armed for that participant, or else one joker of the hunters' pool, beyond the allocation only
+            with overAllocate. Breaks start only through their requests and plans.
           items:
             type: object
             required: [deviceId, type]
@@ -6845,7 +6849,7 @@ components:
                 format: int64
               type:
                 type: string
-                enum: [hunterPositions]
+                enum: [hunterPositions, speedhunt]
               overAllocate:
                 type: [boolean, 'null']
               detail:
@@ -7057,7 +7061,10 @@ components:
       type: object
       required: [type]
       description: >-
-        Hunters' speedhunt requests need targetDeviceId and baseRevision. Jokers (jokerHunterPositions,
+        Hunters' speedhunt requests need targetDeviceId and baseRevision. A static or live ping that would
+        start a speedhunt (the participant's published startsRun) reserves one joker of the hunters' shared
+        pool and is refused (409) when none is left; a succeeded request arms it until the run's first ping
+        uses it, and the Tool releases it when a live ping ends before any upload reached anyone. Jokers (jokerHunterPositions,
         jokerBreak, jokerFakePing) are always for the requesting player or supporter and reserve one
         available joker; a break lasts the duration configured in the session's game settings and is timed by
         the Tool. A break starts now, or from parameters.startsAt (a planned break; a start that has passed
@@ -7249,10 +7256,10 @@ components:
         deviceId:
           type: integer
           format: int64
-          description: The participant's real tracker
+          description: The participant's real tracker, or 0 for the hunters' shared pool (speedhunt jokers)
         type:
           type: string
-          enum: [hunterPositions, fakePing, break]
+          enum: [hunterPositions, fakePing, break, speedhunt]
         granted:
           type: integer
         used:
@@ -7498,7 +7505,8 @@ components:
           format: int64
         type:
           type: string
-          enum: [hunterPositions, fakePing, break]
+          enum: [hunterPositions, fakePing, break, speedhunt]
+          description: speedhunt jokers belong to the hunters' pool (deviceId 0), the other types to participants
         quantity:
           type: integer
           minimum: -1000

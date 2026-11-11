@@ -46,7 +46,7 @@ import java.util.TimeZone;
 @Singleton
 public class GameSessionService {
 
-    public static final int API_VERSION = 3;
+    public static final int API_VERSION = 4;
     private static final int MAX_DOCUMENT_LENGTH = 8 * 1024 * 1024;
     private static final int MAX_LOG_BATCH = 500;
     private static final int MAX_LOG_MESSAGE = 16384;

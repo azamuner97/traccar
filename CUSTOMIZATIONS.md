@@ -423,6 +423,30 @@ granted and used.
 - `caughtParticipants` in an effects delivery ends the participants' open
   requests and releases their reservations.
 
+### Speedhunt jokers
+
+Speedhunts are paid with jokers of one pool shared by the session's hunters:
+type `speedhunt`, held by device `0` (`GameJokerService.HUNTER_POOL`), granted
+and revoked by operators like any joker; the pool holds no other type and
+participants hold no speedhunt jokers. There is no setting that limits the
+number of speedhunts any more.
+
+- A hunter's static or live ping that would start a speedhunt (the
+  participant's published `startsRun`) reserves a pool joker, with the target
+  in its plan (`targetDeviceId`); without one left it is refused (409, "No
+  speedhunt joker is left"). Its succeeded request arms the reservation.
+- The effects delivery of a run's first ping uses one pool joker
+  (`jokers: [{deviceId: <target>, type: speedhunt, overAllocate}]`): the
+  reservation held or armed for that target, or else, for a speedhunt the
+  operator started, one pool joker, beyond the allocation only with
+  `overAllocate` (the Tool asks the operator first).
+- The Tool reports an armed one `released` (effects `fakes`) when its live
+  ping ended before any upload reached anyone; any other end of the request
+  releases it as usual.
+- Hunters read the pool at `GET /api/game-jokers` (inventory and the uses their
+  requests hold or arm); spectators and participants do not.
+  `{"invalidate": ["game-jokers"]}` reaches every hunter when the pool changes.
+
 ### Breaks
 
 A break protects a player or supporter from the hunters for the duration set

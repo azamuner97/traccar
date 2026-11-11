@@ -650,6 +650,9 @@ public class GameEffectsService {
                 requestOutcomes.add(new RequestOutcome(request.id(), request.status()));
                 if (GameRequestService.JOKER_TYPES.contains(request.type()) && request.targetDeviceId() != null) {
                     jokerDevices.add(request.targetDeviceId());
+                } else if (GameRequestService.SPEEDHUNT_PINGS.contains(request.type())) {
+                    // A hunter's ping may have held or armed a joker of the hunters' pool.
+                    jokerDevices.add(GameJokerService.HUNTER_POOL);
                 }
             }
         }

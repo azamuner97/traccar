@@ -82,7 +82,9 @@ public class GameRequestService {
     /** The same answer for every participant, so it never reveals whom a speedhunt targets. */
     public static final String BREAK_UNAVAILABLE = "A break cannot start right now; try again later";
     public static final String BREAK_OVERLAP = "This break would overlap another break of yours";
-    private static final Set<String> SPEEDHUNT_PINGS = Set.of("speedhuntStaticPing", "speedhuntLivePing");
+    static final Set<String> SPEEDHUNT_PINGS = Set.of("speedhuntStaticPing", "speedhuntLivePing");
+    /** Hunters' pings that would start a speedhunt need a joker of their shared pool. */
+    public static final String NO_SPEEDHUNT_JOKER = "No speedhunt joker is left; ask the operator for more";
     private static final Set<String> LIVE_SHARE_SOURCES = Set.of("manual", "geofence", "speedhunt");
     private static final String REPEAT_SPEEDHUNT = "The previous speedhunt was already on this participant";
     private static final String LIVE_DURATION_REQUIRED = "Set a positive live ping duration in the game settings";
@@ -290,10 +292,7 @@ public class GameRequestService {
                 throw conflict(LIVE_DURATION_REQUIRED);
             }
         }
-        JsonNode speedhunt = target.path("speedhunt");
-        boolean startsRun = speedhunt.path("startsRun").asBoolean(
-                !speedhunt.path("operation").asBoolean() && !speedhunt.path("running").asBoolean()
-                        || speedhunt.path("pings").asInt() == 0);
+        boolean startsRun = startsRun(target);
         if (startsRun && !settings.path("allow_consecutive_speedhunts").asBoolean(false)
                 && published.path("lastSpeedhuntDeviceId").asLong(-1) == target.path("deviceId").asLong()) {
             String approval = live ? "speedhunt_live_ping" : "speedhunt_static_ping";
@@ -305,6 +304,14 @@ public class GameRequestService {
                 throw conflict(REPEAT_SPEEDHUNT + "; confirm that you want to request approval");
             }
         }
+    }
+
+    /** Whether the participant's next counted speedhunt ping starts a run, as the Tool published it. */
+    static boolean startsRun(JsonNode target) {
+        JsonNode speedhunt = target.path("speedhunt");
+        return speedhunt.path("startsRun").asBoolean(
+                !speedhunt.path("operation").asBoolean() && !speedhunt.path("running").asBoolean()
+                        || speedhunt.path("pings").asInt() == 0);
     }
 
     /** The participant entry of the published status, or {@code null}. */
@@ -980,6 +987,11 @@ public class GameRequestService {
                     throw conflict("This participant is on a break");
                 }
                 checkSpeedhuntPing(connection, member.gameSessionId(), accepted.type(), published, target, parameters);
+                // A ping that would start a speedhunt needs a joker of the hunters' pool, reserved below.
+                if (startsRun(target) && GameJokerService.available(connection, member.gameSessionId(),
+                        GameJokerService.HUNTER_POOL, GameJokerService.SPEEDHUNT) <= 0) {
+                    throw conflict(NO_SPEEDHUNT_JOKER);
+                }
             }
             if (BREAK_REQUEST.equals(accepted.type())) {
                 Double minutes = GameJokerService.breakMinutes(connection, member.gameSessionId());
@@ -1093,6 +1105,13 @@ public class GameRequestService {
                         || GameJokerService.BREAK.equals(jokerType) && parameters.has("startsAt");
                 GameJokerService.reserve(connection, member.gameSessionId(), accepted.targetDeviceId(), jokerType, id,
                         userLabel(connection, member.userId()), withPlan ? parameters : null);
+            } else if (SPEEDHUNT_PINGS.contains(accepted.type()) && startsRun(target)) {
+                // The pool joker is used by the run's first ping, whichever delivery sends it.
+                ObjectNode plan = JsonNodeFactory.instance.objectNode();
+                plan.put("targetDeviceId", accepted.targetDeviceId());
+                plan.put("live", "speedhuntLivePing".equals(accepted.type()));
+                GameJokerService.reserve(connection, member.gameSessionId(), GameJokerService.HUNTER_POOL,
+                        GameJokerService.SPEEDHUNT, id, userLabel(connection, member.userId()), plan);
             }
             return memberView(load(connection, member.gameSessionId(), id, false), hunterLabels(connection, member));
         });

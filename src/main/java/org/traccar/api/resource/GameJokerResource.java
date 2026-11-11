@@ -47,8 +47,13 @@ public class GameJokerResource extends BaseResource {
         return member;
     }
 
+    /** A player's or supporter's own jokers, or for hunters the shared pool of speedhunt jokers. */
     @GET
     public GameJokerService.Own own() throws Exception {
+        var hunter = requests.membership(getUserId());
+        if ("hunter".equals(hunter.role())) {
+            return jokers.pool(hunter.gameSessionId());
+        }
         var member = owner();
         return jokers.own(member.gameSessionId(), member.assignedDeviceId());
     }
