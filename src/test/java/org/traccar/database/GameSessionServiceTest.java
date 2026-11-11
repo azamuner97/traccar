@@ -2,6 +2,7 @@ package org.traccar.database;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import jakarta.ws.rs.BadRequestException;
 import jakarta.ws.rs.NotFoundException;
 import jakarta.ws.rs.WebApplicationException;
@@ -136,6 +137,30 @@ public class GameSessionServiceTest {
         assertEquals(json("{\"a\":3}"), stored.config());
         assertEquals(2, stored.runtimeRevision());
         assertThrows(NotFoundException.class, () -> service.updateRuntime(999, 1, json("{}")));
+    }
+
+    @Test
+    void runtimeWritesDistinguishPublicSpeedhuntChangesFromPrivateChangesAndRetries() throws Exception {
+        long id = service.create("Session", 4, json("{}")).id();
+        var runtime = json("""
+                {"game_status":{
+                  "speedhunt_runs":{"run":{"participant_id":100,"status":"running",
+                    "started_at":"2026-11-09T13:00:00Z"}},
+                  "speedhunt_pings":{"ping":{"run_id":"run","participant_id":100,"number":1,
+                    "sent_at":"2026-11-09T13:00:00Z","delivery":"static","source":"real"}}}}
+                """);
+        assertTrue(service.updateRuntime(id, 1, runtime).speedhuntHistoryChanged());
+        assertFalse(service.updateRuntime(id, 1, runtime).speedhuntHistoryChanged());
+
+        var gameStatus = (ObjectNode) runtime.path("game_status");
+        var ping = (ObjectNode) gameStatus.path("speedhunt_pings").path("ping");
+        ping.put("source", "operator_fake");
+        assertFalse(service.updateRuntime(id, 2, runtime).speedhuntHistoryChanged());
+        ping.put("delivery", "live");
+        assertTrue(service.updateRuntime(id, 3, runtime).speedhuntHistoryChanged());
+        assertTrue(service.updateRuntime(id, 4, json("{}")).speedhuntHistoryChanged());
+        assertFalse(service.updateRuntime(id, 5, json("{\"game_status\":{\"unrelated\":true}}"))
+                .speedhuntHistoryChanged());
     }
 
     @Test

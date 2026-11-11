@@ -490,6 +490,16 @@ public class GameRequestService {
         }
     }
 
+    static boolean speedhuntHistoryChanged(long sessionId, JsonNode previous, JsonNode current) {
+        JsonNode before = previous.path("game_status");
+        JsonNode after = current.path("game_status");
+        if (before.path("speedhunt_runs").equals(after.path("speedhunt_runs"))
+                && before.path("speedhunt_pings").equals(after.path("speedhunt_pings"))) {
+            return false;
+        }
+        return !speedhuntHistoryRuns(sessionId, before).equals(speedhuntHistoryRuns(sessionId, after));
+    }
+
     private static List<SpeedhuntHistoryRun> speedhuntHistoryRuns(long sessionId, JsonNode gameStatus) {
         record SavedRun(
                 long participantId, Instant startedAt, String status, Map<Integer, SpeedhuntHistoryPing> pings) {
@@ -517,7 +527,11 @@ public class GameRequestService {
                 String type = record.path("delivery").asText();
                 if (number > 0 && sentAt != null && ("live".equals(type) || "static".equals(type))) {
                     run.pings().merge(number, new SpeedhuntHistoryPing(number, sentAt.toString(), type),
-                            (previous, ping) -> sentAt.isBefore(Instant.parse(previous.sentAt())) ? ping : previous);
+                            (previous, ping) -> {
+                                int order = sentAt.compareTo(Instant.parse(previous.sentAt()));
+                                return order < 0 || (order == 0 && type.compareTo(previous.type()) < 0)
+                                        ? ping : previous;
+                            });
                 }
             }
         });

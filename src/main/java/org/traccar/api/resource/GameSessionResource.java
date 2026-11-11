@@ -181,8 +181,11 @@ public class GameSessionResource extends BaseResource {
         if (request == null) {
             throw new BadRequestException("Runtime update is required");
         }
-        // Runtime saves follow every game action; they change nothing an administrator list shows.
-        return service.updateRuntime(id, expected(request.expectedRevision()), request.document());
+        var result = service.updateRuntime(id, expected(request.expectedRevision()), request.document());
+        if (result.speedhuntHistoryChanged()) {
+            connectionManager.updateGameMembers(true, id, GameStatusResource.SPEEDHUNT_HISTORY_INVALIDATION);
+        }
+        return new GameSessionService.Revision(result.revision());
     }
 
     @GET
@@ -313,6 +316,9 @@ public class GameSessionResource extends BaseResource {
         }
         if (applied.statusChanged()) {
             connectionManager.updateGameMembers(true, id, GameStatusResource.INVALIDATION);
+        }
+        if (applied.speedhuntHistoryChanged()) {
+            connectionManager.updateGameMembers(true, id, GameStatusResource.SPEEDHUNT_HISTORY_INVALIDATION);
         }
         if (!applied.jokerUsers().isEmpty()) {
             // Only the owners concerned (and operators): a fake's use must not be visible to anyone else.

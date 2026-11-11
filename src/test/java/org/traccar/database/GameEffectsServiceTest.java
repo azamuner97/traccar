@@ -134,13 +134,17 @@ public class GameEffectsServiceTest {
         var delivery = new GameEffectsService.Delivery("delivery-0001",
                 List.of(position("mirror-1", null), new GameEffectsService.PositionInput(
                         900L, null, 0.0, 0.0, null, Map.of("caught", "1,2"))),
-                new GameEffectsService.RuntimeInput(1L, mapper.readTree("{\"game_status\":{\"players\":{}}}")),
+                new GameEffectsService.RuntimeInput(1L, mapper.readTree("""
+                        {"game_status":{"speedhunt_runs":{"run":{
+                          "participant_id":201,"status":"running","started_at":"2026-05-01T10:00:00Z"}}}}
+                        """)),
                 null, null, List.of(new GameSessionService.LogInput("operation", "2026-05-01T10:00:00Z", "ping")));
         var applied = apply(delivery);
         assertFalse(applied.outcome().replayed());
         assertEquals(2, applied.outcome().positions().size());
         assertTrue(applied.outcome().positions().stream().allMatch(GameEffectsService.PositionOutcome::latest));
         assertEquals(2L, applied.outcome().runtimeRevision());
+        assertTrue(applied.speedhuntHistoryChanged());
         assertEquals(2, applied.latest().size());
         assertEquals("osmand", applied.latest().getFirst().getProtocol());
         assertEquals("still", applied.latest().getFirst().getAttributes().get("activity"));
@@ -150,6 +154,7 @@ public class GameEffectsServiceTest {
 
         var replay = apply(delivery);
         assertTrue(replay.outcome().replayed());
+        assertFalse(replay.speedhuntHistoryChanged());
         assertTrue(replay.latest().isEmpty());
         assertEquals(applied.outcome().positions(), replay.outcome().positions());
         assertEquals("2", query("SELECT COUNT(*) FROM tc_positions"));

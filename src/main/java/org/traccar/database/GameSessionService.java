@@ -62,6 +62,7 @@ public class GameSessionService {
                           long runtimeRevision, JsonNode runtime, List<Member> members,
                           String createdAt, String updatedAt) { }
     public record Revision(long revision) { }
+    public record RuntimeUpdate(long revision, boolean speedhuntHistoryChanged) { }
     public record Document(long revision, JsonNode document) { }
     public record TimetableEntry(long id, String scheduledAt, String participant, String content,
                                  String status, String statusAt) { }
@@ -342,27 +343,34 @@ public class GameSessionService {
         });
     }
 
+    private record StoredDocument(long revision, String json) { }
+
+    private static StoredDocument lockDocument(Connection connection, long id, String part) throws SQLException {
+        try (var query = connection.prepareStatement(
+                "SELECT " + part + "revision," + part + " FROM tc_game_sessions WHERE id = ? FOR UPDATE")) {
+            query.setLong(1, id);
+            try (var rows = query.executeQuery()) {
+                if (!rows.next()) {
+                    throw new NotFoundException("Game session not found");
+                }
+                return new StoredDocument(rows.getLong(1), rows.getString(2));
+            }
+        }
+    }
+
     /** Applies a revision-checked document write; an identical retry of the last write is idempotent. */
     private Revision writeDocument(
-            Connection connection, long id, String part, String column, long expectedRevision, String serialized)
+            Connection connection, long id, String part, long expectedRevision, String serialized,
+            StoredDocument previous)
             throws Exception {
-        long current = lock(connection, id).get(part);
+        long current = previous.revision();
         if (expectedRevision != current) {
-            if (expectedRevision + 1 == current) {
-                try (var query = connection.prepareStatement(
-                        "SELECT " + column + " FROM tc_game_sessions WHERE id = ?")) {
-                    query.setLong(1, id);
-                    try (var rows = query.executeQuery()) {
-                        rows.next();
-                        if (parse(rows.getString(1)).equals(objectMapper.readTree(serialized))) {
-                            return new Revision(current);
-                        }
-                    }
-                }
+            if (expectedRevision + 1 == current && parse(previous.json()).equals(objectMapper.readTree(serialized))) {
+                return new Revision(current);
             }
             throw conflict(Character.toUpperCase(part.charAt(0)) + part.substring(1), current);
         }
-        try (var query = connection.prepareStatement("UPDATE tc_game_sessions SET " + column + " = ?, "
+        try (var query = connection.prepareStatement("UPDATE tc_game_sessions SET " + part + " = ?, "
                 + part + "revision = ? WHERE id = ?")) {
             query.setString(1, serialized);
             query.setLong(2, current + 1);
@@ -377,7 +385,8 @@ public class GameSessionService {
             throws Exception {
         String serialized = json(config, "Configuration");
         return transaction(connection -> {
-            Revision result = writeDocument(connection, id, "config", "config", expectedRevision, serialized);
+            Revision result = writeDocument(
+                    connection, id, "config", expectedRevision, serialized, lockDocument(connection, id, "config"));
             if (schemaVersion != null) {
                 if (schemaVersion < 1) {
                     throw new BadRequestException("Invalid schema version");
@@ -393,16 +402,20 @@ public class GameSessionService {
         });
     }
 
-    public Revision updateRuntime(long id, long expectedRevision, JsonNode runtime) throws Exception {
-        String serialized = json(runtime, "Runtime");
-        return transaction(connection -> writeDocument(
-                connection, id, "runtime", "runtime", expectedRevision, serialized));
+    public RuntimeUpdate updateRuntime(long id, long expectedRevision, JsonNode runtime) throws Exception {
+        return transaction(connection -> updateRuntime(connection, id, expectedRevision, runtime));
     }
 
     /** Runtime write inside a caller's transaction (effects deliveries). */
-    Revision updateRuntime(Connection connection, long id, long expectedRevision, JsonNode runtime)
+    RuntimeUpdate updateRuntime(Connection connection, long id, long expectedRevision, JsonNode runtime)
             throws Exception {
-        return writeDocument(connection, id, "runtime", "runtime", expectedRevision, json(runtime, "Runtime"));
+        String serialized = json(runtime, "Runtime");
+        StoredDocument previous = lockDocument(connection, id, "runtime");
+        Revision result = writeDocument(connection, id, "runtime", expectedRevision, serialized, previous);
+        // Only changes to member-visible history can be announced. Private runtime changes carry no signal.
+        boolean historyChanged = result.revision() != previous.revision()
+                && GameRequestService.speedhuntHistoryChanged(id, parse(previous.json()), runtime);
+        return new RuntimeUpdate(result.revision(), historyChanged);
     }
 
     private static Member member(Member value) {

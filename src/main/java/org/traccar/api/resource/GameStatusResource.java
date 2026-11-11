@@ -25,6 +25,7 @@ import org.traccar.database.GameRequestService;
 public class GameStatusResource extends BaseResource {
 
     public static final String INVALIDATION = "game-status";
+    public static final String SPEEDHUNT_HISTORY_INVALIDATION = "game-speedhunt-history";
 
     @Inject
     private GameRequestService requests;

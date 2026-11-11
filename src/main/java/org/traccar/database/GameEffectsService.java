@@ -131,7 +131,7 @@ public class GameEffectsService {
      */
     public record Applied(Outcome outcome, List<Position> latest, Set<Long> devices, Long notificationDevice,
                           Set<Long> notifiedRecipients, boolean sessionNotified, List<Long> queuedPushes,
-                          boolean runtimeChanged, boolean requestsChanged, boolean statusChanged,
+                          boolean speedhuntHistoryChanged, boolean requestsChanged, boolean statusChanged,
                           Set<Long> jokerUsers) { }
 
     private final DataSource dataSource;
@@ -550,12 +550,15 @@ public class GameEffectsService {
         }
 
         Long runtimeRevision = null;
+        boolean speedhuntHistoryChanged = false;
         if (delivery.runtime() != null) {
             if (delivery.runtime().expectedRevision() == null || delivery.runtime().expectedRevision() < 0) {
                 throw new BadRequestException("Runtime expectedRevision is required");
             }
-            runtimeRevision = sessions.updateRuntime(connection, gameSessionId,
-                    delivery.runtime().expectedRevision(), delivery.runtime().document()).revision();
+            var update = sessions.updateRuntime(connection, gameSessionId,
+                    delivery.runtime().expectedRevision(), delivery.runtime().document());
+            runtimeRevision = update.revision();
+            speedhuntHistoryChanged = update.speedhuntHistoryChanged();
         }
 
         List<AlertOutcome> alertOutcomes = new ArrayList<>();
@@ -664,7 +667,7 @@ public class GameEffectsService {
             query.executeUpdate();
         }
         return new Applied(outcome, latest, devices, notificationDevice, notifiedRecipients, sessionNotified,
-                queued, runtimeRevision != null, !requestOutcomes.isEmpty() || caught, statusRevision != null,
+                queued, speedhuntHistoryChanged, !requestOutcomes.isEmpty() || caught, statusRevision != null,
                 GameJokerService.ownerUsers(connection, gameSessionId, jokerDevices));
     }
 }

@@ -75,7 +75,7 @@ public class GameSessionResourceTest {
                 new GameSessionResource.CreateRequest("x", null, document)));
         verifyNoInteractions(service);
 
-        when(service.updateRuntime(1, 3, document)).thenReturn(new GameSessionService.Revision(4));
+        when(service.updateRuntime(1, 3, document)).thenReturn(new GameSessionService.RuntimeUpdate(4, false));
         assertEquals(4, resource.updateRuntime(1, new GameSessionResource.DocumentUpdate(3L, null, document))
                 .revision());
         when(service.list()).thenReturn(List.of());
@@ -85,11 +85,22 @@ public class GameSessionResourceTest {
     @Test
     void onlyListRelevantWritesNotifyAdministrators() throws Exception {
         var resource = resource(true);
-        resource.updateRuntime(5, new GameSessionResource.DocumentUpdate(1L, null,
-                com.fasterxml.jackson.databind.node.JsonNodeFactory.instance.objectNode()));
-        verify(sockets, never()).updateGameAdmin(anyBoolean(), anyString());
+        var document = new ObjectMapper().createObjectNode();
+        when(service.updateRuntime(5, 1, document)).thenReturn(new GameSessionService.RuntimeUpdate(2, false));
+        resource.updateRuntime(5, new GameSessionResource.DocumentUpdate(1L, null, document));
+        verifyNoInteractions(sockets);
         resource.updateConfig(5, new GameSessionResource.DocumentUpdate(1L, 4,
                 com.fasterxml.jackson.databind.node.JsonNodeFactory.instance.objectNode()));
         verify(sockets).updateGameAdmin(true, GameSessionResource.INVALIDATION);
+    }
+
+    @Test
+    void runtimeWritesNotifySessionMembersWhenVisibleHistoryChanges() throws Exception {
+        var resource = resource(true);
+        var document = new ObjectMapper().createObjectNode();
+        when(service.updateRuntime(5, 1, document)).thenReturn(new GameSessionService.RuntimeUpdate(2, true));
+        assertEquals(2, resource.updateRuntime(5, new GameSessionResource.DocumentUpdate(1L, null, document)).revision());
+        verify(sockets).updateGameMembers(true, 5L, GameStatusResource.SPEEDHUNT_HISTORY_INVALIDATION);
+        verifyNoMoreInteractions(sockets);
     }
 }

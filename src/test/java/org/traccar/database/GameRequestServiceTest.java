@@ -519,6 +519,8 @@ public class GameRequestServiceTest {
                   "speedhunt_pings":{
                     "live-update":{"run_id":"active-token","participant_id":102,"number":2,
                       "sent_at":"2026-11-09T13:03:30Z","delivery":"live"},
+                    "same-time":{"run_id":"active-token","participant_id":102,"number":2,
+                      "sent_at":"2026-11-09T13:03:00Z","delivery":"static"},
                     "second":{"run_id":"active-token","participant_id":102,"number":2,
                       "sent_at":"2026-11-09T14:03:00+01:00","delivery":"live","targets":{"hunters":true}},
                     "first":{"run_id":"active-token","participant_id":102,"number":1,
