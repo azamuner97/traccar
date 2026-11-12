@@ -14,7 +14,12 @@ device.category = "person"
 device.attributes.traccarToolRole = "player" | "supporter" | "hunter"
 device.attributes.traccarToolRoleNumber = positive integer
 device.attributes.traccarToolMirror = true    # mirrored devices only
+device.attributes.traccarToolGameSessionId = stored game session ID
 ```
+
+Role and number identify a member only within its session, so the Tool also
+writes the stored session a device belongs to. A real tracker bound in several
+sessions carries the markers of the session set up last.
 
 The web app renders the role background and participant number on map markers
 and in the device sidebar. The number is rendered as text, so it is not limited
@@ -25,7 +30,7 @@ source for role numbers.
 Traccar already persists arbitrary device attributes through its existing
 device model and API. No Java model field, database migration, or dedicated
 role endpoint is required for this feature. The Tool owns reconciliation of the
-three managed values and preserves unrelated attributes.
+managed values and preserves unrelated attributes.
 
 ## Game data model 2
 
@@ -38,7 +43,10 @@ answers it, and a Tool built for another version stops at connection.
   (`tc_game_session_members`): role (`player`, `supporter`, `hunter`,
   `spectator`), number, display name, and the bound account and tracker. A
   member's role never changes (a role change retires the member and plans a new
-  one). Numbers are never reused in a session, also after retirement. A session
+  one). Retiring a member ends its running speedhunt (terminated), its live
+  uploads and hunters' open requests on it, so nothing waits for a member that
+  can no longer act; its catch, breaks and history stay. Numbers are never
+  reused in a session, also after retirement. A session
   has at most one spectator (number 1, no tracker). An account is bound to at
   most one active member of all sessions; a real tracker to at most one member
   per session, and it may be bound in several sessions.
@@ -71,6 +79,10 @@ answers it, and a Tool built for another version stops at connection.
 The model-2 changelog drops every model-1 game table with its rows and model-1
 game drawings, keeps the lease row of `tc_game_controller` (its epoch keeps
 increasing) and replaces `tc_drawings.sessiondeviceid` with `gamesessionid`.
+The drop is one changeset per statement, each run only while its object exists
+and the model-2 tables do not: MySQL commits every DDL statement on its own, so
+a cutover that stops halfway resumes at the next start. A database migrated by
+the former single drop changeset runs none of them.
 It does not touch Traccar users, devices, groups or positions: Traccar resources
 that model-1 sessions created (the hidden state device, generated accounts with
 model-1 membership markers, mirrors, groups) stay until they are removed.
@@ -92,7 +104,9 @@ The web app reads membership from `GET /api/game-status` (403 means no
 membership) and filters the live map from the computed status: for players and
 supporters, caught players and supporters are hidden with their mirrors, and
 their own outgoing mirrors are hidden. Members map to devices through the role
-markers, because role and number identify a member within a session.
+markers, because role and number identify a member within a session; a device
+marked with another session never stands for a member of this one (devices set
+up before the session marker existed count for any session).
 Administrators, accounts without membership and members before their first
 status see the map unfiltered (fail-open). This filtering is live-page
 presentation, not an authorization boundary; replay, reports, exports and
@@ -164,9 +178,16 @@ with HTTP 423 otherwise (`GameControllerFilter`):
   reaching a member of the executing session. While no lease is held,
   administrators may make them; each is recorded and reported to the Tool on its
   next acquisition. Users may always update their own account;
+- the filter judges the object the resource will change: path IDs are read as
+  Jersey reads them (`07` is 7), an object update must name its path's object in
+  its body (400 otherwise), and permission bodies are read as the permission
+  resource reads them (keys matched case-insensitively by class name, values
+  also from strings);
 - any request that carries an epoch must carry the current one.
 
-Member writes (`/api/game-requests`, `/api/game-jokers`) are never fenced. A
+Member writes (`/api/game-requests`, `/api/game-jokers`) are never fenced; they
+check again under the session lock that the member is still active and bound to
+the calling account, so a former account never acts for its member. A
 fenced request holds an in-process fence shared until its response; acquisition,
 release and takeover take it exclusively. Only one server instance may use the
 database. Tracker-endpoint uploads are not fenced.
@@ -248,7 +269,8 @@ ledger.
 
 Break and fake-ping jokers only protect a participant while hunters see players
 and supporters through mirrors. Once a session has break or fake jokers
-allocated or active, no active hunter member of that session may access the
+allocated, held (a reservation, such as a break planned beyond the allocation)
+or active, no active hunter member of that session may access the
 tracker of an active player or supporter member, directly (`tc_user_device`) or
 through a group (`tc_user_group`, at any nesting depth). `GameAccessRule`
 checks this wherever access or jokers are granted:
@@ -261,7 +283,9 @@ checks this wherever access or jokers are granted:
   allowed to make the change, the controlling Tool included; other callers get
   Traccar's own refusal;
 - binding a member's account or tracker that would add such access is refused
-  with 422 (a binding hook).
+  with 422 (a binding hook);
+- a break does not start (409) while a hunter could see the participant's
+  tracker, whatever gave that access.
 
 Spectators keep their access to real trackers. Known limits: Traccar saves
 permissions without database transactions, so a permission grant and a first

@@ -90,9 +90,9 @@ public class AttributeResource extends ExtendedObjectResource<Attribute> {
 
     @Path("{id}")
     @PUT
-    public Response update(Attribute entity) throws Exception {
+    public Response update(@PathParam("id") long id, Attribute entity) throws Exception {
         permissionsService.checkAdmin(getUserId());
-        return super.update(entity);
+        return super.update(id, entity);
     }
 
     @Path("{id}")

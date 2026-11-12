@@ -6,7 +6,6 @@
  */
 package org.traccar.api;
 
-import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.annotation.Priority;
 import jakarta.inject.Inject;
@@ -117,7 +116,7 @@ public class GameControllerFilter implements ContainerRequestFilter, ContainerRe
     }
 
     private static Long number(String value) {
-        return value != null && value.matches("[1-9][0-9]{0,17}") ? Long.parseLong(value) : null;
+        return GamePermissionBodies.number(value);
     }
 
     @Override
@@ -304,29 +303,18 @@ public class GameControllerFilter implements ContainerRequestFilter, ContainerRe
         if (body.length == 0) {
             return Map.of();
         }
-        var tree = objectMapper.readTree(body);
-        List<Map<String, Object>> items = new ArrayList<>();
-        if (tree.isArray()) {
-            items.addAll(objectMapper.convertValue(tree, new TypeReference<List<Map<String, Object>>>() { }));
-        } else if (tree.isObject()) {
-            items.add(objectMapper.convertValue(tree, new TypeReference<Map<String, Object>>() { }));
-        }
         Map<String, Set<Long>> result = new LinkedHashMap<>();
-        for (Map<String, Object> item : items) {
-            for (var entry : item.entrySet()) {
-                String type = switch (entry.getKey()) {
-                    case "userId", "managedUserId" -> "users";
-                    case "deviceId" -> "devices";
-                    case "groupId" -> "groups";
-                    case "geofenceId" -> "geofences";
-                    default -> null;
-                };
-                if (type != null && entry.getValue() instanceof Number value) {
-                    result.computeIfAbsent(type, ignored -> new java.util.HashSet<>()).add(value.longValue());
-                }
-            }
+        for (GamePermissionBodies.Link link : GamePermissionBodies.read(objectMapper, objectMapper.readTree(body))) {
+            target(result, link.ownerKind(), link.ownerId());
+            target(result, link.propertyKind(), link.propertyId());
         }
         return result;
+    }
+
+    private static void target(Map<String, Set<Long>> result, String kind, long id) {
+        if (kind != null) {
+            result.computeIfAbsent(kind, ignored -> new java.util.HashSet<>()).add(id);
+        }
     }
 
     private Long positionDevice(Long positionId) throws Exception {

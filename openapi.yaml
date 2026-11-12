@@ -4300,6 +4300,11 @@ paths:
     post:
       operationId: retireGameMember
       summary: Retires a member, clearing its bindings and keeping its state and history; the spectator cannot be retired
+      description: >-
+        In the same transaction, the member's running speedhunt ends (terminated, and armed fakes on pings it did not
+        reach are returned), its live uploads as source or relay recipient end, and hunters' open requests on it end,
+        so nothing waits for a member that can no longer act. Its own requests and plans end as with any binding
+        change.
       tags: [Game Sessions]
       responses:
         '200':

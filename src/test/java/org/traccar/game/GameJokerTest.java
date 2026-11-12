@@ -852,4 +852,84 @@ public abstract class GameJokerTest extends GameTestBase {
         assertStatus(409, () -> grant(free, carla, GameJokerRepository.FAKE_PING, 1));
     }
 
+
+    @Test
+    void aBreakPlannedBeyondTheAllocationProtectsTheSessionUntilItStarts() throws Exception {
+        long session = running(SETTINGS);
+        GameMember anna = bound(session, "player");
+        GameMember hunter = bound(session, "hunter");
+        var rule = new GameAccessRule(transactions);
+        var direct = new GameAccessRule.Change(List.of(new long[] {hunter.userId(), anna.trackerId()}), List.of(),
+                java.util.Map.of(), java.util.Map.of());
+        // No break joker is granted: the session has no rule yet.
+        rule.check(direct);
+
+        var plan = jokers.planBreak(session, anna.id(), null, true, "Operator");
+        assertTrue(plan.overAllocated());
+        // The held reservation protects the session: new hunter access to the tracker is refused.
+        assertStatus(422, () -> rule.check(direct));
+        int watcher = user();
+        execute("INSERT INTO tc_user_device (userid, deviceid) VALUES (?, ?)", watcher, anna.trackerId());
+        assertStatus(422, () -> members.bindAccount(session, plan(session, "hunter").id(), watcher));
+
+        // Access granted behind the server's back keeps the break from starting.
+        execute("INSERT INTO tc_user_device (userid, deviceid) VALUES (?, ?)", hunter.userId(), anna.trackerId());
+        long breakId = plan.plannedBreak().breakId();
+        assertStatus(409, () -> apply(session, new GameOperation.BreakStarted(breakId, null, null)));
+        assertEquals(GameState.PLANNED, state.breaks(session).getFirst().state());
+        execute("DELETE FROM tc_user_device WHERE userid = ?", hunter.userId());
+        apply(session, new GameOperation.BreakStarted(breakId, null, null));
+        assertEquals(GameState.ACTIVE, state.breaks(session).getFirst().state());
+        assertStatus(422, () -> rule.check(direct));
+        assertReconciled(session);
+    }
+
+    @Test
+    void retiringASpeedhuntTargetEndsItsRunAndTheRequestsOnIt() throws Exception {
+        long session = running(SETTINGS);
+        GameMember anna = bound(session, "player");
+        GameMember ben = bound(session, "player");
+        GameMember hunter = bound(session, "hunter");
+        grant(session, null, GameJokerRepository.SPEEDHUNT, 1);
+        grant(session, ben, GameJokerRepository.BREAK, 1);
+        apply(session, ping(anna, 1, GameState.REAL));
+        var onAnna = hunt(hunter, GameRequest.STATIC_PING, anna);
+        assertStatus(409, () -> submit(ben, GameRequest.BREAK, null));
+        publisher.clear();
+
+        members.retire(session, anna.id());
+        var run = state.runs(session).getFirst().run();
+        assertFalse(run.active());
+        assertEquals(GameState.TERMINATED, run.outcome());
+        assertEquals(GameMemberService.RETIRED, run.reason());
+        assertEquals(GameRequest.EXPIRED, requests.operatorList(session, false, 0).stream()
+                .filter(item -> item.id() == onAnna.id()).findFirst().orElseThrow().status());
+        assertFalse(publisher.topic(GamePublisher.SPEEDHUNT_HISTORY).isEmpty());
+        // Nothing waits for the retired target: another participant's break may start again.
+        assertEquals(GameRequest.PENDING, submit(ben, GameRequest.BREAK, null).status());
+        assertStatus(409, () -> apply(session, new GameOperation.RunEnded(anna.id(), GameState.TERMINATED, "late")));
+        assertReconciled(session);
+    }
+
+    @Test
+    void aFormerAccountNoLongerActsForTheMember() throws Exception {
+        long session = running(SETTINGS);
+        GameMember anna = bound(session, "player");
+        grant(session, anna, GameJokerRepository.HUNTER_POSITIONS, 2);
+        grant(session, anna, GameJokerRepository.BREAK, 1);
+        var open = submit(anna, GameRequest.HUNTER_POSITIONS, null);
+        var plan = submit(anna, GameRequest.BREAK, "{\"startsAt\": \"" + clock.instant().plusSeconds(7200) + "\"}");
+        succeed(session, plan.id());
+        long reservation = jokers.own(anna).reservations().stream()
+                .filter(item -> GameJokerRepository.BREAK.equals(item.type())).findFirst().orElseThrow().id();
+
+        // The account was resolved to Anna before the member was rebound; its writes then find no membership.
+        GameMember former = anna;
+        GameMember rebound = members.bindAccount(session, anna.id(), user());
+        assertStatus(403, () -> submit(former, GameRequest.HUNTER_POSITIONS, null));
+        assertStatus(403, () -> requests.cancel(former, open.id()));
+        assertStatus(403, () -> jokers.cancel(former, reservation));
+        assertEquals(GameRequest.PENDING, submit(rebound, GameRequest.HUNTER_POSITIONS, null).status());
+        assertReconciled(session);
+    }
 }

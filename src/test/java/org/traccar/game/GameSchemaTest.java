@@ -502,4 +502,46 @@ public abstract class GameSchemaTest {
         }
     }
 
+
+    @Test
+    void anInterruptedCutoverResumesWhereItStopped() throws Exception {
+        DataSource database = database(false);
+        try (Connection connection = database.getConnection()) {
+            // MySQL keeps every DDL statement it committed: the first drops happened, the changeset was not recorded.
+            execute(connection, "DROP TABLE tc_game_push_outbox");
+            execute(connection, "DROP TABLE tc_game_deliveries");
+        }
+        GameSchemaFixture.apply(database, GameSchemaFixture.MASTER);
+        try (Connection connection = database.getConnection()) {
+            for (String table : ACTIVE_TABLES) {
+                assertEquals(0, number(connection, "SELECT COUNT(*) FROM " + table
+                        + (table.equals("tc_game_controller") ? " WHERE id < 0" : "")), table);
+            }
+            assertThrows(SQLException.class, () -> number(connection, "SELECT COUNT(*) FROM tc_game_session_status"));
+            assertEquals(2, number(connection, "SELECT COUNT(*) FROM DATABASECHANGELOG WHERE ID IN"
+                    + " ('game-model-2-drop-tc_game_push_outbox', 'game-model-2-drop-tc_game_deliveries')"
+                    + " AND EXECTYPE = 'MARK_RAN'"));
+        }
+    }
+
+    @Test
+    void aDatabaseMigratedByTheFormerDropChangesetKeepsItsModel2Data() throws Exception {
+        DataSource database = database(true);
+        long session;
+        try (Connection connection = database.getConnection()) {
+            session = session(connection);
+            // As migrated before the drop was split: the former single changeset is recorded, the new ones are not.
+            execute(connection, "DELETE FROM DATABASECHANGELOG WHERE ID LIKE 'game-model-2-drop-%'"
+                    + " OR ID IN ('game-model-2-clear-controller-session', 'game-model-2-delete-game-drawings')");
+            execute(connection, "INSERT INTO DATABASECHANGELOG (ID, AUTHOR, FILENAME, DATEEXECUTED, ORDEREXECUTED,"
+                    + " EXECTYPE) VALUES ('game-model-2-drop-model-1', 'traccar-tool', 'changelog-game-model-2.xml',"
+                    + " ?, 1000, 'EXECUTED')", Timestamp.from(T0));
+        }
+        GameSchemaFixture.apply(database, GameSchemaFixture.MASTER);
+        try (Connection connection = database.getConnection()) {
+            assertEquals(1, number(connection, "SELECT COUNT(*) FROM tc_game_sessions WHERE id = ?", session));
+            assertEquals(0, number(connection, "SELECT COUNT(*) FROM DATABASECHANGELOG"
+                    + " WHERE ID LIKE 'game-model-2-drop-tc_%' AND EXECTYPE <> 'MARK_RAN'"));
+        }
+    }
 }

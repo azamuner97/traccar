@@ -642,6 +642,8 @@ public final class GameOperations {
         if (GameStateRepository.speedhuntRunning(transaction, session)) {
             throw GameErrors.conflict(BREAK_UNAVAILABLE);
         }
+        // A break protects only while hunters see the participant through mirrors.
+        GameAccessRule.checkBreakStart(transaction, session, member.id());
     }
 
     private void breakStarted(int index, GameOperation.BreakStarted item) throws Exception {

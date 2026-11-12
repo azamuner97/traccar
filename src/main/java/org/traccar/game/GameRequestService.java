@@ -241,9 +241,7 @@ public class GameRequestService {
         long sessionId = caller.gameSessionId();
         GameRequest created = transactions.write(transaction -> {
             transaction.lockSession(sessionId);
-            GameMember requester = GameMemberRepository.find(transaction, sessionId, caller.id())
-                    .filter(GameMember::active)
-                    .orElseThrow(() -> new ForbiddenException("This account does not take part in a game"));
+            GameMember requester = GameMemberRepository.caller(transaction, caller);
             Long targetId = submission.targetMemberId();
             if (joker) {
                 if (!GameMember.hasState(requester.role()) || requester.trackerId() == null) {
@@ -477,6 +475,7 @@ public class GameRequestService {
         long sessionId = requester.gameSessionId();
         return transactions.write(transaction -> {
             transaction.lockSession(sessionId);
+            GameMemberRepository.caller(transaction, requester);
             GameRequest request = GameRequestRepository.find(transaction, sessionId, id)
                     .orElseThrow(() -> GameErrors.notFound("Game request not found"));
             if (request.requesterMemberId() == null || request.requesterMemberId() != requester.id()) {

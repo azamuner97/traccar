@@ -307,6 +307,9 @@ public class GameMemberService {
 
     // Retirement --------------------------------------------------------------------------------------------
 
+    /** Why a retired member's running speedhunt, live uploads and the requests on it ended. */
+    static final String RETIRED = "The member was retired";
+
     private GameMember retire(GameTransaction transaction, GameMember member) throws Exception {
         if (!member.active()) {
             return member;
@@ -315,8 +318,69 @@ public class GameMemberService {
             throw GameErrors.conflict("The spectator cannot be retired, because number 1 is never reused;"
                     + " unbind its account instead");
         }
+        endActivity(transaction, member);
         GameMemberRepository.retire(transaction, member.gameSessionId(), member.id());
         return bindingChanged(transaction, member);
+    }
+
+    /**
+     * Ends what a retiring member takes part in, so nothing waits for a member that can no longer act or be acted
+     * on: its running speedhunt (terminated, and armed fakes on the pings it did not reach are returned), its active
+     * live uploads as their source or relay recipient, and hunters' open requests on it. Its catch, breaks and
+     * history stay; its own requests and plans end through the binding hooks.
+     */
+    private void endActivity(GameTransaction transaction, GameMember member) throws Exception {
+        long sessionId = member.gameSessionId();
+        Set<Long> owners = new java.util.HashSet<>();
+        boolean history = false;
+        var run = GameStateRepository.activeRun(transaction, sessionId, member.id());
+        if (run.isPresent()) {
+            GameStateRepository.endRun(transaction, sessionId, run.get().id(), GameState.TERMINATED, RETIRED);
+            for (var plan : GameJokerRepository.plans(transaction, sessionId, "p.boundrunid = ? AND "
+                    + GameJokerRepository.ARMED, run.get().id())) {
+                GameJokerRepository.release(transaction,
+                        GameJokerRepository.reservation(transaction, sessionId, plan.reservationId()).orElseThrow(),
+                        "Server", "The speedhunt ended when its target was retired");
+                owners.add(plan.memberId());
+            }
+            history = true;
+        }
+        for (GameState.LiveUpload upload : GameStateRepository.activeUploads(transaction, sessionId)) {
+            if (Objects.equals(upload.sourceMemberId(), member.id())
+                    || Objects.equals(upload.recipientMemberId(), member.id())) {
+                GameStateRepository.endUpload(transaction, sessionId, upload.id(), "retired");
+                history |= GameState.SPEEDHUNT_PING.equals(upload.purpose());
+            }
+        }
+        boolean requests = false;
+        boolean pool = false;
+        for (GameRequest request : GameRequestRepository.open(transaction, sessionId)) {
+            if (request.targetMemberId() == null || request.targetMemberId() != member.id()
+                    || Objects.equals(request.requesterMemberId(), member.id())) {
+                continue;
+            }
+            String status = GameRequest.EXECUTING.equals(request.status()) ? GameRequest.FAILED : GameRequest.EXPIRED;
+            var settled = GameRequestRepository.finish(transaction, request, status, RETIRED, null, false);
+            owners.addAll(settled.members());
+            pool |= settled.pool();
+            requests = true;
+        }
+        if (pool) {
+            owners.addAll(GameStateService.hunters(transaction, sessionId));
+        }
+        if (history) {
+            transaction.afterCommit(() -> publisher.invalidate(
+                    new GamePublisher.Invalidation(sessionId, GamePublisher.SPEEDHUNT_HISTORY, null)));
+        }
+        if (requests) {
+            transaction.afterCommit(() -> publisher.invalidate(
+                    new GamePublisher.Invalidation(sessionId, GamePublisher.REQUESTS, null)));
+        }
+        if (!owners.isEmpty()) {
+            Set<Long> recipients = Set.copyOf(owners);
+            transaction.afterCommit(() -> publisher.invalidate(
+                    new GamePublisher.Invalidation(sessionId, GamePublisher.JOKERS, recipients)));
+        }
     }
 
     /**

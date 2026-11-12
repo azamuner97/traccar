@@ -95,9 +95,17 @@ public abstract class BaseObjectResource<T extends BaseModel> extends BaseResour
         return Response.ok(entity).build();
     }
 
+    /** The object a request names in its path must be the one its body changes. */
+    protected static void checkPathId(long pathId, long entityId) {
+        if (pathId != entityId) {
+            throw new IllegalArgumentException("The object ID must match the ID in the path");
+        }
+    }
+
     @Path("{id}")
     @PUT
-    public Response update(T entity) throws Exception {
+    public Response update(@PathParam("id") long id, T entity) throws Exception {
+        checkPathId(id, entity.getId());
         permissionsService.checkWritePermission(baseClass, getUserId(), entity.getId());
 
         boolean skipReadonly = false;

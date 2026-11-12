@@ -24,14 +24,15 @@ import java.util.TreeSet;
 
 /**
  * Mirror-only hunter access (model 1, 4c), on members and resource rows. Break and fake jokers protect a participant
- * only while hunters see them through mirrors, so while a session has break or fake jokers allocated or active
- * (granted or used above zero), no active hunter of the session may access the tracker of an active player or
- * supporter: neither directly nor through a group, at any nesting depth. Spectators keep their real access by
- * design.
+ * only while hunters see them through mirrors, so while a session has break or fake jokers allocated, held or active
+ * (granted or used above zero, or a reservation still held, such as a break planned beyond the allocation), no active
+ * hunter of the session may access the tracker of an active player or supporter: neither directly nor through a
+ * group, at any nesting depth. Spectators keep their real access by design.
  *
  * <p>The rule is checked where access or jokers are granted: joker grants and planned breaks (409), and binding
  * changes, permission grants and device and group moves (422, because 409 means a revision conflict there). Only
- * access a change adds is refused, so a change never fails for access that existed before it.
+ * access a change adds is refused, so a change never fails for access that existed before it. A break does not start
+ * while a hunter could see the participant's tracker (409), whatever gave that access.
  */
 @Singleton
 public class GameAccessRule implements GameBindingHook {
@@ -63,11 +64,22 @@ public class GameAccessRule implements GameBindingHook {
         this.transactions = transactions;
     }
 
-    /** Whether a session has break or fake jokers allocated or active. */
+    /** The sessions with break or fake jokers allocated, held or active, as a query of four parameters. */
+    private static final String PROTECTED_SESSIONS = "SELECT gamesessionid FROM tc_game_jokers WHERE type IN (?, ?)"
+            + " AND (granted > 0 OR used > 0) UNION SELECT gamesessionid FROM tc_game_joker_reservations"
+            + " WHERE type IN (?, ?) AND status = '" + GameJokerRepository.RESERVED + "'";
+
+    private static Object[] protectedParameters(Object... more) {
+        List<Object> result = new ArrayList<>(List.of(GameJokerRepository.BREAK, GameJokerRepository.FAKE_PING,
+                GameJokerRepository.BREAK, GameJokerRepository.FAKE_PING));
+        result.addAll(List.of(more));
+        return result.toArray();
+    }
+
+    /** Whether a session has break or fake jokers allocated, held or active. */
     static boolean required(GameTransaction transaction, long sessionId) throws SQLException {
-        return transaction.exists("SELECT 1 FROM tc_game_jokers WHERE gamesessionid = ? AND type IN (?, ?)"
-                + " AND (granted > 0 OR used > 0)", sessionId, GameJokerRepository.BREAK,
-                GameJokerRepository.FAKE_PING);
+        return transaction.exists("SELECT 1 FROM (" + PROTECTED_SESSIONS + ") protected_sessions"
+                + " WHERE gamesessionid = ?", protectedParameters(sessionId));
     }
 
     private static String placeholders(int count) {
@@ -168,6 +180,15 @@ public class GameAccessRule implements GameBindingHook {
         }
     }
 
+    /** Refuses the start of a member's break while a hunter of the session could see the member's tracker (409). */
+    static void checkBreakStart(GameTransaction transaction, long sessionId, long memberId) throws SQLException {
+        List<Violation> found = violations(transaction, sessionId, Change.NONE).stream()
+                .filter(violation -> violation.participantMemberId() == memberId).toList();
+        if (!found.isEmpty()) {
+            throw GameErrors.conflict(message(found, "The break cannot start"));
+        }
+    }
+
     private static jakarta.ws.rs.WebApplicationException refused(String message) {
         return new jakarta.ws.rs.WebApplicationException(message, REFUSED);
     }
@@ -205,9 +226,9 @@ public class GameAccessRule implements GameBindingHook {
             return;
         }
         transactions.read(transaction -> {
-            List<Long> sessions = transaction.list("SELECT DISTINCT gamesessionid FROM tc_game_jokers"
-                    + " WHERE type IN (?, ?) AND (granted > 0 OR used > 0) ORDER BY gamesessionid",
-                    rows -> rows.getLong(1), GameJokerRepository.BREAK, GameJokerRepository.FAKE_PING);
+            List<Long> sessions = transaction.list("SELECT DISTINCT gamesessionid FROM (" + PROTECTED_SESSIONS
+                    + ") protected_sessions ORDER BY gamesessionid", rows -> rows.getLong(1),
+                    protectedParameters());
             for (long sessionId : sessions) {
                 Set<List<Long>> known = new TreeSet<>((a, b) -> a.get(0).equals(b.get(0))
                         ? Long.compare(a.get(1), b.get(1)) : Long.compare(a.get(0), b.get(0)));

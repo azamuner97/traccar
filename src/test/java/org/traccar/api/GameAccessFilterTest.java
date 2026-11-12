@@ -143,4 +143,20 @@ public class GameAccessFilterTest {
         verify(read, never()).abortWith(any());
         verify(create, never()).abortWith(any());
     }
+
+    @Test
+    void grantsAreReadLikeThePermissionResourceReadsThem() throws Exception {
+        filter.filter(request("POST", "permissions",
+                "{\"UserId\":10,\"DeviceId\":\"101\"}"));
+        assertArrayEquals(new long[] {10, 101}, checked().userDevices().getFirst());
+        reset(rule);
+        filter.filter(request("POST", "permissions/bulk", "[{\"USERID\":\"10\",\"GROUPID\":50}]"));
+        assertArrayEquals(new long[] {10, 50}, checked().userGroups().getFirst());
+    }
+
+    @Test
+    void movesAreReadAsTheObjectResourceBindsThem() throws Exception {
+        filter.filter(request("PUT", "devices/0101", "{\"id\":101,\"groupId\":\"60\"}"));
+        assertEquals(60L, checked().deviceGroups().get(101L));
+    }
 }

@@ -126,12 +126,16 @@ def main(tool_source):
             assert member["trackerId"] == devices[unique_id]["id"] and member["userId"], member
             attributes = devices[unique_id]["attributes"]
             assert attributes.get("traccarToolRole") == role and attributes.get("traccarToolRoleNumber") == number
+            # Role and number identify a member only within its session: the marker names the session.
+            assert attributes.get("traccarToolGameSessionId") == session_id, attributes
         resources = api.request("GET", f"/game-sessions/{session_id}/resources")
         mirror_ids = {row["deviceId"] for row in resources["mirrors"] if row["state"] == "active"}
         assert mirror_ids and all(devices_by_id.get("attributes", {}).get("traccarToolMirror")
                                   for devices_by_id in api.request("GET", "/devices")
                                   if devices_by_id["id"] in mirror_ids)
         assert {row["purpose"] for row in resources["groups"]} >= {"player", "supporter", "hunter"}, resources
+        assert all(device["attributes"].get("traccarToolGameSessionId") == session_id
+                   for device in api.request("GET", "/devices") if device["id"] in mirror_ids)
         # Every generated account signs in and reads its own member's status; none is an administrator.
         logins = session["login_credentials"]
         assert logins, session.keys()
@@ -180,7 +184,7 @@ def main(tool_source):
             == members[("player", 2)]["id"]
         print("Tool device setup passed: controller lease at connection, session creation, member planning from "
               "the device list, generated accounts bound to members (no model-1 markers, no administrators), "
-              "trackers with role markers, mirror and group rows, mirror-only hunter access, an idempotent "
+              "trackers and mirrors with role and session markers, mirror and group rows, mirror-only hunter access, an idempotent "
               "second run, and a device-list import that rebinds a replaced tracker to the same member.")
         game_flow(connection, clients, session, name, session_id, accounts, profile, tmp.name)
         return connection, clients, session, name, session_id, accounts, members

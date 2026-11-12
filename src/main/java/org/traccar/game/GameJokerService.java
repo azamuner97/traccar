@@ -472,6 +472,7 @@ public class GameJokerService {
         long sessionId = owner.gameSessionId();
         return transactions.write(transaction -> {
             transaction.lockSession(sessionId);
+            GameMemberRepository.caller(transaction, owner);
             var reservation = GameJokerRepository.reservation(transaction, sessionId, reservationId)
                     .filter(item -> item.memberId() != null && item.memberId() == owner.id())
                     .orElseThrow(() -> GameErrors.notFound("Joker reservation not found"));

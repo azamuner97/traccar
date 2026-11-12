@@ -1,5 +1,6 @@
 package org.traccar.api;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.ws.rs.container.ContainerRequestContext;
 import jakarta.ws.rs.core.MultivaluedHashMap;
 import jakarta.ws.rs.core.PathSegment;
@@ -13,6 +14,8 @@ import org.traccar.api.security.UserPrincipal;
 import org.traccar.game.GameControllerService;
 import org.traccar.game.GameOwnershipService;
 
+import java.io.ByteArrayInputStream;
+import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Set;
@@ -39,6 +42,7 @@ public class GameControllerFilterTest {
         filter = new GameControllerFilter();
         inject(filter, "controller", controller);
         inject(filter, "ownership", ownership);
+        inject(filter, "objectMapper", new ObjectMapper());
         // User 10 is a member of a stored session; a Tool holds the lease without being the caller.
         when(ownership.owned()).thenReturn(new GameOwnershipService.Owned(Set.of(201L), Set.of(), Set.of(10L, 11L),
                 Set.of()));
@@ -98,5 +102,40 @@ public class GameControllerFilterTest {
         var read = request(1, "GET", "game-sessions/5/snapshot");
         filter.filter(read);
         assertNull(abortStatus(read));
+    }
+
+    private ContainerRequestContext request(long userId, String method, String path, String body) {
+        var request = request(userId, method, path);
+        when(request.getEntityStream()).thenReturn(new ByteArrayInputStream(body.getBytes(StandardCharsets.UTF_8)));
+        return request;
+    }
+
+    @Test
+    void pathNumbersAreReadLikeJerseyReadsThem() throws Exception {
+        // "07" names session 7 for the resource, so it is the executing session's write.
+        when(controller.executingSessionId()).thenReturn(7L);
+        when(controller.check(anyLong(), any())).thenThrow(GameControllerService.locked("lease required"));
+        for (String path : new String[] {"game-sessions/07/name", "game-sessions/+7/name", "game-sessions/7/name"}) {
+            var rename = request(1, "PUT", path);
+            filter.filter(rename);
+            assertEquals(423, abortStatus(rename), path);
+        }
+        var owned = request(1, "PUT", "devices/0201");
+        filter.filter(owned);
+        assertEquals(423, abortStatus(owned));
+    }
+
+    @Test
+    void permissionKeysAreReadLikeTheResourceReadsThem() throws Exception {
+        // Keys resolve to classes case-insensitively, and values may be strings; device 201 is game-owned.
+        for (String body : new String[] {"{\"UserId\":30,\"DeviceId\":201}", "{\"userId\":\"30\",\"deviceId\":\"201\"}",
+                "[{\"USERID\":30,\"DEVICEID\":201}]", "{\"userXX\":30,\"deviceXX\":201}"}) {
+            var grant = request(1, "POST", "permissions", body);
+            filter.filter(grant);
+            assertEquals(423, abortStatus(grant), body);
+        }
+        var unrelated = request(1, "POST", "permissions", "{\"userId\":30,\"deviceId\":999}");
+        filter.filter(unrelated);
+        assertNull(abortStatus(unrelated));
     }
 }

@@ -30,39 +30,233 @@
     - Timestamps are UTC DATETIME(3), written and read as LocalDateTime at UTC (GameTime).
   -->
 
-  <changeSet author="traccar-tool" id="game-model-2-drop-model-1">
-    <!-- Children first: MySQL ignores DROP TABLE ... CASCADE, so foreign keys decide the order. -->
+  <!--
+    The model-1 drop, one destructive statement per changeset. MySQL commits every DDL statement on its own, so an
+    interrupted cutover keeps what it already dropped; each changeset therefore runs only while its object still
+    exists, and a restart resumes where the cutover stopped. None of them runs on a database that already ran the
+    former single drop changeset (game-model-2-drop-model-1) or already has the model-2 tables, whose names partly
+    repeat model 1's.
+  -->
+  <changeSet author="traccar-tool" id="game-model-2-drop-tc_game_push_outbox">
+    <preConditions onFail="MARK_RAN">
+      <not><changeSetExecuted id="game-model-2-drop-model-1" author="traccar-tool"
+        changeLogFile="changelog-game-model-2.xml" /></not>
+      <not><tableExists tableName="tc_game_session_settings" /></not>
+      <tableExists tableName="tc_game_push_outbox" />
+    </preConditions>
     <dropTable tableName="tc_game_push_outbox" />
+  </changeSet>
+  <changeSet author="traccar-tool" id="game-model-2-drop-tc_game_deliveries">
+    <preConditions onFail="MARK_RAN">
+      <not><changeSetExecuted id="game-model-2-drop-model-1" author="traccar-tool"
+        changeLogFile="changelog-game-model-2.xml" /></not>
+      <not><tableExists tableName="tc_game_session_settings" /></not>
+      <tableExists tableName="tc_game_deliveries" />
+    </preConditions>
     <dropTable tableName="tc_game_deliveries" />
+  </changeSet>
+  <changeSet author="traccar-tool" id="game-model-2-drop-tc_game_joker_ledger">
+    <preConditions onFail="MARK_RAN">
+      <not><changeSetExecuted id="game-model-2-drop-model-1" author="traccar-tool"
+        changeLogFile="changelog-game-model-2.xml" /></not>
+      <not><tableExists tableName="tc_game_session_settings" /></not>
+      <tableExists tableName="tc_game_joker_ledger" />
+    </preConditions>
     <dropTable tableName="tc_game_joker_ledger" />
+  </changeSet>
+  <changeSet author="traccar-tool" id="game-model-2-drop-tc_game_joker_reservations">
+    <preConditions onFail="MARK_RAN">
+      <not><changeSetExecuted id="game-model-2-drop-model-1" author="traccar-tool"
+        changeLogFile="changelog-game-model-2.xml" /></not>
+      <not><tableExists tableName="tc_game_session_settings" /></not>
+      <tableExists tableName="tc_game_joker_reservations" />
+    </preConditions>
     <dropTable tableName="tc_game_joker_reservations" />
+  </changeSet>
+  <changeSet author="traccar-tool" id="game-model-2-drop-tc_game_jokers">
+    <preConditions onFail="MARK_RAN">
+      <not><changeSetExecuted id="game-model-2-drop-model-1" author="traccar-tool"
+        changeLogFile="changelog-game-model-2.xml" /></not>
+      <not><tableExists tableName="tc_game_session_settings" /></not>
+      <tableExists tableName="tc_game_jokers" />
+    </preConditions>
     <dropTable tableName="tc_game_jokers" />
+  </changeSet>
+  <changeSet author="traccar-tool" id="game-model-2-drop-tc_game_requests">
+    <preConditions onFail="MARK_RAN">
+      <not><changeSetExecuted id="game-model-2-drop-model-1" author="traccar-tool"
+        changeLogFile="changelog-game-model-2.xml" /></not>
+      <not><tableExists tableName="tc_game_session_settings" /></not>
+      <tableExists tableName="tc_game_requests" />
+    </preConditions>
     <dropTable tableName="tc_game_requests" />
+  </changeSet>
+  <changeSet author="traccar-tool" id="game-model-2-drop-tc_game_session_status">
+    <preConditions onFail="MARK_RAN">
+      <not><changeSetExecuted id="game-model-2-drop-model-1" author="traccar-tool"
+        changeLogFile="changelog-game-model-2.xml" /></not>
+      <not><tableExists tableName="tc_game_session_settings" /></not>
+      <tableExists tableName="tc_game_session_status" />
+    </preConditions>
     <dropTable tableName="tc_game_session_status" />
+  </changeSet>
+  <changeSet author="traccar-tool" id="game-model-2-drop-tc_game_controller_history">
+    <preConditions onFail="MARK_RAN">
+      <not><changeSetExecuted id="game-model-2-drop-model-1" author="traccar-tool"
+        changeLogFile="changelog-game-model-2.xml" /></not>
+      <not><tableExists tableName="tc_game_session_settings" /></not>
+      <tableExists tableName="tc_game_controller_history" />
+    </preConditions>
     <dropTable tableName="tc_game_controller_history" />
+  </changeSet>
+  <changeSet author="traccar-tool" id="game-model-2-drop-tc_game_notifications">
+    <preConditions onFail="MARK_RAN">
+      <not><changeSetExecuted id="game-model-2-drop-model-1" author="traccar-tool"
+        changeLogFile="changelog-game-model-2.xml" /></not>
+      <not><tableExists tableName="tc_game_session_settings" /></not>
+      <tableExists tableName="tc_game_notifications" />
+    </preConditions>
     <dropTable tableName="tc_game_notifications" />
+  </changeSet>
+  <changeSet author="traccar-tool" id="game-model-2-drop-tc_game_proximity_grants">
+    <preConditions onFail="MARK_RAN">
+      <not><changeSetExecuted id="game-model-2-drop-model-1" author="traccar-tool"
+        changeLogFile="changelog-game-model-2.xml" /></not>
+      <not><tableExists tableName="tc_game_session_settings" /></not>
+      <tableExists tableName="tc_game_proximity_grants" />
+    </preConditions>
     <dropTable tableName="tc_game_proximity_grants" />
+  </changeSet>
+  <changeSet author="traccar-tool" id="game-model-2-drop-tc_game_proximity_circles">
+    <preConditions onFail="MARK_RAN">
+      <not><changeSetExecuted id="game-model-2-drop-model-1" author="traccar-tool"
+        changeLogFile="changelog-game-model-2.xml" /></not>
+      <not><tableExists tableName="tc_game_session_settings" /></not>
+      <tableExists tableName="tc_game_proximity_circles" />
+    </preConditions>
     <dropTable tableName="tc_game_proximity_circles" />
+  </changeSet>
+  <changeSet author="traccar-tool" id="game-model-2-drop-tc_game_proximity_state">
+    <preConditions onFail="MARK_RAN">
+      <not><changeSetExecuted id="game-model-2-drop-model-1" author="traccar-tool"
+        changeLogFile="changelog-game-model-2.xml" /></not>
+      <not><tableExists tableName="tc_game_session_settings" /></not>
+      <tableExists tableName="tc_game_proximity_state" />
+    </preConditions>
     <dropTable tableName="tc_game_proximity_state" />
+  </changeSet>
+  <changeSet author="traccar-tool" id="game-model-2-drop-tc_game_timetable_entries">
+    <preConditions onFail="MARK_RAN">
+      <not><changeSetExecuted id="game-model-2-drop-model-1" author="traccar-tool"
+        changeLogFile="changelog-game-model-2.xml" /></not>
+      <not><tableExists tableName="tc_game_session_settings" /></not>
+      <tableExists tableName="tc_game_timetable_entries" />
+    </preConditions>
     <dropTable tableName="tc_game_timetable_entries" />
+  </changeSet>
+  <changeSet author="traccar-tool" id="game-model-2-drop-tc_game_timetables">
+    <preConditions onFail="MARK_RAN">
+      <not><changeSetExecuted id="game-model-2-drop-model-1" author="traccar-tool"
+        changeLogFile="changelog-game-model-2.xml" /></not>
+      <not><tableExists tableName="tc_game_session_settings" /></not>
+      <tableExists tableName="tc_game_timetables" />
+    </preConditions>
     <dropTable tableName="tc_game_timetables" />
+  </changeSet>
+  <changeSet author="traccar-tool" id="game-model-2-drop-tc_game_session_logs">
+    <preConditions onFail="MARK_RAN">
+      <not><changeSetExecuted id="game-model-2-drop-model-1" author="traccar-tool"
+        changeLogFile="changelog-game-model-2.xml" /></not>
+      <not><tableExists tableName="tc_game_session_settings" /></not>
+      <tableExists tableName="tc_game_session_logs" />
+    </preConditions>
     <dropTable tableName="tc_game_session_logs" />
+  </changeSet>
+  <changeSet author="traccar-tool" id="game-model-2-drop-tc_game_geofence_plans">
+    <preConditions onFail="MARK_RAN">
+      <not><changeSetExecuted id="game-model-2-drop-model-1" author="traccar-tool"
+        changeLogFile="changelog-game-model-2.xml" /></not>
+      <not><tableExists tableName="tc_game_session_settings" /></not>
+      <tableExists tableName="tc_game_geofence_plans" />
+    </preConditions>
     <dropTable tableName="tc_game_geofence_plans" />
+  </changeSet>
+  <changeSet author="traccar-tool" id="game-model-2-drop-tc_game_session_credentials">
+    <preConditions onFail="MARK_RAN">
+      <not><changeSetExecuted id="game-model-2-drop-model-1" author="traccar-tool"
+        changeLogFile="changelog-game-model-2.xml" /></not>
+      <not><tableExists tableName="tc_game_session_settings" /></not>
+      <tableExists tableName="tc_game_session_credentials" />
+    </preConditions>
     <dropTable tableName="tc_game_session_credentials" />
+  </changeSet>
+  <changeSet author="traccar-tool" id="game-model-2-drop-tc_game_session_members">
+    <preConditions onFail="MARK_RAN">
+      <not><changeSetExecuted id="game-model-2-drop-model-1" author="traccar-tool"
+        changeLogFile="changelog-game-model-2.xml" /></not>
+      <not><tableExists tableName="tc_game_session_settings" /></not>
+      <tableExists tableName="tc_game_session_members" />
+    </preConditions>
     <dropTable tableName="tc_game_session_members" />
-
+  </changeSet>
+  <changeSet author="traccar-tool" id="game-model-2-drop-controller-session-fk">
+    <preConditions onFail="MARK_RAN">
+      <not><changeSetExecuted id="game-model-2-drop-model-1" author="traccar-tool"
+        changeLogFile="changelog-game-model-2.xml" /></not>
+      <not><tableExists tableName="tc_game_session_settings" /></not>
+      <foreignKeyConstraintExists foreignKeyTableName="tc_game_controller" foreignKeyName="fk_game_controller_session" />
+    </preConditions>
     <!-- The lease row stays, so the controller epoch keeps increasing; it is re-pointed at model-2 sessions below. -->
     <dropForeignKeyConstraint baseTableName="tc_game_controller" constraintName="fk_game_controller_session" />
+  </changeSet>
+  <changeSet author="traccar-tool" id="game-model-2-clear-controller-session">
+    <preConditions onFail="MARK_RAN">
+      <not><changeSetExecuted id="game-model-2-drop-model-1" author="traccar-tool"
+        changeLogFile="changelog-game-model-2.xml" /></not>
+      <not><tableExists tableName="tc_game_session_settings" /></not>
+      <columnExists tableName="tc_game_controller" columnName="gamesessionid" />
+    </preConditions>
     <update tableName="tc_game_controller">
       <column name="gamesessionid" valueComputed="NULL" />
     </update>
+  </changeSet>
+  <changeSet author="traccar-tool" id="game-model-2-drop-tc_game_sessions">
+    <preConditions onFail="MARK_RAN">
+      <not><changeSetExecuted id="game-model-2-drop-model-1" author="traccar-tool"
+        changeLogFile="changelog-game-model-2.xml" /></not>
+      <not><tableExists tableName="tc_game_session_settings" /></not>
+      <tableExists tableName="tc_game_sessions" />
+    </preConditions>
     <dropTable tableName="tc_game_sessions" />
-
+  </changeSet>
+  <changeSet author="traccar-tool" id="game-model-2-delete-game-drawings">
+    <preConditions onFail="MARK_RAN">
+      <not><changeSetExecuted id="game-model-2-drop-model-1" author="traccar-tool"
+        changeLogFile="changelog-game-model-2.xml" /></not>
+      <not><tableExists tableName="tc_game_session_settings" /></not>
+      <columnExists tableName="tc_drawings" columnName="sessiondeviceid" />
+    </preConditions>
     <!-- Game drawings belonged to model-1 sessions; drawings of ordinary accounts stay. -->
     <delete tableName="tc_drawings">
       <where>sessiondeviceid IS NOT NULL</where>
     </delete>
+  </changeSet>
+  <changeSet author="traccar-tool" id="game-model-2-drop-drawings-session-fk">
+    <preConditions onFail="MARK_RAN">
+      <not><changeSetExecuted id="game-model-2-drop-model-1" author="traccar-tool"
+        changeLogFile="changelog-game-model-2.xml" /></not>
+      <not><tableExists tableName="tc_game_session_settings" /></not>
+      <foreignKeyConstraintExists foreignKeyTableName="tc_drawings" foreignKeyName="fk_drawings_sessiondeviceid" />
+    </preConditions>
     <dropForeignKeyConstraint baseTableName="tc_drawings" constraintName="fk_drawings_sessiondeviceid" />
+  </changeSet>
+  <changeSet author="traccar-tool" id="game-model-2-drop-drawings-session-column">
+    <preConditions onFail="MARK_RAN">
+      <not><changeSetExecuted id="game-model-2-drop-model-1" author="traccar-tool"
+        changeLogFile="changelog-game-model-2.xml" /></not>
+      <not><tableExists tableName="tc_game_session_settings" /></not>
+      <columnExists tableName="tc_drawings" columnName="sessiondeviceid" />
+    </preConditions>
     <dropColumn tableName="tc_drawings" columnName="sessiondeviceid" />
   </changeSet>
 

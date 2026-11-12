@@ -225,6 +225,8 @@ def audit_controller(fixtures, user_id, user_credentials):
     api.execute(session_id)
     api.request("PUT", f"/game-sessions/{session_id}/config",
                 {"expectedRevision": 2, "schemaVersion": 5, "document": {"game_settings": {"x": 1}}}, epoch=False, expected=423)
+    api.request("PUT", f"/game-sessions/0{session_id}/name", {"name": api.PREFIX + "-renamed"}, epoch=False,
+                expected=423)
 
     # Standard mutations of game-owned resources need the epoch while a lease is held.
     renamed = {**mirror, "name": mirror["name"] + "-renamed"}
@@ -235,6 +237,15 @@ def audit_controller(fixtures, user_id, user_credentials):
     api.request("POST", "/permissions", {"userId": user_id, "deviceId": real["id"]}, epoch=False, expected=423)
     unowned = fixtures.device(api.PREFIX + "-ctl-unowned")
     api.request("PUT", f"/devices/{unowned['id']}", {**unowned, "name": unowned["name"] + "-x"}, epoch=False)
+    # The fence judges the object the resource changes: a body naming an owned device under an unowned path is
+    # refused, path numbers are read as Jersey reads them, and permission keys as the permission resource does.
+    api.request("PUT", f"/devices/{unowned['id']}", {**renamed, "name": "smuggled"}, epoch=False, expected=400)
+    api.request("PUT", f"/devices/{unowned['id']}", {**renamed, "name": "smuggled"}, expected=400)
+    assert stored_device(mirror["id"])["name"] == renamed["name"]
+    api.request("PUT", f"/devices/0{mirror['id']}", renamed, epoch=False, expected=423)
+    api.request("POST", "/permissions", {"UserId": user_id, "DeviceId": real["id"]}, epoch=False, expected=423)
+    api.request("POST", "/permissions", {"userId": str(user_id), "deviceId": str(real["id"])}, epoch=False,
+                expected=423)
     # Members update their own account (preferences) while a Tool controls the game.
     own = api.request("GET", f"/users/{user_id}", credentials=user_credentials)
     updated = api.request("PUT", f"/users/{user_id}", {**own, "attributes": {
@@ -618,6 +629,9 @@ def audit_mirror_only_access(game):
         api.request("PUT", f"/devices/{tracker['id']}", {**device, "groupId": real["id"]})
         # Direct access, access inherited from a parent group, and moves into a group a hunter sees are refused.
         api.request("POST", "/permissions", {"userId": hunter_id, "deviceId": tracker["id"]}, expected=422)
+        api.request("POST", "/permissions", {"UserId": hunter_id, "DeviceId": tracker["id"]}, expected=422)
+        api.request("POST", "/permissions/bulk", [{"USERID": str(hunter_id), "DEVICEID": str(tracker["id"])}],
+                    expected=422)
         api.request("POST", "/permissions", {"userId": hunter_id, "groupId": parent["id"]}, expected=422)
         api.request("POST", "/permissions", {"userId": hunter_id, "groupId": view["id"]}, expected=204)
         group = api.request("GET", f"/groups/{real['id']}")
@@ -771,6 +785,32 @@ def audit_speedhunt_fakes(game):
         inventory = game.inventory(key, "fakePing")
         assert inventory["available"] == before[key]["available"] - 1, (key, before[key], inventory)
         assert inventory["used"] + inventory["reserved"] == before[key]["used"] + before[key]["reserved"] + 1
+    game.reconcile()
+
+
+def audit_retired_target(game):
+    """Retiring a speedhunt's target ends its run, the requests on it and its live uploads; nothing waits for it."""
+    zoe = game.add("zoe", "player", "Zoe")
+    game.change("ben", "break", 1)
+    game.ping("zoe", 1, overAllocate=True)
+    game.effects(operations=[{"type": "liveUploadStarted", "purpose": "manual", "sourceMemberId": zoe["id"],
+                              "toHunters": True, "toPlayers": False, "toSupporters": False, "intervalSeconds": 15,
+                              "deadline": api.iso(minutes=5), "reason": "audit"}])
+    pending = game.submit("hunter", {"type": "speedhuntStaticPing", "targetMemberId": zoe["id"],
+                                     "baseRevision": game.revision("zoe")})
+    assert refusal("/game-requests", {"type": "jokerBreak"}, game.credentials["ben"]) == BREAK_UNAVAILABLE
+    api.request("POST", f"/game-sessions/{game.id}/members/{zoe['id']}/retire", {})
+    assert not game.status("ben")["status"]["speedhunt"]["active"]
+    assert game.operator_request(pending["id"])["status"] == "expired"
+    state = api.request("GET", f"/game-sessions/{game.id}/snapshot")["state"]
+    run = next(item for item in state["runs"] if item["run"]["targetMemberId"] == zoe["id"])["run"] \
+        if isinstance(state["runs"][0], dict) and "run" in state["runs"][0] else \
+        next(item for item in state["runs"] if item["targetMemberId"] == zoe["id"])
+    assert run["outcome"] == "terminated", run
+    assert all(item["state"] != "active" for item in state["liveUploads"] if item["sourceMemberId"] == zoe["id"])
+    request = game.submit("ben", {"type": "jokerBreak"})
+    api.request("POST", f"/game-requests/{request['id']}/cancel", {}, credentials=game.credentials["ben"])
+    game.change("ben", "break", -1)
     game.reconcile()
 
 
@@ -1147,6 +1187,7 @@ def main(tool_source=None):
         audit_mirror_only_access(game)
         audit_timetable_fakes(game)
         audit_speedhunt_fakes(game)
+        audit_retired_target(game)
         # A change of control ends open requests: waiting ones expire.
         waiting = game.submit("hunter", {"type": "speedhuntTerminate", "targetMemberId": game.member_id("ben"),
                                          "baseRevision": game.revision("ben")}, expected=200)
@@ -1163,14 +1204,14 @@ def main(tool_source=None):
             audit_tool(tool_source)
         print("MySQL/HTTP game-session audit passed: admin-only access, API version 5, revision conflicts and "
               "idempotent retries, credential encryption at rest, timetable entries keyed by member, logs, "
-              "cascading deletion, controller lease with fenced game and standard endpoints, push fencing and the "
-              "outbox, drift reporting, takeover, expiry, idempotent effects with latest-position and online "
+              "cascading deletion, controller lease with fenced game and standard endpoints (path and body IDs, "
+              "Jersey path numbers, permission keys as the resource reads them), push fencing and the outbox, drift reporting, takeover, expiry, idempotent effects with latest-position and online "
               "status, hunters' requests with role-filtered status, stale revisions, approval, claim, outcome and "
               "expiry on takeover, ping numbering and private sources, hunter positions, speedhunt pool and break "
               "jokers, catch and release, planned, waiting, started and cancelled breaks, mirror-only hunter "
               "access for permissions, group and device moves and bindings, timetable fakes (used, released, "
               "cancelled) with guarded positions, speedhunt fakes bound at a run's first ping and applied to the "
-              "hunters' mirror, participant privacy (identical status, hash, refusals and announcements for a "
+              "hunters' mirror, a retired speedhunt target ending its run, requests and live uploads, participant privacy (identical status, hash, refusals and announcements for a "
               "speedhunt's target), and timetable pings without cell content"
               + (", plus the Tool's request processor, break service and repository round trip." if tool_source
                  else "."))

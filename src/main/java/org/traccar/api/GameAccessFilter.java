@@ -59,14 +59,6 @@ public class GameAccessFilter implements ContainerRequestFilter {
     @Inject
     private Injector injector;
 
-    private static Long number(String value) {
-        return value != null && value.matches("[1-9][0-9]{0,17}") ? Long.parseLong(value) : null;
-    }
-
-    private static Long parent(JsonNode node) {
-        long value = node.asLong(0);
-        return value > 0 ? value : null;
-    }
 
     @Override
     public void filter(ContainerRequestContext request) {
@@ -86,7 +78,7 @@ public class GameAccessFilter implements ContainerRequestFilter {
         String root = path.getFirst();
         boolean permissions = "POST".equals(method) && "permissions".equals(root)
                 && (path.size() == 1 || path.size() == 2 && "bulk".equals(path.get(1)));
-        Long id = path.size() == 2 ? number(path.get(1)) : null;
+        Long id = path.size() == 2 ? GamePermissionBodies.number(path.get(1)) : null;
         boolean move = "PUT".equals(method) && id != null && ("devices".equals(root) || "groups".equals(root));
         if (!permissions && !move || request.getSecurityContext() == null
                 || !(request.getSecurityContext().getUserPrincipal() instanceof UserPrincipal principal)) {
@@ -99,7 +91,8 @@ public class GameAccessFilter implements ContainerRequestFilter {
                 return;
             }
             JsonNode tree = objectMapper.readTree(body);
-            GameAccessRule.Change change = permissions ? grants(tree) : moves(root, id, tree);
+            GameAccessRule.Change change = permissions
+                    ? grants(objectMapper, tree) : moves(objectMapper, root, id, tree);
             if (change.isEmpty() || !allowed(principal.getUserId(), permissions, root, id, change)) {
                 return;
             }
@@ -145,36 +138,37 @@ public class GameAccessFilter implements ContainerRequestFilter {
         }
     }
 
-    static GameAccessRule.Change grants(JsonNode tree) {
-        List<JsonNode> items = new ArrayList<>();
-        if (tree.isArray()) {
-            tree.forEach(items::add);
-        } else if (tree.isObject()) {
-            items.add(tree);
-        }
+    /** The user-device and user-group grants of a body, read as {@code PermissionsResource} reads it. */
+    static GameAccessRule.Change grants(ObjectMapper objectMapper, JsonNode tree) {
         List<long[]> devices = new ArrayList<>();
         List<long[]> groups = new ArrayList<>();
-        for (JsonNode item : items) {
-            long user = item.path("userId").asLong(0);
-            if (user <= 0) {
+        for (GamePermissionBodies.Link link : GamePermissionBodies.read(objectMapper, tree)) {
+            if (!link.user() || link.ownerId() <= 0) {
                 continue;
             }
-            if (item.path("deviceId").asLong(0) > 0) {
-                devices.add(new long[] {user, item.get("deviceId").asLong()});
-            }
-            if (item.path("groupId").asLong(0) > 0) {
-                groups.add(new long[] {user, item.get("groupId").asLong()});
+            if ("devices".equals(link.propertyKind())) {
+                devices.add(new long[] {link.ownerId(), link.propertyId()});
+            } else if ("groups".equals(link.propertyKind())) {
+                groups.add(new long[] {link.ownerId(), link.propertyId()});
             }
         }
         return new GameAccessRule.Change(devices, groups, Map.of(), Map.of());
     }
 
-    static GameAccessRule.Change moves(String root, long id, JsonNode tree) {
-        if (!tree.isObject() || !tree.has("groupId")) {
+    /** The new parent group of a moved device or group, bound from the body as the object resource binds it. */
+    static GameAccessRule.Change moves(ObjectMapper objectMapper, String root, long id, JsonNode tree) {
+        if (!tree.isObject()) {
+            return GameAccessRule.Change.NONE;
+        }
+        long parent;
+        try {
+            parent = "devices".equals(root) ? objectMapper.convertValue(tree, Device.class).getGroupId()
+                    : objectMapper.convertValue(tree, Group.class).getGroupId();
+        } catch (IllegalArgumentException unreadable) {
             return GameAccessRule.Change.NONE;
         }
         Map<Long, Long> moved = new HashMap<>();
-        moved.put(id, parent(tree.get("groupId")));
+        moved.put(id, parent > 0 ? parent : null);
         return "devices".equals(root)
                 ? new GameAccessRule.Change(List.of(), List.of(), moved, Map.of())
                 : new GameAccessRule.Change(List.of(), List.of(), Map.of(), moved);

@@ -35,6 +35,18 @@ public final class GameMemberRepository {
                 sessionId, memberId);
     }
 
+    /**
+     * The calling member, read again inside a write that holds the session lock: still active and still bound to the
+     * account it was resolved from. A rebinding or retirement that committed meanwhile leaves the former account
+     * without membership (403), so it never acts for a member it no longer has.
+     */
+    public static GameMember caller(GameTransaction transaction, GameMember resolved) throws SQLException {
+        return find(transaction, resolved.gameSessionId(), resolved.id())
+                .filter(member -> member.active() && member.userId() != null
+                        && member.userId().equals(resolved.userId()))
+                .orElseThrow(() -> new jakarta.ws.rs.ForbiddenException("This account does not take part in a game"));
+    }
+
     public static List<GameMember> list(GameTransaction transaction, long sessionId) throws SQLException {
         return transaction.list(SELECT + " WHERE m.gamesessionid = ? ORDER BY m.id", GameMemberRepository::row,
                 sessionId);
