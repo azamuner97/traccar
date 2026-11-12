@@ -1,46 +1,47 @@
-"""Local MySQL/HTTP proximity audit with isolated fixtures and no native pushes."""
+"""Local MySQL/HTTP proximity audit of game data model 2 with isolated fixtures.
+
+Grants are temporary read-only access between members of one session (by member, resolved to the recipient's
+account and the target's tracker); circles are anonymous for hunters and the spectator. See
+``game_notification_integration.py`` for the environment. Pushes go through the server's outbox with the ``traccar``
+notificator to fixture accounts without push tokens, so nothing leaves the machine. ``--tool-source`` also drives
+the Tool's monitoring service, live-window handler, ordered worker and proximity publication against the server.
+"""
 
 import argparse
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
-import hashlib
-import http.cookiejar
-import json
-import secrets
-import subprocess
 import sys
 from threading import Thread
 import time
-import urllib.request
 import urllib.parse
-from uuid import uuid4
 
-import websocket
 import game_notification_integration as api
 
 
-def audit_tool_delivery(session_device, users, devices, credentials, tool_source):
-    """Exercise service events, the live handler, and its real ordered HTTP worker."""
+def audit_tool_delivery(session_id, members, devices, credentials, tool_source):
+    """Exercise service events, the live handler, its ordered HTTP worker and the proximity publication."""
     sys.path.insert(0, tool_source)
     import requests
+    from traccar_game_manager.application.live_session.operations import LiveSessionOperations
     from traccar_game_manager.application.monitoring.service import MonitoringService
-    from traccar_game_manager.domain.session.credentials import normalize_login_credentials
     from traccar_game_manager.domain.session.factory import default_session_template
     from traccar_game_manager.infrastructure.platform.notification_worker import OrderedNotificationWorker
     from traccar_game_manager.infrastructure.traccar.client import TraccarClient
+    from traccar_game_manager.infrastructure.traccar.effects import SessionEffects
+    from traccar_game_manager.infrastructure.traccar.game_sessions import GameSessionApi
+    from traccar_game_manager.infrastructure.traccar.game_state import ServerGameStateRepository
     from traccar_game_manager.ui.live_session.window import LiveSessionWindow
 
-    client = TraccarClient(api.BASE, "http://localhost:5056", api.EMAIL, api.PASSWORD,
-                           transport=api.FencedRequests())
-    pushes, warnings, events, checkpoints = [], [], [], []
+    class Transport:
+        get, post, put, delete = (staticmethod(requests.get), staticmethod(requests.post),
+                                  staticmethod(requests.put), staticmethod(requests.delete))
 
-    class CapturedPushGateway:
-        def __getattr__(self, name):
-            return getattr(client, name)
-
-        def send_announcement(self, user_ids, subject, message, *, notificator):
-            assert notificator == "traccar"
-            pushes.append((list(user_ids), subject, message))
+    sessions = GameSessionApi(api.BASE, api.EMAIL, api.PASSWORD, transport=Transport(),
+                              epoch_provider=lambda: api.CONTROLLER["epoch"])
+    client = TraccarClient(api.BASE, api.UPLOAD, api.EMAIL, api.PASSWORD, transport=api.FencedRequests())
+    client.effects = SessionEffects(sessions, session_id)
+    client.game_state = ServerGameStateRepository(sessions, session_id)
+    warnings, events, checkpoints = [], [], []
 
     class Clock:
         value = datetime.now(timezone.utc)
@@ -61,21 +62,16 @@ def audit_tool_delivery(session_device, users, devices, credentials, tool_source
     session = default_session_template(api.PREFIX)
     session["local_tz"] = "UTC"
     session["traccar-server"]["web_url"] = api.BASE
-    session["devices"] = {"game_state": {"id": session_device["id"], "unique_id": session_device["uniqueId"]},
-                          "real": {device["uniqueId"]: device["id"] for device in devices.values()}}
+    session["devices"] = {"real": {device["uniqueId"]: device["id"] for device in devices.values()},
+                          "mirroring": {}}
     session["device_roster"] = {
-        device["uniqueId"]: {"role": device["attributes"]["traccarToolRole"],
-                             "number": device["attributes"]["traccarToolRoleNumber"], "display_name": key}
+        device["uniqueId"]: {"role": members[key]["role"], "number": members[key]["number"], "display_name": key}
         for key, device in devices.items()}
-    session["users"] = {user["email"]: user["id"] for user in users.values()}
-    session["login_credentials"] = normalize_login_credentials({
-        user["email"]: {"role": user["attributes"]["traccarToolUserRole"],
-                        "number": devices[key]["attributes"]["traccarToolRoleNumber"] if key in devices else None}
-        for key, user in users.items()})
     window = LiveSessionWindow.__new__(LiveSessionWindow)
     window.session_snapshot = lambda: deepcopy(session)
-    window.devices = list(devices.values())
-    window.live_operations = CapturedPushGateway()
+    window.devices = [devices[key] for key in ("first", "second")]
+    window.live_operations = LiveSessionOperations(client, client, client, mutation_log=lambda _message: None)
+    window.game_state = client.game_state.load()
     window._safe_monitoring_log = warnings.append
     window._log_participant_proximity_event = lambda _event: None
     worker = window._notification_worker = OrderedNotificationWorker()
@@ -95,54 +91,62 @@ def audit_tool_delivery(session_device, users, devices, credentials, tool_source
             window._handle_monitoring_service_event(kind, payload)
 
     clock = Clock()
-    service = MonitoringService(window.live_operations, clock, ManualScheduler(), event_sink=receive,
+    service = MonitoringService(client, clock, ManualScheduler(), event_sink=receive,
                                 persist=checkpoints.append, stream_enabled=False, thread_factory=Thread)
-    members = [devices[key]["id"] for key in ("first", "second")]
-    service.configure(participant_ids=members, roles={member: "player" for member in members},
+    trackers = [devices[key]["id"] for key in ("first", "second")]
+    service.configure(participant_ids=trackers, roles={tracker: "player" for tracker in trackers},
                       participant_proximity={"player_player": True, "distance_m": 100.0,
                                              "waiting_minutes": 0.01, "access_grace_minutes": 0.01,
                                              "circle_diameter_m": 500.0})
 
     def observe():
-        service.apply_positions({member: {"deviceId": member, "latitude": 47.0, "longitude": 8.0,
-                                          "fixTime": clock.now().isoformat()} for member in members})
+        service.apply_positions({tracker: {"deviceId": tracker, "latitude": 47.0, "longitude": 8.0,
+                                           "fixTime": clock.now().isoformat()} for tracker in trackers})
         drain()
 
+    pushes_before = int(api.sql(f"SELECT COUNT(*) FROM tc_game_push_outbox WHERE gamesessionid={session_id}"))
     try:
         observe()
         clock.value += timedelta(seconds=1)
         observe()
         activations = [event for event in events if event["transition"] == "consequence"]
-        assert len(activations) == 1 and set(activations[0]["newly_exposed_members"]) == set(members)
+        assert len(activations) == 1 and set(activations[0]["newly_exposed_members"]) == set(trackers)
         episode = activations[0]["episode_id"]
-        sharing_ids = {f"{episode}-sharing-{member}" for member in members}
+        sharing_ids = {f"{episode}-sharing-{tracker}" for tracker in trackers}
         message = ("Your approximate location is now being shared with hunters and spectators "
                    "because you remained too close to another participant. Please move apart.")
         for key in credentials:
-            history = api.request("GET", f"/game-notifications?sessionDeviceId={session_device['id']}",
-                                  credentials=credentials[key])["items"]
+            history = api.page(session_id, credentials[key])["items"]
             sharing = [item for item in history if item["id"] in sharing_ids]
             if key in {"first", "second"}:
                 assert len(sharing) == 1, "Player did not receive the Tool sharing-start notification"
                 alert = sharing[0]
                 assert alert["type"] == "participantProximityConsequence" and alert["audience"] == "user"
-                assert alert["recipientUserId"] == users[key]["id"]
-                assert alert["sourceDeviceId"] == devices[key]["id"]
+                assert alert["recipientMemberId"] == alert["sourceMemberId"] == members[key]["id"]
                 assert alert["message"].endswith(message)
             else:
                 assert not sharing, "Personal sharing-start notification leaked to another account"
             group = [item for item in history if item["id"] == f"{episode}-consequence"]
-            assert len(group) == (1 if key in {"hunter", "spectator"} else 0)
-        personal_pushes = [push for push in pushes if push[2].endswith(message)]
-        assert {tuple(push[0]) for push in personal_pushes} == {(users[key]["id"],) for key in ("first", "second")}
-        assert len(personal_pushes) == 2 and all(push[1] == "Participant proximity" for push in personal_pushes)
-        state = client.get_proximity_state(session_device["id"])
-        assert len(state["circles"]) == 1 and set(state["circles"][0]["participantDeviceIds"]) == set(members)
+            assert len(group) == (1 if key in {"hunter", "spectator"} else 0), key
+        # Each sharing start is pushed to its member through the outbox, once.
+        rows = api.sql(f"SELECT recipientmemberid, subject, status FROM tc_game_push_outbox "
+                       f"WHERE gamesessionid={session_id} AND message LIKE "
+                       + api.literal("%" + message) + " ORDER BY id").splitlines()
+        assert sorted(int(row.split("\t")[0]) for row in rows) == sorted(
+            members[key]["id"] for key in ("first", "second")), rows
+        assert all(row.split("\t")[1] == "Participant proximity" for row in rows), rows
+        state = api.request("GET", f"/game-proximity/session/{session_id}")
+        assert len(state["circles"]) == 1 and set(state["circles"][0]["memberIds"]) == {
+            members[key]["id"] for key in ("first", "second")}, state
+        assert {(grant["recipientMemberId"], grant["targetMemberId"]) for grant in state["grants"]} == {
+            (members["first"]["id"], members["second"]["id"]), (members["second"]["id"], members["first"]["id"])}
         assert checkpoints[-1]["participant_proximity"]["pairs"]
-        count = len(pushes)
+        count = int(api.sql(f"SELECT COUNT(*) FROM tc_game_push_outbox WHERE gamesessionid={session_id}"))
+        assert count > pushes_before
         clock.value += timedelta(seconds=30)
         observe()
-        assert len(pushes) == count, "Circle refresh repeated a sharing-start notification"
+        assert int(api.sql(f"SELECT COUNT(*) FROM tc_game_push_outbox WHERE gamesessionid={session_id}")) \
+            == count, "Circle refresh repeated a sharing-start notification"
         assert len([event for event in events if event["transition"] == "consequence"]) == 1
     finally:
         try:
@@ -151,220 +155,239 @@ def audit_tool_delivery(session_device, users, devices, credentials, tool_source
         finally:
             worker.close()
             worker._thread.join(timeout=5)
-    print("Tool delivery audit passed: live service, ordered worker, personal history, recipient isolation, "
-          "captured native pushes, and silent circle refresh.")
+    assert api.request("GET", f"/game-proximity/session/{session_id}")["grants"] == []
+    print("Tool delivery audit passed: live service, ordered worker, personal history by member, recipient "
+          "isolation, outbox pushes, proximity publication by member, and silent circle refresh.")
+
+
+def visible(credentials):
+    return {device["id"] for device in api.request("GET", "/devices", credentials=credentials)}
 
 
 def main(tool_source=None, skip_restart=False):
     api.wait_for_server()
-    salt = secrets.token_bytes(24)
-    digest = hashlib.pbkdf2_hmac("sha256", api.PASSWORD.encode(), salt, 200000, 24).hex().upper()
-    api.sql("INSERT INTO tc_users(name,email,hashedpassword,salt,administrator,attributes) VALUES("
-            + ",".join([api.literal(api.PREFIX), api.literal(api.EMAIL),
-                        api.literal("PBKDF2WithHmacSHA256$200000$" + digest),
-                        api.literal(salt.hex().upper()), "1", api.literal("{}")]) + ");")
-    admin_id = int(api.sql("SELECT id FROM tc_users WHERE email=" + api.literal(api.EMAIL)))
-    device_ids, user_ids, sockets = [], [], []
+    admin_id = api.create_admin()
+    fixtures = api.Fixtures()
     try:
         api.acquire_controller()
-        session = api.request("POST", "/devices", {"name": api.PREFIX + "-session",
-                              "uniqueId": "traccar-tool-state-" + hashlib.sha256(api.PREFIX.encode()).hexdigest()[:24],
-                              "attributes": {"traccarToolGameState": True}})
-        session_id = session["id"]
-        device_ids.append(session_id)
-        api.register_game_session(session_id, "session")
-        other = api.request("POST", "/devices", {"name": api.PREFIX + "-other",
-                            "uniqueId": api.PREFIX + "-other", "attributes": {"traccarToolGameState": True}})
-        device_ids.append(other["id"])
-        api.register_game_session(other["id"], "other")
+        session_id = api.create_game_session("proximity")
+        other_id = api.create_game_session("other")
+        api.execute(session_id)
         generation = api.request("POST", f"/game-notifications/session/{session_id}", {})["generation"]
         endpoint = f"/game-proximity/session/{session_id}"
-        users, devices, credentials = {}, {}, {}
-        for key, role, number in (("first", "player", 1), ("second", "player", 2),
-                                  ("supporter", "supporter", 1), ("hunter", "hunter", 1),
-                                  ("spectator", "spectator", None)):
-            attributes = {"traccarToolUserRole": role, "traccarToolSessionDeviceId": session_id}
-            if number is not None:
-                device = api.request("POST", "/devices", {"name": api.PREFIX + "-" + key,
-                                     "uniqueId": api.PREFIX + "-" + key,
-                                     "attributes": {"traccarToolRole": role, "traccarToolRoleNumber": number}})
-                devices[key] = device
-                device_ids.append(device["id"])
-                attributes["traccarToolAssignedDeviceId"] = device["id"]
-            # Share-account emails append the tracker's unique ID. Keep the
-            # fixture email short enough for the existing 128-character column.
-            email = "p-" + api.PREFIX[-16:] + "-" + key + "@example.invalid"
-            user = api.request("POST", "/users", {"name": key, "email": email, "password": api.PASSWORD,
-                               "readonly": True, "deviceReadonly": True, "attributes": attributes})
-            user_ids.append(user["id"])
-            users[key], credentials[key] = user, (email, api.PASSWORD)
-            api.request("POST", "/permissions", {"userId": user["id"], "deviceId": session_id}, expected=204)
-            if key in devices:
-                api.request("POST", "/permissions", {"userId": user["id"], "deviceId": devices[key]["id"]}, expected=204)
+        members, users, devices, credentials = {}, {}, {}, {}
+        for key, role in (("first", "player"), ("second", "player"), ("supporter", "supporter"),
+                          ("hunter", "hunter"), ("spectator", "spectator")):
+            members[key] = api.plan(session_id, role, key)
+            # Share-account emails append the tracker's unique ID: keep fixture emails short.
+            users[key], credentials[key] = fixtures.account("p-" + api.PREFIX[-16:] + "-" + key, readonly=True,
+                                                            deviceReadonly=True)
+            api.bind_account(session_id, members[key]["id"], users[key]["id"])
+            if role != "spectator":
+                devices[key] = fixtures.device(api.PREFIX + "-" + key, attributes={
+                    "traccarToolRole": role, "traccarToolRoleNumber": members[key]["number"]})
+                members[key] = api.bind_tracker(session_id, members[key]["id"], devices[key]["id"])
+                api.request("POST", "/permissions", {"userId": users[key]["id"], "deviceId": devices[key]["id"]},
+                            expected=204)
+        outsider = api.plan(other_id, "hunter", "outsider")
+        outsider_user, outsider_credentials = fixtures.account("p-" + api.PREFIX[-16:] + "-outsider")
+        api.bind_account(other_id, outsider["id"], outsider_user["id"])
         first, second = devices["first"]["id"], devices["second"]["id"]
+        first_member, second_member = members["first"]["id"], members["second"]["id"]
 
-        def snapshot(revision, seconds=120):
-            expires = (datetime.now(timezone.utc) + timedelta(seconds=seconds)).isoformat().replace("+00:00", "Z")
-            return {"generation": generation, "revision": revision,
-                    "grants": [{"episodeId": "pair", "recipientUserId": users[key]["id"],
-                                "sourceDeviceId": devices[key]["id"], "targetDeviceId": target,
-                                "expiresAt": expires} for key, target in (("first", second), ("second", first))],
+        def content(revision, seconds=120, recipient_keys=("first", "second")):
+            expires = api.iso(seconds=seconds)
+            grants = [{"episodeId": "pair", "recipientMemberId": members[key]["id"],
+                       "targetMemberId": members[other]["id"], "expiresAt": expires}
+                      for key, other in (("first", "second"), ("second", "first")) if key in recipient_keys]
+            return {"expectedRevision": revision, "grants": grants,
                     "circles": [{"id": "circle", "latitude": 47, "longitude": 8, "diameterMeters": 500,
-                                 "playerCount": 2, "supporterCount": 0, "expiresAt": expires,
-                                 "participantDeviceIds": [first, second]}]}
+                                 "expiresAt": expires, "memberIds": [first_member, second_member]}]}
 
-        for key in ("first", "second", "hunter", "spectator"):
-            cookies = http.cookiejar.CookieJar()
-            opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cookies))
-            email, password = credentials[key]
-            api.request("POST", "/session", urllib.parse.urlencode({"email": email, "password": password}).encode(),
-                        credentials=None, opener=opener)
-            socket = websocket.create_connection("ws://localhost:8083/api/socket", timeout=5, origin=api.BASE,
-                                                 cookie="; ".join(cookie.name + "=" + cookie.value for cookie in cookies))
-            sockets.append(socket)
-        value = snapshot(1)
+        def revision():
+            return api.request("GET", endpoint)["revision"]
+
+        sockets = {key: fixtures.socket(credentials[key]) for key in ("first", "second", "hunter", "spectator",
+                                                                       "supporter")}
+        value = content(0)
         assert api.request("PUT", endpoint, value)["revision"] == 1
+        # An identical retry of the last write answers the current state.
         assert api.request("PUT", endpoint, value)["revision"] == 1
         for key, peer in (("first", second), ("second", first)):
-            visible = {device["id"] for device in api.request("GET", "/devices", credentials=credentials[key])}
-            assert peer in visible
-            access = api.request("GET", endpoint + "/access", credentials=credentials[key])
-            assert {grant["deviceId"] for grant in access} == {peer}
-            assert all(set(grant) == {"deviceId", "expiresAt"} for grant in access)
-        # A lease grants reads only, even if ordinary write restrictions are
-        # relaxed on the generated account. All trackers here are fixtures.
+            assert peer in visible(credentials[key])
+            access = api.request("GET", "/game-proximity/access", credentials=credentials[key])
+            assert [(item["memberId"], item["deviceId"]) for item in access] == [
+                (members["second" if key == "first" else "first"]["id"], peer)], access
+            assert all(set(item) == {"memberId", "deviceId", "expiresAt"} for item in access), access
+        assert api.request("GET", "/game-proximity/access", credentials=credentials["supporter"]) == []
+        assert first not in visible(credentials["supporter"])
+        # Players and supporters learn of their access through a device refresh; hunters and the spectator are
+        # told to reload circles.
+        for key in ("first", "second"):
+            api.wait_for_invalidation(sockets[key], "devices")
+        for key in ("hunter", "spectator"):
+            api.wait_for_invalidation(sockets[key], "game-proximity")
+        assert "game-proximity" not in api.invalidations(sockets["supporter"], 0.5), \
+            "players and supporters never receive the circles' invalidation"
+        # A lease grants reads only, even if ordinary write restrictions are relaxed on the generated account.
         writable = {**users["first"], "readonly": False, "deviceReadonly": False}
         api.request("PUT", f"/users/{writable['id']}", writable)
-        api.request("POST", "/commands/send", {"deviceId": second, "type": "custom",
-                    "attributes": {"data": "proximity-audit"}}, credentials=credentials["first"], expected=400)
-        api.request("PUT", f"/devices/{second}", devices["second"], credentials=credentials["first"], expected=400)
-        api.request("DELETE", f"/devices/{second}", credentials=credentials["first"], expected=400)
-        api.request("DELETE", f"/positions?deviceId={second}", credentials=credentials["first"], expected=400)
-        api.request("POST", "/permissions", {"userId": writable["id"], "deviceId": second},
-                    credentials=credentials["first"], expected=400)
+        def refused(method, path, body=None):
+            """Refused by the fence (423, the tracker is a game resource) or by Traccar's permissions (400)."""
+            try:
+                api.request(method, path, body, credentials=credentials["first"], expected=400)
+            except AssertionError as error:
+                assert "returned 423" in str(error), error
+
+        refused("POST", "/commands/send", {"deviceId": second, "type": "custom",
+                                            "attributes": {"data": "proximity-audit"}})
+        refused("PUT", f"/devices/{second}", devices["second"])
+        refused("DELETE", f"/devices/{second}")
+        refused("DELETE", f"/positions?deviceId={second}")
+        refused("POST", "/permissions", {"userId": writable["id"], "deviceId": second})
         share_expiry = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
         api.request("POST", "/share/device", urllib.parse.urlencode({"deviceId": first,
                     "expiration": share_expiry}).encode(), credentials=credentials["first"])
         shared_email = users["first"]["email"] + ":" + devices["first"]["uniqueId"]
-        user_ids.append(int(api.sql("SELECT id FROM tc_users WHERE email=" + api.literal(shared_email))))
+        fixtures.users.append(int(api.sql("SELECT id FROM tc_users WHERE email=" + api.literal(shared_email))))
         api.request("POST", "/share/device", urllib.parse.urlencode({"deviceId": second,
                     "expiration": share_expiry}).encode(), credentials=credentials["first"], expected=400)
         api.request("PUT", f"/users/{writable['id']}", users["first"])
         for key in ("hunter", "spectator"):
-            circles = api.request("GET", endpoint + "/circles", credentials=credentials[key])
-            assert len(circles) == 1 and circles[0]["playerCount"] == 2
-            assert "participantDeviceIds" not in circles[0]
+            circles = api.request("GET", "/game-proximity/circles", credentials=credentials[key])
+            assert len(circles) == 1 and circles[0]["playerCount"] == 2 and circles[0]["supporterCount"] == 0
+            assert "memberIds" not in circles[0] and "participantDeviceIds" not in circles[0], circles
             api.request("GET", endpoint, credentials=credentials[key], expected=403)
         for key in ("first", "second", "supporter"):
-            api.request("GET", endpoint + "/circles", credentials=credentials[key], expected=403)
+            api.request("GET", "/game-proximity/circles", credentials=credentials[key], expected=403)
             # Fenced before authorization: participants never hold the controller lease.
             api.request("PUT", endpoint, value, credentials=credentials[key], expected=423)
-        api.request("GET", f"/game-proximity/session/{other['id']}/circles", credentials=credentials["hunter"], expected=403)
-        api.request("GET", endpoint, credentials=None, expected=401)
-        api.request("PUT", endpoint, {**value, "generation": str(uuid4())}, expected=409)
-        api.request("PUT", endpoint, {**value, "circles": [{**value["circles"][0], "diameterMeters": 600}]}, expected=409)
-        occurred = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        assert api.request("GET", "/game-proximity/circles", credentials=outsider_credentials) == []
+        api.request("GET", "/game-proximity/access", credentials=None, expected=401)
+        api.request("GET", "/game-proximity/circles", credentials=None, expected=401)
+        api.request("PUT", endpoint, {**value, "circles": [{**value["circles"][0], "diameterMeters": 600}]},
+                    expected=409)
+        api.request("PUT", endpoint, content(1, recipient_keys=("first",)), expected=400)  # grants are reciprocal
+        api.request("PUT", endpoint, {**content(1), "grants": [
+            {"episodeId": "x", "recipientMemberId": members["hunter"]["id"], "targetMemberId": first_member,
+             "expiresAt": api.iso(seconds=60)},
+            {"episodeId": "x", "recipientMemberId": first_member, "targetMemberId": members["hunter"]["id"],
+             "expiresAt": api.iso(seconds=60)}]}, expected=400)
+
+        occurred = api.iso()
+        payload = {"gameSessionId": session_id, "generation": generation}
         for alert_type in ("participantProximityEnter", "participantProximityExit"):
-            api.request("POST", "/game-notifications", {"sessionDeviceId": session_id, "generation": generation,
-                        "alert": {"id": alert_type, "type": alert_type, "audience": "user",
-                                  "occurredAt": occurred, "timeZone": "UTC", "message": "Personal proximity notice",
-                                  "recipientUserId": users["first"]["id"], "sourceDeviceId": first}})
+            api.request("POST", "/game-notifications", {**payload, "alert": {
+                "id": alert_type, "type": alert_type, "audience": "user", "occurredAt": occurred,
+                "timeZone": "UTC", "message": "Personal proximity notice",
+                "recipientMemberId": first_member, "sourceMemberId": first_member}})
         for key in ("first", "supporter"):
-            personal = {"sessionDeviceId": session_id, "generation": generation,
-                        "alert": {"id": "sharing-" + key, "type": "participantProximityConsequence", "audience": "user",
-                                  "occurredAt": occurred, "timeZone": "UTC",
-                                  "message": "Your approximate location is now being shared with hunters and spectators "
-                                             "because you remained too close to another participant. Please move apart.",
-                                  "recipientUserId": users[key]["id"], "sourceDeviceId": devices[key]["id"]}}
+            personal = {**payload, "alert": {
+                "id": "sharing-" + key, "type": "participantProximityConsequence", "audience": "user",
+                "occurredAt": occurred, "timeZone": "UTC",
+                "message": "Your approximate location is now being shared with hunters and spectators "
+                           "because you remained too close to another participant. Please move apart.",
+                "recipientMemberId": members[key]["id"], "sourceMemberId": members[key]["id"]}}
             assert api.request("POST", "/game-notifications", personal)["created"]
             assert not api.request("POST", "/game-notifications", personal)["created"]
         api.request("POST", "/game-notifications", {**personal, "alert": {
-                    **personal["alert"], "id": "wrong-source", "sourceDeviceId": first}}, expected=403)
-        api.request("POST", "/game-notifications", {"sessionDeviceId": session_id, "generation": generation,
-                    "alert": {"id": "consequence", "type": "participantProximityConsequence", "audience": "hunters",
-                              "occurredAt": occurred, "timeZone": "UTC", "message": "2 players are too close"}})
+            **personal["alert"], "id": "wrong-source", "sourceMemberId": first_member}}, expected=400)
+        api.request("POST", "/game-notifications", {**payload, "alert": {
+            "id": "nonhunters", "type": "participantProximityConsequence", "audience": "nonHunters",
+            "occurredAt": occurred, "timeZone": "UTC", "message": "2 players are too close"}}, expected=400)
+        api.request("POST", "/game-notifications", {**payload, "alert": {
+            "id": "consequence", "type": "participantProximityConsequence", "audience": "hunters",
+            "occurredAt": occurred, "timeZone": "UTC", "message": "2 players are too close"}})
         for key in credentials:
-            history = api.request("GET", f"/game-notifications?sessionDeviceId={session_id}", credentials=credentials[key])
-            identifiers = {item["id"] for item in history["items"]}
-            expected = ({"participantProximityEnter", "participantProximityExit", "sharing-first"} if key == "first"
-                        else {"sharing-supporter"} if key == "supporter"
-                        else {"consequence"} if key in {"hunter", "spectator"} else set())
-            assert identifiers == expected, "Proximity notification audience isolation failed"
-        for socket in sockets:
-            deadline = time.monotonic() + 6
-            while True:
-                message = json.loads(socket.recv())
-                if message.get("invalidate"):
-                    break
-                assert time.monotonic() < deadline
+            identifiers = {item["id"] for item in api.page(session_id, credentials[key])["items"]}
+            expected = ({"participantProximityEnter", "participantProximityExit"} if key == "first" else set()) \
+                | ({"sharing-" + key} if key in ("first", "supporter") else set()) \
+                | ({"consequence"} if key in {"hunter", "spectator"} else set())
+            assert identifiers == expected, ("Proximity notification audience isolation failed", key, identifiers)
         if tool_source:
-            audit_tool_delivery(session, users, devices, credentials, tool_source)
-        current = api.request("GET", endpoint)["revision"]
+            for socket in sockets.values():
+                api.drain(socket)
+            audit_tool_delivery(session_id, members, devices, credentials, tool_source)
+
+        # A permanent permission is independent of a short grant that expires and is purged.
         api.request("POST", "/permissions", {"userId": users["first"]["id"], "deviceId": second}, expected=204)
-        short = snapshot(current + 1, 2)
-        api.request("PUT", endpoint, short)
-        assert api.request("GET", endpoint + "/access", credentials=credentials["first"]) == []
+        api.request("PUT", endpoint, content(revision(), 2))
+        # Trackers the account sees permanently anyway are left out of its temporary access.
+        assert api.request("GET", "/game-proximity/access", credentials=credentials["first"]) == []
+        assert [item["deviceId"] for item in api.request("GET", "/game-proximity/access",
+                                                         credentials=credentials["second"])] == [first]
         deadline = time.monotonic() + 8
         while api.request("GET", endpoint)["grants"]:
             assert time.monotonic() < deadline, "Temporary proximity grants did not expire"
             time.sleep(0.2)
-        assert second in {device["id"] for device in api.request("GET", "/devices", credentials=credentials["first"])}
-        assert first not in {device["id"] for device in api.request("GET", "/devices", credentials=credentials["second"])}
-        assert api.request("GET", endpoint + "/circles", credentials=credentials["hunter"]) == []
-        revision = api.request("GET", endpoint)["revision"] + 1
-        api.request("PUT", endpoint, snapshot(revision))
-        membership = {"userId": users["second"]["id"], "deviceId": session_id}
-        api.request("DELETE", "/permissions", membership, expected=204)
+        assert api.request("GET", "/game-proximity/access", credentials=credentials["first"]) == []
+        assert second in visible(credentials["first"])
+        assert first not in visible(credentials["second"])
+        assert api.request("GET", "/game-proximity/circles", credentials=credentials["hunter"]) == []
+        api.request("DELETE", "/permissions", {"userId": users["first"]["id"], "deviceId": second}, expected=204)
+
+        # Unbinding or rebinding a member revokes its grants (both directions) with the next revision.
+        api.request("PUT", endpoint, content(revision()))
+        before = revision()
+        api.request("DELETE", f"/game-sessions/{session_id}/members/{second_member}/account")
+        state = api.request("GET", endpoint)
+        assert state["grants"] == [] and state["revision"] == before + 1, state
+        assert second not in visible(credentials["first"])
+        api.request("PUT", endpoint, content(before), expected=409)
+        api.bind_account(session_id, second_member, users["second"]["id"])
+        api.request("PUT", endpoint, content(revision()))
+        replacement = fixtures.device(api.PREFIX + "-second-replacement")
+        api.bind_tracker(session_id, second_member, replacement["id"])
         assert api.request("GET", endpoint)["grants"] == []
-        assert api.request("GET", endpoint)["circles"] == []
-        api.request("POST", "/permissions", membership, expected=204)
-        revision = api.request("GET", endpoint)["revision"] + 1
-        api.request("PUT", endpoint, snapshot(revision))
-        updated = {**users["second"], "attributes": {**users["second"]["attributes"], "traccarToolUserRole": "hunter"}}
-        api.request("PUT", f"/users/{updated['id']}", updated)
+        api.bind_tracker(session_id, second_member, second)
+        # A role change retires the member: its grants end, and circles may no longer name it.
+        api.request("PUT", endpoint, content(revision()))
+        changed = api.request("POST", f"/game-sessions/{session_id}/members/{second_member}/role",
+                              {"role": "supporter", "displayName": "second"})
         assert api.request("GET", endpoint)["grants"] == []
-        assert api.request("GET", endpoint)["circles"] == []
-        api.request("PUT", f"/users/{updated['id']}", users["second"])
+        api.request("PUT", endpoint, content(revision()), expected=400)
+        members["second"] = changed
+        second_member = changed["id"]
+        api.request("PUT", endpoint, content(revision()))
+        assert first in visible(credentials["second"])
+        # A reset publishes empty content with the next revision.
+        current = revision()
+        reset = api.request("POST", endpoint + "/reset", {})
+        assert reset["revision"] == current + 1 and reset["grants"] == [] and reset["circles"] == [], reset
+        assert first not in visible(credentials["second"])
+
         if not skip_restart:
-            revision = api.request("GET", endpoint)["revision"] + 1
-            api.request("PUT", endpoint, snapshot(revision, 2))
-            subprocess.run(["docker", "compose", "--profile", "full", "restart", "traccar"], check=True,
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            api.wait_for_server()
+            api.request("PUT", endpoint, content(revision(), 2))
+            fixtures.close_sockets()
+            api.restart_server()
             api.acquire_controller()
-            assert api.request("GET", endpoint)["grants"] == []
-            assert api.request("GET", endpoint)["circles"] == []
-        revision = api.request("GET", endpoint)["revision"] + 1
-        api.request("PUT", endpoint, snapshot(revision, 3600))
-        session_state = api.request("GET", f"/devices/{session_id}")
-        api.sql(f"UPDATE tc_devices SET attributes=JSON_REMOVE(attributes,'$.traccarToolGameState') WHERE id={session_id}")
-        deadline = time.monotonic() + 8
-        while first in {device["id"] for device in api.request("GET", "/devices", credentials=credentials["second"])}:
-            assert time.monotonic() < deadline, "Invalid session retained a long-lived proximity lease"
-            time.sleep(0.2)
-        api.request("PUT", f"/devices/{session_id}", session_state)
-        print("MySQL/HTTP proximity audit passed: scoped access, anonymous circles, independent permanent grants, "
-              "read-only/non-shareable leases, revision/generation conflicts, expiry, and identity/session changes"
-              + ("." if skip_restart else ", and server restart."))
+            api.execute(session_id)
+            time.sleep(3)
+            state = api.request("GET", endpoint)
+            assert state["grants"] == [] and state["circles"] == [], state
+            assert first not in visible(credentials["second"])
+        # Deleting the session ends every grant at once.
+        api.request("PUT", endpoint, content(revision(), 3600))
+        assert first in visible(credentials["second"])
+        api.request("DELETE", f"/game-sessions/{session_id}", expected=204)
+        api.GAME_SESSION_IDS.remove(session_id)
+        assert first not in visible(credentials["second"])
+        assert api.sql(f"SELECT COUNT(*) FROM tc_game_proximity_grants WHERE gamesessionid={session_id}") == "0"
+        print("MySQL/HTTP proximity audit passed: grants by member with scoped access, anonymous circles, "
+              "independent permanent permissions, read-only/non-shareable leases, revision conflicts and "
+              "idempotent retries, reciprocal grants between players and supporters, notification isolation, "
+              "expiry and purge, revocation on unbinding, tracker replacement and role change, reset, session "
+              "deletion" + ("." if skip_restart else ", and server restart."))
     finally:
-        for socket in sockets:
-            socket.close()
-        api.wait_for_server()
-        for device_id in device_ids:
-            api.request("DELETE", f"/devices/{device_id}", expected=204)
-        for user_id in user_ids:
-            api.request("DELETE", f"/users/{user_id}", expected=204)
+        fixtures.remove()
         api.delete_game_sessions()
         api.release_controller()
-        try:
-            api.request("DELETE", f"/users/{admin_id}", expected=204)
-        finally:
-            api.sql(f"DELETE FROM tc_users WHERE id={admin_id} AND email=" + api.literal(api.EMAIL) + ";")
+        api.delete_admin(admin_id)
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--tool-source")
     parser.add_argument("--skip-restart", action="store_true", help="Leave a running development server uninterrupted")
-    args = parser.parse_args()
-    main(args.tool_source, args.skip_restart)
+    arguments = parser.parse_args()
+    main(arguments.tool_source, arguments.skip_restart)

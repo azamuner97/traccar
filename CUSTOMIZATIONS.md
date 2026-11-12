@@ -27,197 +27,280 @@ device model and API. No Java model field, database migration, or dedicated
 role endpoint is required for this feature. The Tool owns reconciliation of the
 three managed values and preserves unrelated attributes.
 
-## Participant-aware live visibility
+## Game data model 2
 
-The Tool creates an internal device marked with
-`device.attributes.traccarToolGameState = true`, grants each generated game
-account access to it, and publishes the complete current caught-participant
-state through its latest position:
+Traccar's database is the single store of game sessions and game state
+(`schema/changelog-game-model-2.xml`, included last in `changelog-master.xml`).
+The game-session API version is **5**; `GET /api/game-sessions/capabilities`
+answers it, and a Tool built for another version stops at connection.
 
-```text
-position.attributes.traccarToolGameState = true
-position.attributes.traccarToolGameStateVersion = 1
-position.attributes.traccarToolCaughtParticipants = "player:1,supporter:2"
-```
+- **Members.** Each participant is a member with a stable ID
+  (`tc_game_session_members`): role (`player`, `supporter`, `hunter`,
+  `spectator`), number, display name, and the bound account and tracker. A
+  member's role never changes (a role change retires the member and plans a new
+  one). Numbers are never reused in a session, also after retirement. A session
+  has at most one spectator (number 1, no tracker). An account is bound to at
+  most one active member of all sessions; a real tracker to at most one member
+  per session, and it may be bound in several sessions.
+- **Computed status.** The server computes every member's status from typed
+  tables: catches (`tc_game_catches`), speedhunt runs and pings
+  (`tc_game_speedhunts`, `tc_game_speedhunt_pings`), breaks (`tc_game_breaks`),
+  live uploads (`tc_game_live_uploads`) and per-member revisions
+  (`tc_game_member_state`). Nothing writes a status document, and there is no
+  hidden game-state device.
+- **Typed operations.** The Tool stays the scheduler. It sends typed operations
+  (`catch`, `release`, `pingDelivered`, `pingFailed`, `runEnded`,
+  `liveUploadStarted`, `liveUploadSample`, `liveUploadEnded`, `breakStarted`,
+  `breakWaiting`, `breakEnded`, `breakCancelled`, `breakMissed`, `fakeUsed`,
+  `fakeReleased`, `checkpoint`) through `POST /api/game-sessions/{id}/effects`.
+  The server validates every lifecycle transition (409 for an illegal one) and
+  never schedules anything itself.
+- **Resource rows.** The Traccar resources a session owns are rows: members'
+  accounts and trackers, mirrors (`tc_game_mirrors`), groups
+  (`tc_game_session_groups`) and managed geofences
+  (`tc_game_session_geofences`). Rows in state `retiring` stay owned until the
+  Tool's cleanup removes them. Traccar permissions are derived by the Tool and
+  not stored.
+- **Code.** Services and repositories live in `org.traccar.game`, the REST
+  resources in `org.traccar.api.game` (registered by `WebServer` next to
+  `org.traccar.api.resource`). Timestamps are UTC `DATETIME(3)` (`GameTime`).
+  A write transaction validates, locks the session row and then member states
+  in ascending order, applies, advances revisions, commits, and only then
+  publishes (`GamePublisher`, implemented by `GameServerPublisher`).
 
-Generated player and supporter accounts carry
-`traccarToolParticipantRole` and `traccarToolParticipantNumber` user
-attributes. The web app combines those values with the device role metadata
-and `traccarToolMirror: true` to remove the signed-in participant's outgoing
-mirrors from the main live page while retaining the real device. For every
-non-administrator account, a caught player or supporter and all matching
-mirrors are removed from the live map, sidebar, counts, camera bounds, live
-routes, and selected status card. Administrators bypass participant filtering,
-but the internal state device remains hidden for every account.
+The model-2 changelog drops every model-1 game table with its rows and model-1
+game drawings, keeps the lease row of `tc_game_controller` (its epoch keeps
+increasing) and replaces `tc_drawings.sessiondeviceid` with `gamesessionid`.
+It does not touch Traccar users, devices, groups or positions: Traccar resources
+that model-1 sessions created (the hidden state device, generated accounts with
+model-1 membership markers, mirrors, groups) stay until they are removed.
 
-Only positions belonging to a device independently marked as an internal
-state device are trusted as state. Missing, malformed, or unsupported state
-fails open so it cannot accidentally hide ordinary participants. Participant
-identity comes exclusively from `traccarToolRoleNumber`; numeric categories
-are not supported.
+On H2, Liquibase's migration session stays open while the server runs
+(`DatabaseModule`): H2 2.4.240 binds a CHECK constraint to the session that
+created it, and the model-2 tables use CHECK constraints.
 
-This filtering is live-page presentation, not an authorization boundary.
-Traccar permissions remain authoritative, and replay, reports, exports, and
-direct API access retain every ordinary device available to the signed-in
-user. No Java endpoint or schema change is required. The contract assumes each
-generated non-administrator account belongs to one game session; supporting a
-single account across multiple simultaneous sessions would require adding a
-session identifier to the state and participant identities.
+### Participant role markers and live visibility
 
-## Speedhunt, player-caught and test alerts
+Membership is never read from account attributes. The model-1 user markers
+(`traccarToolUserRole`, `traccarToolSessionDeviceId`,
+`traccarToolAssignedDeviceId`, `traccarToolParticipantRole`/`Number`) grant
+nothing any more; the Tool strips them from generated accounts. The device
+markers above stay as presentation that the Tool writes from member and mirror
+rows.
 
-The `tc_game_notifications` journal and authenticated `/api/game-notifications`
-API are the single source for live alerts and full-session history. Each immutable
-row contains a stable alert ID, session-device ID, generation, type, `session` or `user`
-audience, UTC occurrence, IANA timezone, final timestamped message and server
-creation time. A database sequence supplies stable cursors; a unique
-session-device/alert-ID constraint prevents duplicate records. Alert IDs are
-case-sensitive, including on MySQL's normally case-insensitive text collation.
-The additive collation migration preserves existing rows. The new Liquibase
-migration leaves previous migrations unchanged. Device deletion cascades to its
-journal.
+The web app reads membership from `GET /api/game-status` (403 means no
+membership) and filters the live map from the computed status: for players and
+supporters, caught players and supporters are hidden with their mirrors, and
+their own outgoing mirrors are hidden. Members map to devices through the role
+markers, because role and number identify a member within a session.
+Administrators, accounts without membership and members before their first
+status see the map unfiltered (fail-open). This filtering is live-page
+presentation, not an authorization boundary; replay, reports, exports and
+direct API access keep every device the account may read.
 
-The hidden device's protected attributes `traccarToolNotificationGeneration` and
-`traccarToolNotificationResetAt` track active history. Device-row locks serialize
-initialization, insertion and reset. Generic device updates preserve these
-attributes and commit their ordinary fields atomically. Writes require manager/admin authority and device access. Generated
-users read only their eligible own session with a device permission. Administrators
-may inspect history explicitly but never receive automatic game alerts.
+### Game sessions and documents
 
-API contract:
+All `/api/game-sessions` endpoints require a Traccar administrator; operators
+are administrators in this version.
 
-- `POST /api/game-notifications/session/{id}`: idempotent initialization.
-- `POST /api/game-notifications`: `{sessionDeviceId,generation,alert}`. Identical
-  reuse returns the existing record; conflicting IDs or stale generations return 409.
-- `GET /api/game-notifications?sessionDeviceId=...&generation=...&after=...&limit=100`:
-  version, active generation, reset timestamp, records, next cursor and has-more.
-  The maximum page size is 500; cursor IDs are decimal strings.
-- `POST /api/game-notifications/session/{id}/reset`:
-  `{expectedGeneration,replacementGeneration}`. Retrying the same reset is safe.
+| Part | Table | Written by |
+|---|---|---|
+| Identity and aggregate revision | `tc_game_sessions` | operator |
+| Settings (configuration, roster, timezone, game settings) | `tc_game_session_settings` | operator (`PUT …/config`) |
+| Members and bindings | `tc_game_session_members` | Tool (`…/members/*`) |
+| Mirrors, groups, managed geofences | `tc_game_mirrors`, `tc_game_session_groups`, `tc_game_session_geofences` | Tool (`…/resources/*`) |
+| Generated-account passwords | `tc_game_session_credentials` (AES-GCM) | operator |
+| Geofence planner document | `tc_game_geofence_plans` | Tool |
+| Recovery checkpoints (monitoring cursors, relay counters) | `tc_game_session_checkpoints` | Tool (`…/checkpoints/*`) |
+| Published timetable and per-entry progress | `tc_game_timetables`, `tc_game_timetable_entries` | Tool |
+| Session log (including speedhunt events) | `tc_game_session_logs` | Tool |
 
-These endpoints never send pushes. Successful inserts and resets emit an authorized
-session-scoped websocket `game-notifications` invalidation. The web app fetches
-records on invalidation, login, reconnect, foreground return and drawer opening.
-Uploaded position content cannot create trusted notifications. No legacy position
-payload parsing, recovery, historical import or local-cache migration remains.
+Every revisioned write names the revision it was based on; a stale revision
+answers 409, and an identical retry of the last write answers the current state.
+`GET /api/game-sessions/{id}/snapshot` is one consistent read of everything the
+Tool loads and recovers from (MySQL `REPEATABLE READ`, H2 `SERIALIZABLE`).
+Checkpoints never hold game outcomes: deleting every checkpoint only makes
+monitoring scan again. Deleting a session (`DELETE /api/game-sessions/{id}`)
+removes every game record of it, including its drawings, but never the Traccar
+resources it manages; the Tool's cleanup removes those first.
 
-The three session types—`speedhunt`, `playerCaught`, `notificationTest`—target generated
-players, supporters, hunters and spectator; administrators and unrelated accounts
-are excluded. The `playerCaught` type covers newly caught players and supporters,
-using `<display name> was caught` for either role; unchanged saves and releases
-do not alert, while re-catching a released participant does. The Tool captures
-`[HH:mm:ss]` in the game timezone once before
-enqueueing; archive and push receive identical final text. The ordered background
-worker binds jobs to their generation, publishes caught visibility first, archives
-each record, then makes the existing native relay request once per recipient.
-Independent failures warn without gameplay rollback; explicit stale jobs do not
-push. Identical already-archived submissions skip duplicate pushes while the
-remaining batch continues. Ambiguous relay requests are not retried. No durable
-push outbox is added, so an archive row is not proof that its push was attempted.
+Generated passwords are encrypted with the Base64 256-bit key in
+`gameSessions.credentialKey` (environment `GAME_SESSIONS_CREDENTIAL_KEY`;
+Compose reads `TRACCAR_GAME_SESSIONS_CREDENTIAL_KEY` from `.env`). The key is
+never stored in the database and must stay stable for the database's lifetime.
+Without it, or with a different key, only credential reads and writes fail
+(HTTP 503). Key rotation is not supported yet.
 
-New Speedhunt pings archive two role variants at the same occurrence time:
-`hunters` adds `Participant: <display name>.` to the timestamped message for hunters
-and spectator; `nonHunters` preserves the anonymous message for players and supporters.
-The wire audience identifiers remain stable.
-Only Speedhunt supports these audiences. API pagination authorizes the viewer's
-current role before returning either variant, and the web applies the same policy
-to cached history/banners. Native relay recipients are checked against current
-server roles and session markers; a name-bearing message is never broadcast as a
-session alert. Each account receives one notification, with no new migration.
+Timetable publishing resolves each participant header to an active player or
+supporter by display name, or else by the name of the member's tracker; a header
+that names nobody or several members answers 400. Entries are keyed by time and
+member, so a rename never moves them.
 
-Version-2 personal types `geofenceExit`, `liveTrackingStarted`,
-`liveTrackingStopped`, and `liveTrackingTargetsChanged` use `user` audience,
-`recipientUserId`, and `sourceDeviceId`. Creation verifies the assigned generated
-account, session, role, and tracker access. API history and socket invalidation
-are private to that account. The live types extend existing validation without a
-new migration. Live starts require the first positive successful upload count;
-real stops are reported once, while temporary rebuilds stay silent.
-Personal history additionally requires the account's current participant/hunter
-role, matching assigned tracker and access to that tracker. Reassignment or revoked
-tracker access cannot expose old private records through the API; session records
-remain available. Browser role/assignment changes cancel obsolete requests and
-re-read authorized history without replaying handled alerts.
-Notification pages also include the server-authorized `personalSourceDeviceId`
-(null when tracker access is absent). Browser synchronization uses it to remove
-unauthorized personal cache entries and banners even when account markers remain
-unchanged. Device/group permission changes invalidate the affected user's stream;
-restoring access does not replay handled alarms. Receiving-group history does not
-require this personal tracker grant.
-The Tool's optional editable Reason dropdown includes `Usage of public transport.`;
-reasons accompany that run's personal messages. Destination names come from the
-configured real groups, not role labels or internal mirror groups. Geofence
-automation changes the running service's actual routes and informs the affected
-account on addition/removal without stopping manual tracking on re-entry.
-Normal Tool exit drains pending delivery for at most 30 seconds with an Exit now
-option; forced exit and native push delivery remain best-effort.
-Queued personal alerts retain their original server connection. Partial location
-batches preserve confirmed upload counts without retrying successful prefixes,
-and resumed tracking synchronizes its effective routes and notification messages.
-Warning/closing-widget failures cannot block tracking or final application exit.
+### Game controller, fencing and effects
 
-Manual/geofence live pings also archive `livePingReceived`, `livePingEnded`, and
-spectator-only `livePingTargetsChanged` records. `liveHunter`, `livePlayer`,
-`liveSupporter`, and `liveSpectator` audiences bind existing recipient/source
-fields to one receiving account's current role and session; no migration is
-needed. Creation verifies a unique real player/supporter source owner, while
-existing personal authorization is unchanged. The tracked account receives only
-its existing personal alerts; administrators and unrelated accounts never receive
-automatic recipient alerts.
-The integer upload count now includes confirmed destination keys, including
-partial successes. Starts wait for each destination's first success, removals and
-real termination send stops, and re-added destinations begin a fresh episode.
-Spectators get one run start/stop and one summary per confirmed destination change.
-Refreshes and temporary rebuilds stay silent. Names, optional reason, geofence
-context and stop causes are frozen for identical archive/push text. Native
-recipient accounts are revalidated before delivery; failures do not stop tracking.
-Explicit notification API authorization/validation rejections suppress native
-push fallback. Network failures and server outages still allow independent push
-delivery, while other eligible alerts in a rejected batch continue.
+One Traccar Tool instance controls the game server-wide at a time. The lease is
+bound to the operator and a unique app instance and lasts
+`gameController.leaseSeconds` (default 30), renewed every
+`gameController.renewSeconds` (default 5). Every acquisition gets a larger
+`controllerEpoch`, stored in `tc_game_controller`, so it keeps increasing across
+restarts. `/api/game-controller` acquires, renews, releases and force-takes over
+the lease, sets the session the controller executes, and lists the history
+(`tc_game_controller_history`). A server restart ends an active lease, so the
+Tool must resume explicitly. A change of control (acquisition, takeover,
+release, expiry, server restart) ends every open game request after its commit:
+waiting ones expire and executing ones fail.
 
-IndexedDB persists the full generation per origin, account and hidden session
-device, including local read flags, handled IDs, deletion tombstones and clear
-cutoffs. There is no 100-record or 24-hour retention limit. Storage denial falls
-back to memory. Failed loading preserves valid cache. History hydration never
-replays alarms; each complete sync can present only the newest previously unseen
-record younger than 15 minutes. All older records are unread history only.
+Fenced requests carry the epoch in `X-Game-Controller-Epoch` and are refused
+with HTTP 423 otherwise (`GameControllerFilter`):
 
-The 60-second dismissible top-center banner and immediate newest-alert replacement
-remain. The existing “Ereignis” drawer merges game records and native events newest
-first, rendering pages of 100 and reopening at the newest page; game records have
-no server-event navigation. Its
-bell is red for unread game alerts, including when native events are disabled.
-A visible drawer marks game entries read; banner dismissal does not.
+- for any session: effects, timetable progress, `members/*`, `resources/*`,
+  `checkpoints/*`, `requests/*` and `jokers/*`; every write of the executing
+  session. Configuration of a session that is not executing (name, settings,
+  credentials, geofence plans, timetable, logs) needs only its revision check;
+- writes to `/api/game-notifications` and `/api/game-proximity`;
+- while a lease is held, standard mutations (devices, groups, users,
+  permissions, geofences, `DELETE /api/positions`) of the Traccar resources any
+  session owns (`GameOwnershipService`), and `/api/notifications/send/*`
+  reaching a member of the executing session. While no lease is held,
+  administrators may make them; each is recorded and reported to the Tool on its
+  next acquisition. Users may always update their own account;
+- any request that carries an epoch must carry the current one.
 
-The Simulation tab's right-aligned **Test notifications** button sends
-`[HH:mm:ss] Test notification: check that your phone plays a sound.` through the
-same archive/banner/alarm/native paths without changing gameplay. Test Manager
-both visible and separately backgrounded/display off. Request success does not
-prove phone delivery or sound.
+Member writes (`/api/game-requests`, `/api/game-jokers`) are never fenced. A
+fenced request holds an in-process fence shared until its response; acquisition,
+release and takeover take it exclusively. Only one server instance may use the
+database. Tracker-endpoint uploads are not fenced.
 
-**Delete game status** rotates generation and clears the server journal; clients
-discard old-generation history and presentation. **Delete all position data**
-preserves notifications. **Delete whole session** removes the journal through
-hidden-device deletion. Pause the Tool for cutover; deploy server migration/API,
-then web, then Tool; reload Manager before testing.
+An effects delivery commits under a durable `deliveryId`
+(`tc_game_deliveries`), in one transaction: request outcomes, operations,
+joker uses, mirror positions, archived alerts, queued pushes, logs and revisions.
+Repeating a delivery ID returns the stored outcome and publishes nothing; the
+same ID with other content answers 409. Writable devices are the session's
+active mirrors. Positions use the uniform mirror payload (protocol `osmand`,
+accuracy/speed/course 0, activity `still`); fix times are truncated to whole
+seconds, and a fix older than the device's latest is stored without becoming
+latest. After commit the latest positions reach the cache and WebSocket
+subscribers, and the destination devices show as online with a new last-update
+time, as for tracker uploads. These positions skip filters and event handlers.
 
-`scripts/game_notification_integration.py` audits the local MySQL/HTTP API using
-isolated fixture accounts/devices only. Run with Python and `websocket-client`
-after the Docker build. It verifies pagination, transactional reset races,
-authorization, websocket invalidation and cascade cleanup without sending pushes.
+Pushes are queued by member in `tc_game_push_outbox` and sent after commit, one
+attempt per recipient, through the recipient account's notificator. Each row
+ends `sent` or `failed`; at startup, rows interrupted during their attempt become
+`uncertain` and are never retried, and rows still queued are sent.
 
-Local Compose sets `WEB_CACHE_CONTROL=no-cache` so Manager's persistent HTTP
-cache revalidates web files on reopening instead of keeping an obsolete bundle
-for the default hour. Unchanged files can still use conditional requests and
-HTTP 304 responses. A restart or logout does not clear Manager's cache. Already
-cached responses cannot be invalidated remotely by changing this header; after
-their old cache lifetime expires, the new policy applies. On HTTPS installations
-with an active service worker, also accept the web app's update-available prompt
-to activate a waiting version. This does not change native Manager or its separate
-bottom Snackbar, and does not delete local notification history.
+### Publishing
 
-Traccar Tool sends the matching native notification through Traccar's standard
-announcement endpoint after publishing the map state. Production enables the
-official relay with container environment variables:
+After commit, `GameServerPublisher` sends WebSocket invalidations under model
+1's names (`{"invalidate": ["game-status"]}` and `game-speedhunt-history`,
+`game-requests`, `game-jokers`, `game-timetable`, `game-notifications`,
+`game-proximity`). It resolves members to their accounts; administrators always
+receive them.
+
+- Session-wide changes reach every active member of the session; private
+  changes (a joker grant or use, a fake, a planned break) reach only their
+  owners. `game-proximity` reaches only hunters and the spectator; players and
+  supporters learn about their own temporary access through a device-access
+  refresh (`{"invalidate": ["devices", "positions"]}`).
+- A binding change tells the session's members and both accounts, the one it
+  bound and the one it removed, so an account learns at once that it gained or
+  lost membership. Deleting a session tells its accounts. A settings change and a
+  change of the executing session or lease tell the session's members.
+- Operators receive `game-sessions` (create, rename, delete) and
+  `game-controller` (lease changes).
+
+### Requests, jokers and breaks
+
+Members submit self-service requests (`POST /api/game-requests`) that target
+members. Hunters' speedhunt requests carry the target's member state revision
+(`tc_game_member_state.revision`), which the server advances with every change
+hunters can observe; players and supporters never receive it. The controlling
+Tool decides (`await`, `approve`, `reject`) and claims them through fenced
+endpoints and records their outcomes in effects deliveries. The server expires
+requests awaiting approval or execution after two minutes
+(`TaskGameController`).
+
+Jokers are held per member (`tc_game_jokers`); the hunters' speedhunt pool has
+its own table (`tc_game_joker_pools`). Reservations (`tc_game_joker_reservations`)
+are accounting only, and the append-only ledger (`tc_game_joker_ledger`)
+records every grant, revoke, reservation, arm, use, overuse and release.
+`GET /api/game-sessions/{id}/jokers/reconcile` checks balances against the
+ledger.
+
+- A speedhunt run begins with its first delivered ping (`pingDelivered`),
+  which uses the pool joker a hunter's request holds or armed for that target,
+  or else one more pool joker (beyond the allocation only with
+  `overAllocate`). The run's creation binds every armed speedhunt fake; the
+  server applies the target's own fake to the target's hunter-mirror positions
+  and records the ping source (`real`, `operatorFake`, `jokerFake`), which only
+  operators read.
+- Breaks have their own lifecycle (`planned`, `waiting`, `active`, `ended`,
+  `cancelled`, `missed`). A break that starts now is started in the delivery of
+  its request's success. A break is refused while any speedhunt runs, while the
+  member is caught and during another break. Planned breaks are private to their
+  owners (`status.plannedBreaks`) and operators.
+- Fake plans have their own table (`tc_game_fake_ping_plans`): exactly one of a
+  timetable entry or a speedhunt ping number, at most one fake per timetable
+  entry and one unbound speedhunt fake per member. Owners cancel unbound fakes
+  until they are used; another owner's reservation answers like a missing one
+  (404).
+
+### Mirror-only hunter access
+
+Break and fake-ping jokers only protect a participant while hunters see players
+and supporters through mirrors. Once a session has break or fake jokers
+allocated or active, no active hunter member of that session may access the
+tracker of an active player or supporter member, directly (`tc_user_device`) or
+through a group (`tc_user_group`, at any nesting depth). `GameAccessRule`
+checks this wherever access or jokers are granted:
+
+- granting break or fake jokers is refused with 409 while a hunter already has
+  such access;
+- `GameAccessFilter` refuses `POST /api/permissions` (and `/bulk`), and device
+  or group moves (`PUT /api/devices/{id}`, `PUT /api/groups/{id}` with a new
+  `groupId`) that would add such access, with 422. It applies to every caller
+  allowed to make the change, the controlling Tool included; other callers get
+  Traccar's own refusal;
+- binding a member's account or tracker that would add such access is refused
+  with 422 (a binding hook).
+
+Spectators keep their access to real trackers. Known limits: Traccar saves
+permissions without database transactions, so a permission grant and a first
+break or fake joker grant made at the same moment can both pass their checks.
+Making a hunter an administrator or a manager of another user is not checked.
+
+Binding hooks (`GameBindingHook`) run inside every binding change: besides the
+access rule, `GamePlanInvalidation` ends the member's open requests, releases
+its armed fakes and cancels its planned and waiting breaks, and the member's
+proximity grants are revoked.
+
+### Notifications
+
+The notification journal (`tc_game_notifications`, with stream metadata in
+`tc_game_notification_state`: generation, reset time, revision) holds every
+alert of a session: a stable case-sensitive alert ID, generation, type, audience,
+recipient and source members with label snapshots, UTC occurrence, IANA timezone
+and the final timestamped message. Members read their own session's journal with
+`GET /api/game-notifications?gameSessionId=…` (another session answers 403);
+an administrator who names `gameSessionId` gets the operator view.
+`POST /api/game-notifications/session/{id}` initializes the stream, `…/reset`
+starts a new generation and deletes the history, and
+`GET /api/game-notifications/history?gameSessionId=…` lists the full history
+for operators. Alerts are archived inside effects deliveries. Device saves no
+longer intercept notification attributes: the stream metadata is not a device
+attribute.
+
+Audiences keep model 1's semantics with members: `session` alerts reach every
+member; targeted alerts have recipient = source (a player, supporter or hunter);
+live-recipient alerts (`liveHunter`, `livePlayer`, `liveSupporter`,
+`liveSpectator`) match the recipient's current role and name another active
+player or supporter as source. A tracker replacement keeps a member's personal
+history; a role change (a new member) does not.
+
+The web app caches history in IndexedDB per origin, account and game session,
+never replays history as alarms, and shows only the newest previously unseen
+record younger than 15 minutes as a banner. Traccar Tool sends native pushes
+through the outbox above; production enables the official relay with container
+environment variables:
 
 ```text
 NOTIFICATOR_TYPES=web,mail,command,traccar
@@ -228,401 +311,54 @@ Supply the key only through deployment secrets. If a deployment already uses
 additional notificators, keep the complete existing list and append `traccar`.
 The production Compose template reads these values from
 `TRACCAR_NOTIFICATOR_TYPES` and `TRACCAR_NOTIFICATOR_TRACCAR_KEY`; the latter is
-required and is never stored in this repository. Local Compose leaves the
-relay disabled unless both values are supplied explicitly.
+required and is never stored in this repository. Local Compose leaves the relay
+disabled unless both values are supplied explicitly.
+
+Local Compose sets `WEB_CACHE_CONTROL=no-cache` so Manager's persistent HTTP
+cache revalidates web files on reopening instead of keeping an obsolete bundle.
 
 Live status, group, geofence, and map filters are scoped to the current
 authenticated browser session. They survive navigation but reset on logout,
 account changes, authentication expiry, and full reload. Device sort order
 remains browser-persistent.
 
-## Central game sessions
+### Proximity
 
-Traccar's database is the authoritative store for Traccar Tool sessions
-(`changelog-game-sessions.xml`, implementation plan stage 1). Sessions have an
-immutable numeric ID, a unique name, a schema version and one revision per
-stored part. Every write names the revision it was based on; a stale revision
-returns 409, while an identical retry of the last write returns the current
-revision, so lost responses can be retried safely.
+The Tool publishes a session's whole proximity content with an expected
+revision (`PUT /api/game-proximity/session/{id}`): grants by recipient and target
+member (`tc_game_proximity_grants`, with the resolved recipient account and
+target tracker) and circles with their members. Proximity has no generation; a
+reset (`…/reset`) publishes empty content with the next revision. Hunters and the
+spectator read `GET /api/game-proximity/circles`, players and supporters their
+own grants at `GET /api/game-proximity/access`.
 
-| Part | Table | Owner |
-|---|---|---|
-| Configuration (settings, roster, planned geofences with geometry, timezone) | `tc_game_sessions.config` | operator |
-| Traccar resource mapping, hidden session device and membership | `tc_game_sessions.resources`, `tc_game_session_members` | Tool device setup |
-| Tool runtime checkpoint (`game_status`) | `tc_game_sessions.runtime` | Tool |
-| Generated-account passwords | `tc_game_session_credentials` (AES-GCM) | operator |
-| Geofence planner document | `tc_game_geofence_plans` | Tool |
-| Published timetable and per-entry progress | `tc_game_timetables`, `tc_game_timetable_entries` | Tool |
-| Session log | `tc_game_session_logs` (append-only) | Tool |
+Grants are temporary read-only device access: Traccar's permission union
+(`DatabaseStorage`) adds `tc_game_proximity_grants` rows whose `expiresat` (UTC
+`DATETIME(3)`) lies ahead, for enabled non-administrator accounts. Write checks
+and `excludeTemporary()` reads leave them out. `TaskGameProximity` deletes
+expired grants and circles every second and refreshes the recipients' device
+access; rebinding a member revokes its grants in the same transaction.
 
-All `/api/game-sessions` endpoints require a Traccar administrator; operators
-are administrators in this version. `GET /api/game-sessions/capabilities`
-returns the API version so mismatched Tool builds stop before writing. The
-Traccar admin password and machine-specific paths (workbooks, KML imports) are
-never stored centrally; the Tool keeps them in the OS credential store and in
-local preferences.
+### Drawings
 
-Membership maps each generated user to one session, role, number and assigned
-tracker; a user belongs to at most one session, and a session device to at most
-one session. Timetable entries are identified by scheduled UTC time and
-participant: matching entries keep their ID and progress across publications,
-content edits update them in place, and entries that disappear are deactivated.
+`tc_drawings.gamesessionid` records the game session the owner took part in when
+drawing. Sharing reads membership rows (`DrawingUtil`, `DrawingResource`):
+owners see their drawings; the spectator sees every drawing of its session and
+edits none; players, supporters and hunters with sharing switched on
+(`traccarToolShareGroupDrawings`, an account attribute only administrators
+change) see and edit the drawings of the members with the same role in the same
+session who also share. Administrators see and delete every drawing. Deleting a
+session deletes its drawings.
 
-Generated passwords are encrypted with the Base64 256-bit key in
-`gameSessions.credentialKey` (environment `GAME_SESSIONS_CREDENTIAL_KEY`;
-Compose reads `TRACCAR_GAME_SESSIONS_CREDENTIAL_KEY` from `.env`). The key is
-never stored in the database and must stay stable for the database's lifetime.
-Without it, or with a different key, only credential reads and writes fail
-(HTTP 503); everything else keeps working. Key rotation is not supported yet.
+### Audits
 
-The notification journal and proximity tables carry the game-session ID.
-Notification and proximity writes require a session device registered with a
-game session (409 otherwise). Whole-session cleanup no longer deletes
-notification history: deleting the session device or a recipient clears the
-reference instead, and `recipientlabel` keeps the recipient's name.
-Administrators read the complete history of a game session, across generations
-and after cleanup, with `GET /api/game-notifications/history?gameSessionId=…`.
-Proximity state, grants and circles remain live access data and are still
-deleted with the session device. Deleting saved session data
-(`DELETE /api/game-sessions/{id}`) removes every stored part, including its
-notification history, but never touches managed Traccar resources.
-
-The migration deletes notification and proximity rows created before central
-sessions existed, because their local sessions are not migrated; nothing else in
-the database is reset.
-
-Audit the stored behaviour against the full Docker profile with
-`../Traccar-Tool/venv_traccar/bin/python scripts/game_sessions_integration.py --tool-source ../Traccar-Tool/src`.
-It creates and removes a temporary administrator and non-administrator and runs
-the Tool's own server repository against the live API. The notification and
-proximity audits register their fixture session devices with game sessions.
-
-## Game controller and effects
-
-One Traccar Tool instance controls the game server-wide at a time
-(`changelog-game-controller.xml`, implementation plan stage 2). The lease is
-bound to the operator and a unique app instance and lasts
-`gameController.leaseSeconds` (default 30), renewed every
-`gameController.renewSeconds` (default 5). Every acquisition gets a larger
-`controllerEpoch`, stored in `tc_game_controller` so it keeps increasing across
-restarts. `/api/game-controller` acquires, renews, releases and force-takes
-over the lease, sets the session the controller executes, and lists the history
-(`tc_game_controller_history`: acquisitions, releases, expiries, takeovers,
-server restarts, execution changes and unfenced administrator edits). A server
-restart ends an active lease, so Tool must resume explicitly. The API version
-is 2.
-
-Fenced requests carry the epoch in `X-Game-Controller-Epoch` and are refused
-with HTTP 423 otherwise (`GameControllerFilter`):
-
-- game-session runtime, resources, timetable progress and effects, and every
-  write of the executing session; configuration of a session that is not
-  executing needs only its revision check;
-- writes to `/api/game-notifications` and `/api/game-proximity`;
-- while a lease is held, standard mutations (devices, groups, users,
-  permissions, geofences, `DELETE /api/positions`) of resources in any stored
-  session's resource mapping, and `/api/notifications/send/*` reaching a member
-  of the executing session, also without `userId`. While no lease is held,
-  administrators may make them; each is recorded and reported to Tool on its
-  next acquisition. Users may always update their own account, so participants
-  can register push tokens and save preferences during a game;
-- any request that carries an epoch must carry the current one.
-
-A fenced request holds an in-process fence shared until its response;
-acquisition, release and takeover take it exclusively, so a request that passed
-the check completes before control changes hands. Only one server instance may
-use the database. Tracker-endpoint uploads are not fenced (confirmed decision
-8): Tool writes mirrors only through effects.
-
-`POST /api/game-sessions/{id}/effects` applies one game operation in one
-transaction under a durable `deliveryId` (`tc_game_deliveries`): positions for
-the session's mirrors and game-state device, the runtime change, archived game
-notifications, queued pushes and log entries. Repeating a delivery ID returns
-the stored outcome without applying it again. Positions use the uniform mirror
-payload (protocol `osmand`, accuracy/speed/course 0, activity `still`) plus the
-caller's scalar attributes; the fix time defaults to the delivery time, and a
-position older than the device's latest is stored without becoming latest.
-Fix times are truncated to whole seconds before they are stored and compared,
-because MySQL keeps `tc_positions.fixtime` to the second and rounds fractions:
-a ping at x.6 s would otherwise be stored as x+1 and a ping at x.9 s in the
-same second would count as older. Deliveries within one second therefore all
-become latest, in delivery order; a fix from an earlier second is still older.
-After commit the latest positions reach the cache and WebSocket subscribers
-like `PostProcessHandler`, and the destination devices show as online with a
-new last-update time, as for tracker uploads. These positions skip filters and
-event handlers.
-
-Pushes are queued in `tc_game_push_outbox` and sent after commit, one attempt
-per recipient, only to members of the session and, when they name an alert,
-only if this delivery archived it first. Each row ends `sent` or `failed`;
-after a restart, unattempted rows are sent and rows interrupted during their
-attempt become `uncertain` and are never retried.
-
-Administrators' WebSocket clients receive `{"invalidate": ["game-sessions"]}`
-when a session is created, renamed or deleted or its configuration, resources,
-credentials, geofence plans or timetable change (not on runtime saves or
-effects, which follow every game action), and `["game-controller"]` when the
-lease changes.
-
-## Game requests and status
-
-Session members submit self-service requests (`changelog-game-requests.xml`,
-implementation plan stage 3). Membership authorizes them; in this stage
-hunters control speedhunts on the players and supporters of their own session:
-static ping, live ping (optional duration up to 240 minutes), stopping a live
-ping, and ending a speedhunt (`POST /api/game-requests`). Requests are
-refused while no Tool executes the session, when the participant is out, when
-the speedhunt changed since the revision the hunter saw (409), and while
-another request for the same participant is still open.
-
-The controlling Tool processes them through fenced endpoints:
-`GET /api/game-sessions/{id}/requests`, `POST …/requests/{requestId}/decision`
-(`await`, `approve`, `reject`) and `POST …/requests/{requestId}/claim`.
-Outcomes commit with the action's own effects (`requests` in the effects
-delivery). Requests move through pending, approved, executing, succeeded,
-failed, rejected, expired and cancelled; members see every step but never the
-operator-only `detail`. The server expires requests awaiting approval or
-execution after two minutes, and a change of control (acquisition, takeover,
-release, expiry, server restart) invalidates every open request while keeping
-its history.
-
-The Tool publishes a status document with each effects delivery that changes
-it (`status`, stored in `tc_game_session_status`). `GET /api/game-status`
-returns the member's role-filtered view: hunters and spectators see each
-player's and supporter's speedhunt state with its revision, ping times and break.
-Players and supporters see the current speedhunt's anonymous ping count and
-send times, plus their own break. If several hunts are running, the shared
-status follows the most recently started active hunt. The lightweight
-`GET /api/game-status/speedhunt` gives members and administrators the active
-hunt's count and configured limit for the red frame.
-Members' and administrators' WebSocket clients receive
-`{"invalidate": ["game-requests"]}` and `["game-status"]` when these change.
-
-## Jokers
-
-Players and supporters hold jokers per type (`changelog-game-jokers.xml`,
-implementation plan stage 4), keyed by their real tracker:
-`tc_game_jokers` keeps the granted quantity and the uses (including uses beyond
-the allocation), `tc_game_joker_reservations` the uses held by open requests,
-and `tc_game_joker_ledger` every grant, revoke, reservation, release and use.
-New sessions start without jokers. "Get hunter positions"
-(`hunterPositions`), break (`break`) and fake-ping (`fakePing`) jokers can be
-granted and used.
-
-- Operators grant or revoke unused jokers with the fenced
-  `POST /api/game-sessions/{id}/jokers/change`, and read the overview and
-  ledger at `…/jokers` and `…/jokers/ledger`. Members read their own inventory
-  at `GET /api/game-jokers`; unused inventories stay private.
-- A participant's `jokerHunterPositions` request reserves one available joker.
-  A succeeded request consumes it; any other end (rejected, cancelled,
-  expired, failed, or invalidated by a change of control) releases it.
-- An operator relay uses a joker inside its effects delivery (`jokers`). It
-  never takes reserved uses; without an available joker it needs
-  `overAllocate` and is recorded beyond the allocation. Available never goes
-  below zero.
-- `caughtParticipants` in an effects delivery ends the participants' open
-  requests and releases their reservations.
-
-### Speedhunt jokers
-
-Speedhunts are paid with jokers of one pool shared by the session's hunters:
-type `speedhunt`, held by device `0` (`GameJokerService.HUNTER_POOL`), granted
-and revoked by operators like any joker; the pool holds no other type and
-participants hold no speedhunt jokers. There is no setting that limits the
-number of speedhunts any more.
-
-- A hunter's static or live ping that would start a speedhunt (the
-  participant's published `startsRun`) reserves a pool joker, with the target
-  in its plan (`targetDeviceId`); without one left it is refused (409, "No
-  speedhunt joker is left"). Its succeeded request arms the reservation.
-- The effects delivery of a run's first ping uses one pool joker
-  (`jokers: [{deviceId: <target>, type: speedhunt, overAllocate}]`): the
-  reservation held or armed for that target, or else, for a speedhunt the
-  operator started, one pool joker, beyond the allocation only with
-  `overAllocate` (the Tool asks the operator first).
-- The Tool reports an armed one `released` (effects `fakes`) when its live
-  ping ended before any upload reached anyone; any other end of the request
-  releases it as usual.
-- Hunters read the pool at `GET /api/game-jokers` (inventory and the uses their
-  requests hold or arm); spectators and participants do not.
-  `{"invalidate": ["game-jokers"]}` reaches every hunter when the pool changes.
-
-### Breaks
-
-A break protects a player or supporter from the hunters for the duration set
-in the session's game settings (`game_settings.break_duration_minutes` in the
-stored configuration). Break jokers can only be granted (409 otherwise) while a
-positive duration is configured; revoking unused ones is always possible.
-Breaks start only through a participant's `jokerBreak` request: operator
-effects deliveries use only "Get hunter positions" jokers.
-
-- The server refuses a `jokerBreak` request (409) when no duration is
-  configured, when the requester is already on a break, and while any
-  speedhunt runs according to the published status. The last refusal has the
-  same message for every participant, so it never reveals whom a speedhunt
-  targets, and reserves nothing.
-- The Tool times breaks. It checks the request again, starts the break when it
-  runs the request, and publishes it with the outcome; the succeeded outcome
-  consumes the reserved joker. The break ends at its deadline (the Tool keeps
-  active breaks in its runtime, so a restart keeps the deadline) or at once
-  when the participant is caught.
-- The published status gives each participant `break` (`active`, `startedAt`,
-  `endsAt`). Hunters and spectators see every participant's break; a player
-  or supporter sees only their own (`status.break` of `GET /api/game-status`).
-  A break past `endsAt` no longer protects anyone, even before the Tool has
-  published its end.
-- Hunters' static and live ping requests on a participant on a break are
-  refused (409). During the break the Tool withholds the hunter destinations
-  from every position of that participant and keeps them out of proximity
-  circles and anonymous proximity notifications.
-
-#### Planned breaks
-
-A `jokerBreak` request may name `parameters.startsAt`, a later start (a start
-that has passed when the request is submitted makes it a break that starts
-now). A planned break is accepted while a speedhunt runs; only a break that
-starts now is refused then. Its reservation carries the plan, and the succeeded
-request *arms* it like a fake (ledger `arm`): the joker stays reserved until
-the Tool starts the break.
-
-- Operators plan a break for a participant with the fenced
-  `POST /api/game-sessions/{id}/jokers/breaks` (`deviceId`, `startsAt`,
-  `overAllocate`). Without an available break joker it needs `overAllocate`;
-  the use then counts beyond the allocation once the break starts. The plan is
-  marked `plannedBy: operator`.
-- Breaks of one participant never overlap (409): a new break is checked
-  against the published active break and every planned or requested break of
-  the participant, each lasting the configured duration; a planned break that
-  is already due counts from now.
-- The Tool starts a planned break at its start and reports the reservation
-  `used` in an effects delivery's `fakes`. While any speedhunt runs (or the
-  participant is still on a break) it waits, then lasts its full duration. A
-  start missed while no Tool ran ends at the planned end; once that has passed,
-  the Tool reports it `released`. Operators release it the same way to cancel
-  it, and owners cancel it with `POST /api/game-jokers/reservations/{id}/cancel`
-  until it starts. A reported catch releases the participant's planned breaks.
-- Planned breaks are private like fake plans: owners see theirs in
-  `/api/game-jokers`, operators in the overview; hunters and spectators see a
-  break only once the Tool publishes it as active.
-
-Hunter relay snapshots carry the hunter position's own fix time, so a mirror
-shows its age; an older fix is stored without becoming latest.
-
-### Fake pings
-
-One fake-ping joker (`fakePing`, requested with `jokerFakePing`) is used either
-on a timetable ping (`parameters` name `entryId`) or on a ping of the next
-speedhunt (`parameters` name `pingNumber`), never both (400). Reservations
-report how they are used as `use` (`timetable` or `speedhunt`), derived from
-their plan. The two uses keep their own rules, below.
-
-`changelog-game-jokers-fake-ping.xml` merged the earlier `fakeTimetable` and
-`fakeSpeedhunt` types forward: inventories add up per participant,
-reservations and open requests take the merged type, and the ledger keeps its
-entries with the earlier type names.
-
-#### Timetable fakes
-
-A player or supporter requests `jokerFakePing` with `parameters`
-`entryId`, `latitude` and `longitude`. `GET /api/game-jokers` lists their
-`timetableEntries`: their own active entries (the timetable column is the
-assigned tracker's device name) at least 60 seconds ahead whose cell sends the
-real position to hunters (blank, `2H`, `2P2H`, `2S2H`, `2P2S2H`). The server
-refuses other entries, entries inside the requester's published break, and an
-entry that already has a fake (409), adds `scheduledAt` to the parameters and
-reserves one joker with the plan in the reservation's `details`.
-
-- When the Tool records the request as succeeded, the server checks the entry
-  again (a 400 makes the Tool record a failure, which returns the joker) and
-  *arms* the fake instead of using the joker: the reservation keeps its status
-  `reserved`, loses its request (moved into the plan) and the ledger records
-  `arm`. Armed fakes are listed with `armed` and their `plan`.
-- The Tool delivers the ping: hunter destinations get the fake, the cell's other
-  audiences the real position, in one effects delivery whose `fakes` reports
-  the reservation `used`. Pings that do not reach hunters report it `released`.
-  A fake that is no longer armed is `skipped`.
-- Owners cancel an armed fake with
-  `POST /api/game-jokers/reservations/{id}/cancel` until 60 seconds before its
-  ping. Publishing a timetable releases armed fakes whose entry disappeared or
-  no longer reaches hunters, and reporting a catch releases the participant's
-  armed fakes.
-- Plans are private: owners see theirs in `/api/game-jokers` and as
-  `status.fakes` in `/api/game-status`; operators in the overview. Hunters and
-  spectators never see fake requests, plans or markers; the delivered positions
-  carry the same payload as real pings.
-- `{"invalidate": ["game-jokers"]}` reaches only the owners whose jokers
-  changed and administrators (`updateGameUsers`), never the other members, so
-  the moment a fake is used, armed, released or cancelled is not visible to
-  hunters.
-- Known limit: owners can cancel until 60 seconds before the ping and the Tool
-  refreshes its armed fakes every 2 seconds. If those refreshes stall for more
-  than a minute, the Tool may still send a cancelled fake; the server then
-  ignores its use (`skipped`), so the joker is not used twice and nothing leaks.
-
-#### Speedhunt fakes
-
-`jokerFakePing` on the next speedhunt takes `parameters` `pingNumber` (1 to the stored
-`game_settings.pings_per_speedhunt`, or 1–1000 when it is blank), `latitude`
-and `longitude`. A participant has at most one unbound speedhunt fake (an open
-request or an armed fake; 409 otherwise). The succeeded request arms it like a
-timetable fake.
-
-- The Tool's delivery of a run's first ping lists every armed speedhunt fake it
-  knows as `bound` (with `run`, an opaque reference of the run) in `fakes`.
-  The server uses each joker in the same transaction as the ping's positions,
-  whoever the run targets, records `boundAt`/`boundTo` in the plan and never
-  refunds it. A fake that is no longer armed is `skipped`; the Tool then does
-  not apply it. `boundTo` is never shown to owners, so a bound fake does not
-  tell them whom the speedhunt targets.
-- `pingNumber` and `entryId` must be whole numbers (400 otherwise).
-- Known limit: a speedhunt fake cancelled in the seconds before the next run
-  starts is skipped by the server; if it names ping 1, the Tool may already
-  have sent it with that first ping.
-- Owners cancel an unbound speedhunt fake through the same cancel endpoint; a
-  bound one is no longer cancellable (409). Another owner's reservation is
-  answered like one that does not exist (404), so probing reservation numbers
-  never tells a participant anything about someone else's jokers or fakes. A
-  reported catch releases unbound fakes; bound ones stay used.
-- The owner's `/api/game-jokers` also lists their latest bound speedhunt fakes
-  (`bound` true, status `consumed`); `status.fakes` shows only armed ones. The
-  operators' overview (`…/jokers`) lists the session's 50 latest bound
-  speedhunt fakes as `boundFakes`, with `boundTo`, so the Tool shows every
-  owner's binding.
-- The Tool applies only the target's own fake, at its ping number, to hunter
-  destinations; those positions carry no marker.
-
-### Mirror-only hunter access
-
-Break and fake-ping jokers only protect a participant while hunters see players
-and supporters through mirrors. Once a session has break or fake jokers
-allocated or active (`granted` or `used` above zero in `tc_game_jokers`), no
-hunter of that session may access a real tracker of its players and
-supporters, directly (`tc_user_device`) or through a group (`tc_user_group`, at
-any nesting depth of `tc_groups`). `GameAccessRule` checks this wherever access
-or jokers are granted:
-
-- granting break or fake jokers (`…/jokers/change`) is refused with 409 while a
-  hunter already has such access;
-- `GameAccessFilter` refuses `POST /api/permissions` (and `/bulk`), and device
-  or group moves (`PUT /api/devices/{id}`, `PUT /api/groups/{id}` with a new
-  `groupId`) that would add such access, with 422 and a text naming the
-  hunter. It applies to every caller allowed to make the change, the
-  controlling Tool included; other callers get Traccar's own refusal, so the
-  answer tells them nothing about the game's trackers or hunters. Access the
-  request does not add never blocks it;
-- saving session members (`PUT …/resources`) that would make a user with such
-  access a hunter, or such a device a participant tracker, is refused with
-  422 (409 there means a revision conflict). Access the new members do not add
-  never blocks the save.
-
-Spectators keep their access to real trackers; the Tool additionally refuses
-device setup that would give hunters real trackers or the spectator's password.
-
-Known limits: Traccar saves permissions without database transactions, so a
-permission grant and a first break or fake joker grant made at the same moment
-can both pass their checks. Making a hunter an administrator, or linking them
-as manager of another user (`managedUserId`), is not checked; only
-administrators can do either.
+`scripts/game_sessions_integration.py`, `game_notification_integration.py`,
+`game_proximity_integration.py` and `drawing_integration.py` were written for
+model 1 and are ported with the integration audit of step 7 of the data
+architecture plan. The model-2 service suites run on H2 in every build
+(`org.traccar.game`, `org.traccar.api.game`) and on MySQL when
+`TRACCAR_TEST_MYSQL_URL`, `TRACCAR_TEST_MYSQL_USER` and
+`TRACCAR_TEST_MYSQL_PASSWORD` name a throwaway server.
 
 ## Game page
 
@@ -631,11 +367,14 @@ menu; it is laid out for phones and also works in the desktop sidebar menu. It
 reads only the member endpoints, so it shows nothing the server did not
 already filter for the signed-in member:
 
-- `GET /api/game-status`: whether a Tool runs the game (`controllerActive`),
-  the server's clock (`serverTime`), and the role-filtered status (players
-  and supporters: the anonymous speedhunt status, the own break and the own
-  armed fakes; hunters and spectators: every participant's named speedhunt
-  state and break);
+- `GET /api/game-status`: the caller's membership (`gameSessionId`,
+  `memberId`, `role`, `number`, `displayName`), whether a Tool runs the game
+  (`controllerActive`), the server's clock (`serverTime`), a `hash` of the
+  projection, and the role-filtered status (players and supporters: the
+  anonymous speedhunt status, the catch roster, the own break, the own armed
+  fakes and planned breaks; hunters: every participant's speedhunt state with
+  its revision, break, limits, the last target and live shares; the spectator:
+  the participants with display names and trackers);
 - `GET /api/game-requests`: the member's own requests (hunters and spectators:
   every speedhunt request);
 - `GET /api/game-jokers` (players and supporters): the own jokers,
@@ -643,7 +382,7 @@ already filter for the signed-in member:
   session's `pingsPerSpeedhunt` (null when unlimited);
 - `GET /api/game-timetable`: the timetable pings the member may see (the 20
   most recent of the last hour and at most 200 upcoming ones), each with `entryId`, `scheduledAt`, the
-  participant's real tracker (`deviceId`) and its `state` (`scheduled`,
+  participant's member (`memberId`) and its `state` (`scheduled`,
   `sent`, `skipped` or `failed`, with `stateAt`). Players and supporters see
   their own pings that can carry a fake, with `fakeAllowed`; hunters and
   spectators see every ping that reaches hunters (blank cells, target codes
@@ -684,8 +423,8 @@ Pings past their time that are still scheduled show as due while a Tool runs
 and as not sent while none runs or the page is offline; hunters also see
 pings inside a participant's break as protected.
 
-The `game` store slice belongs to one account, role and assignment: data
-loaded for another is discarded. `GameController` (mounted by
+The `game` store slice belongs to one member (session, member and role, as the
+status names it): data loaded for another is discarded. `GameController` (mounted by
 `SocketController`) reads the endpoints on sign-in, on the `game-status`,
 `game-requests`, `game-jokers` and `game-timetable` invalidations, after every WebSocket
 reconnect, when the app returns to the foreground, and every 30 seconds
@@ -822,19 +561,20 @@ repository-safety contract.
 
 1. Configure and deploy the server notification relay secret and append the
    `traccar` notificator.
-2. Deploy the combined server and web build.
-3. Release the matching Traccar Tool so alert emission begins only after web
-   parsing and native push delivery are available.
-4. Run Device Setup once for every existing session.
+2. Stop the Tool and release the lease. Remove model-1 sessions' Traccar
+   resources (the hidden state device, generated accounts with model-1 markers,
+   mirrors, groups), or start from a fresh database: the model-2 Tool no longer
+   knows the state device.
+3. Deploy the combined server and web build. Its migration drops the model-1
+   game tables and their data; it keeps Traccar users, devices, ordinary
+   drawings and the controller epoch.
+4. Release the matching Traccar Tool (game-session API version 5) and run
+   Device Setup for every new session: it plans members before it creates
+   devices and accounts.
 5. Confirm managed devices have category `person`, integer
    `traccarToolRoleNumber`, and the expected `traccarToolRole` while retaining
    unrelated attributes.
 
-There is intentionally no legacy numeric-category fallback because this project
-has not entered production. Keep the legacy `Traccar-Server` repository as a
-read-only migration reference until the combined release has been verified.
-
-If game-session state later moves into the server, introduce a dedicated
-`GameSessionParticipant` entity and API as a separate migration. That future
-model can become authoritative for assignments; role-marker presentation alone
-does not justify adding it now.
+There is intentionally no legacy compatibility because this project has not
+entered production: model-1 game data is dropped, and model-2 session IDs start
+again at 1.

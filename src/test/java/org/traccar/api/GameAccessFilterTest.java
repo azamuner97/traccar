@@ -12,7 +12,7 @@ import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.traccar.api.security.PermissionsService;
 import org.traccar.api.security.UserPrincipal;
-import org.traccar.database.GameAccessRule;
+import org.traccar.game.GameAccessRule;
 import org.traccar.model.Device;
 import org.traccar.model.User;
 

@@ -25,8 +25,6 @@ import org.traccar.config.Config;
 import org.traccar.config.Keys;
 import org.traccar.database.DeviceLookupService;
 import org.traccar.database.NotificationManager;
-import org.traccar.database.GameNotificationService;
-import org.traccar.database.GameProximityService;
 import org.traccar.model.BaseModel;
 import org.traccar.model.Device;
 import org.traccar.model.Drawing;
@@ -61,10 +59,6 @@ import java.util.stream.Collectors;
 
 @Singleton
 public class ConnectionManager implements BroadcastInterface {
-    @Inject
-    private GameProximityService gameProximity;
-    @Inject
-    private org.traccar.database.GameRequestService gameRequests;
 
     private static final Logger LOGGER = LoggerFactory.getLogger(ConnectionManager.class);
 
@@ -413,9 +407,9 @@ public class ConnectionManager implements BroadcastInterface {
     }
 
     @Override
-    public synchronized void updateGameProximity(boolean local, long sessionDeviceId, Set<Long> userIds) {
+    public synchronized void updateGameAccess(boolean local, Set<Long> userIds) {
         if (local) {
-            broadcastService.updateGameProximity(true, sessionDeviceId, userIds);
+            broadcastService.updateGameAccess(true, userIds);
         }
         for (long userId : userIds) {
             try {
@@ -425,55 +419,13 @@ public class ConnectionManager implements BroadcastInterface {
                 LOGGER.warn("Proximity device access refresh failed", error);
             }
         }
-        for (long userId : listeners.keySet()) {
-            try {
-                User user = storage.getObject(User.class, new Request(
-                        new Columns.All(), new Condition.Equals("id", userId)));
-                if (GameNotificationService.canReceive(user, sessionDeviceId) && !user.getDisabled()
-                        && Set.of("hunter", "spectator").contains(user.getAttributes().get("traccarToolUserRole"))) {
-                    listeners.get(userId).forEach(UpdateListener::onUpdateGameProximity);
-                }
-            } catch (StorageException error) {
-                LOGGER.warn("Proximity circle refresh failed", error);
-            }
-        }
-    }
-
-    private void reconcileProximity() {
-        try {
-            for (var change : gameProximity.reconcile()) {
-                updateGameProximity(true, change.sessionDeviceId(), change.userIds());
-            }
-        } catch (Exception error) {
-            LOGGER.warn("Proximity identity reconciliation failed", error);
-        }
-    }
-
-    @Override
-    public synchronized void updateGameNotifications(boolean local, long deviceId, Long recipientUserId) {
-        if (local) {
-            broadcastService.updateGameNotifications(true, deviceId, recipientUserId);
-        }
-        Set<Long> recipients = recipientUserId == null
-                ? deviceUsers.getOrDefault(deviceId, Set.of()) : Set.of(recipientUserId);
-        for (long userId : recipients) {
-            try {
-                User user = storage.getObject(User.class, new Request(
-                        new Columns.All(), new Condition.Equals("id", userId)));
-                if (GameNotificationService.canReceive(user, deviceId)) {
-                    listeners.getOrDefault(userId, Set.of()).forEach(UpdateListener::onUpdateGameNotifications);
-                }
-            } catch (StorageException error) {
-                LOGGER.warn("Notification invalidation failed", error);
-            }
-        }
     }
 
     @Override
     public synchronized <T extends BaseModel> void invalidateObject(
             boolean local, Class<T> clazz, long id, ObjectOperation operation) {
         if (clazz.equals(User.class) || clazz.equals(Device.class)) {
-            reconcileProximity();
+            // Temporary proximity access depends on the account (disabled, administrator) and the device.
             for (long userId : listeners.keySet()) {
                 try {
                     refreshDeviceAccess(userId);
@@ -497,17 +449,11 @@ public class ConnectionManager implements BroadcastInterface {
     public synchronized <T1 extends BaseModel, T2 extends BaseModel> void invalidatePermission(
             boolean local, Class<T1> clazz1, long id1, Class<T2> clazz2, long id2, boolean link) {
         if (clazz1.equals(User.class) && (clazz2.equals(Device.class) || clazz2.equals(Group.class))) {
-            reconcileProximity();
             try {
                 refreshDeviceAccess(id1);
             } catch (StorageException error) {
                 LOGGER.warn("Device permission refresh failed", error);
             }
-        }
-        if (clazz1.equals(User.class) && (clazz2.equals(Device.class) || clazz2.equals(Group.class))) {
-            // A tracker/session grant can change without changing the account's
-            // assigned-device marker. Revalidate the private browser archive.
-            listeners.getOrDefault(id1, Set.of()).forEach(UpdateListener::onUpdateGameNotifications);
         }
         if (clazz1.equals(Geofence.class) || clazz2.equals(Geofence.class)) {
             updateGeofences();
@@ -558,30 +504,6 @@ public class ConnectionManager implements BroadcastInterface {
     }
 
     @Override
-    public synchronized void updateGameMembers(boolean local, Long gameSessionId, String resource) {
-        if (local) {
-            broadcastService.updateGameMembers(true, gameSessionId, resource);
-        }
-        try {
-            var sessions = gameRequests.sessionsOf(listeners.keySet());
-            for (var entry : listeners.entrySet()) {
-                Long session = sessions.get(entry.getKey());
-                boolean member = session != null && (gameSessionId == null || session.equals(gameSessionId));
-                if (!member) {
-                    User user = storage.getObject(User.class, new Request(
-                            new Columns.Include("administrator"), new Condition.Equals("id", entry.getKey())));
-                    member = user != null && user.getAdministrator();
-                }
-                if (member) {
-                    entry.getValue().forEach(listener -> listener.onUpdateGameAdmin(resource));
-                }
-            }
-        } catch (Exception error) {
-            LOGGER.warn("Game member invalidation failed", error);
-        }
-    }
-
-    @Override
     public synchronized void updateGameUsers(boolean local, Set<Long> userIds, String resource) {
         if (local) {
             broadcastService.updateGameUsers(true, userIds, resource);
@@ -606,7 +528,6 @@ public class ConnectionManager implements BroadcastInterface {
     public interface UpdateListener {
         /** Sends {@code {"invalidate": [resource]}} for a game resource. */
         default void onUpdateGameAdmin(String resource) { }
-        default void onUpdateGameProximity() { }
         default void onUpdateDeviceAccess() { }
         void onKeepalive();
         void onUpdateDevice(Device device);
@@ -615,7 +536,6 @@ public class ConnectionManager implements BroadcastInterface {
         void onUpdateLog(LogRecord record);
         void onUpdateGeofences();
         void onUpdateDrawings();
-        default void onUpdateGameNotifications() { }
         void onUpdateUser();
     }
 

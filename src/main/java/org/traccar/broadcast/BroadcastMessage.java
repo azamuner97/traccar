@@ -21,27 +21,15 @@ import org.traccar.model.ObjectOperation;
 import org.traccar.model.Position;
 
 public class BroadcastMessage {
-    private Long gameProximityDeviceId;
-    private java.util.Set<Long> gameProximityUserIds;
+    private java.util.Set<Long> gameAccessUserIds;
 
-    public Long getGameProximityDeviceId() {
-        return gameProximityDeviceId;
+    public java.util.Set<Long> getGameAccessUserIds() {
+        return gameAccessUserIds;
     }
 
-    public void setGameProximityDeviceId(Long gameProximityDeviceId) {
-        this.gameProximityDeviceId = gameProximityDeviceId;
+    public void setGameAccessUserIds(java.util.Set<Long> gameAccessUserIds) {
+        this.gameAccessUserIds = gameAccessUserIds;
     }
-
-    public java.util.Set<Long> getGameProximityUserIds() {
-        return gameProximityUserIds;
-    }
-
-    public void setGameProximityUserIds(java.util.Set<Long> gameProximityUserIds) {
-        this.gameProximityUserIds = gameProximityUserIds;
-    }
-
-    private String gameMembersResource;
-    private Long gameMembersSessionId;
 
     private String gameUsersResource;
     private java.util.Set<Long> gameUsersIds;
@@ -62,22 +50,6 @@ public class BroadcastMessage {
         this.gameUsersIds = gameUsersIds;
     }
 
-    public String getGameMembersResource() {
-        return gameMembersResource;
-    }
-
-    public void setGameMembersResource(String gameMembersResource) {
-        this.gameMembersResource = gameMembersResource;
-    }
-
-    public Long getGameMembersSessionId() {
-        return gameMembersSessionId;
-    }
-
-    public void setGameMembersSessionId(Long gameMembersSessionId) {
-        this.gameMembersSessionId = gameMembersSessionId;
-    }
-
     private String gameAdminResource;
 
     public String getGameAdminResource() {
@@ -86,25 +58,6 @@ public class BroadcastMessage {
 
     public void setGameAdminResource(String gameAdminResource) {
         this.gameAdminResource = gameAdminResource;
-    }
-
-    private Long gameNotificationsDeviceId;
-    private Long gameNotificationsRecipientUserId;
-
-    public Long getGameNotificationsDeviceId() {
-        return gameNotificationsDeviceId;
-    }
-
-    public void setGameNotificationsDeviceId(Long gameNotificationsDeviceId) {
-        this.gameNotificationsDeviceId = gameNotificationsDeviceId;
-    }
-
-    public Long getGameNotificationsRecipientUserId() {
-        return gameNotificationsRecipientUserId;
-    }
-
-    public void setGameNotificationsRecipientUserId(Long gameNotificationsRecipientUserId) {
-        this.gameNotificationsRecipientUserId = gameNotificationsRecipientUserId;
     }
 
     private Device device;

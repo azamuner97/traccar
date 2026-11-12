@@ -23,12 +23,20 @@ import com.google.inject.AbstractModule;
 import com.google.inject.Injector;
 import com.google.inject.Provides;
 import com.google.inject.Scopes;
+import com.google.inject.multibindings.Multibinder;
 import com.google.inject.name.Names;
 import com.nimbusds.oauth2.sdk.GeneralException;
 import io.netty.util.HashedWheelTimer;
 import io.netty.util.Timer;
 import org.apache.velocity.app.VelocityEngine;
 import org.glassfish.jersey.client.ClientProperties;
+import org.traccar.game.GameAccessRule;
+import org.traccar.game.GameBindingHook;
+import org.traccar.game.GamePlanInvalidation;
+import org.traccar.game.GamePublisher;
+import org.traccar.game.GamePushOutbox;
+import org.traccar.game.GameServerPublisher;
+import org.traccar.notification.NotificatorManager;
 import org.traccar.broadcast.BroadcastService;
 import org.traccar.broadcast.MulticastBroadcastService;
 import org.traccar.broadcast.RedisBroadcastService;
@@ -130,6 +138,18 @@ public class MainModule extends AbstractModule {
         bindConstant().annotatedWith(Names.named("configFile")).to(configFile);
         bind(Config.class).asEagerSingleton();
         bind(Timer.class).to(HashedWheelTimer.class).in(Scopes.SINGLETON);
+
+        // Game data model 2: the after-commit publisher and the binding hooks of member changes.
+        bind(GamePublisher.class).to(GameServerPublisher.class);
+        Multibinder<GameBindingHook> gameBindingHooks = Multibinder.newSetBinder(binder(), GameBindingHook.class);
+        gameBindingHooks.addBinding().to(GamePlanInvalidation.class);
+        gameBindingHooks.addBinding().to(GameAccessRule.class);
+    }
+
+    @Singleton
+    @Provides
+    public static GamePushOutbox.Sender provideGamePushSender(Storage storage, NotificatorManager notificators) {
+        return GamePushOutbox.traccarSender(storage, notificators);
     }
 
     @Singleton

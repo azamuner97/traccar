@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 import org.traccar.api.BaseResource;
 import org.traccar.api.security.PermissionsService;
+import org.traccar.game.GameMemberService;
 import org.traccar.helper.LogAction;
 import org.traccar.helper.model.DrawingUtil;
 import org.traccar.model.Drawing;
@@ -14,16 +15,23 @@ import org.traccar.storage.Storage;
 import org.traccar.storage.query.Condition;
 import org.traccar.storage.query.Request;
 
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.*;
 
 public class DrawingResourceTest {
 
     private final ObjectMapper mapper = new ObjectMapper();
+
+    /** Game memberships by account (member rows of data model 2): session and role. */
+    private final Map<Long, GameMemberService.Membership> memberships = new HashMap<>();
 
     private void inject(Object object, Class<?> type, String name, Object value) throws Exception {
         var field = type.getDeclaredField(name);
@@ -36,9 +44,8 @@ public class DrawingResourceTest {
         user.setId(id);
         user.setName("Owner " + id);
         user.setDisableDrawings(false);
-        user.getAttributes().put(DrawingUtil.ATTRIBUTE_USER_ROLE, role);
-        user.getAttributes().put(DrawingUtil.ATTRIBUTE_SESSION_DEVICE_ID, session);
         user.getAttributes().put(DrawingUtil.ATTRIBUTE_SHARE_GROUP_DRAWINGS, true);
+        memberships.put(id, new GameMemberService.Membership(session, id, role, 1, null, "Member " + id));
         return user;
     }
 
@@ -46,7 +53,7 @@ public class DrawingResourceTest {
         Drawing drawing = new Drawing();
         drawing.setId(50);
         drawing.setOwnerId(ownerId);
-        drawing.setSessionDeviceId(900L);
+        drawing.setGameSessionId(900L);
         drawing.setType("line");
         drawing.setColor("#FF0000");
         drawing.setGeometry(mapper.readTree("{\"type\":\"LineString\",\"coordinates\":[[7,46],[8,47]]}"));
@@ -71,6 +78,10 @@ public class DrawingResourceTest {
         inject(resource, DrawingResource.class, "cacheManager", mock(CacheManager.class));
         inject(resource, DrawingResource.class, "connectionManager", mock(ConnectionManager.class));
         inject(resource, DrawingResource.class, "actionLogger", mock(LogAction.class));
+        GameMemberService members = mock(GameMemberService.class);
+        when(members.find(anyLong())).thenAnswer(
+                invocation -> Optional.ofNullable(memberships.get((Long) invocation.getArgument(0))));
+        inject(resource, DrawingResource.class, "members", members);
         return resource;
     }
 
@@ -87,10 +98,10 @@ public class DrawingResourceTest {
             assertTrue(before.getCanDelete());
             assertEquals(200, resource.getSingle(50).getStatus());
             Drawing payload = drawing(99);
-            payload.setSessionDeviceId(901L);
+            payload.setGameSessionId(901L);
             Drawing updated = (Drawing) resource.update(50, payload).getEntity();
             assertEquals(11, updated.getOwnerId());
-            assertEquals(900L, updated.getSessionDeviceId());
+            assertEquals(900L, updated.getGameSessionId());
             assertEquals("Owner 11", updated.getOwnerName());
             assertTrue(updated.getCanEdit());
             assertEquals(204, resource.remove(50).getStatus());
@@ -99,8 +110,9 @@ public class DrawingResourceTest {
 
     @Test
     public void testDeniedPeersCannotFetchOrMutateEvenWithForgedCapabilities() throws Exception {
-        User owner = user(11, "hunter", 900);
-        for (User actor : List.of(user(10, "player", 900), user(10, "hunter", 901))) {
+        for (String[] peer : new String[][] {{"player", "900"}, {"hunter", "901"}}) {
+            User owner = user(11, "hunter", 900);
+            User actor = user(10, peer[0], Long.parseLong(peer[1]));
             Drawing before = drawing(11);
             before.setCanEdit(true);
             before.setCanDelete(true);
@@ -131,6 +143,40 @@ public class DrawingResourceTest {
     }
 
     @Test
+    public void testSpectatorSeesItsSessionAndAccountsWithoutMembershipOnlyTheirOwn() throws Exception {
+        User owner = user(11, "hunter", 900);
+        Drawing before = drawing(11);
+        User spectator = user(12, "spectator", 900);
+        spectator.getAttributes().remove(DrawingUtil.ATTRIBUTE_SHARE_GROUP_DRAWINGS);
+        DrawingResource watching = resource(spectator, owner, before, mock(Storage.class));
+        assertEquals(1, watching.get().size());
+        assertFalse(before.getCanEdit());
+        assertThrows(SecurityException.class, () -> watching.add(drawing(12)));
+
+        // A former member keeps the share switch, but without a member row nothing is shared with it.
+        User former = user(13, "hunter", 900);
+        memberships.remove(13L);
+        DrawingResource outside = resource(former, owner, before, mock(Storage.class));
+        assertTrue(outside.get().isEmpty());
+        assertThrows(SecurityException.class, () -> outside.getSingle(50));
+    }
+
+    @Test
+    public void testNewDrawingsTakeTheOwnersSession() throws Exception {
+        User actor = user(10, "player", 900);
+        Storage storage = mock(Storage.class);
+        DrawingResource resource = resource(actor, actor, drawing(10), storage);
+        Drawing created = (Drawing) resource.add(drawing(10)).getEntity();
+        assertEquals(900L, created.getGameSessionId());
+
+        User outsider = user(14, "player", 900);
+        memberships.remove(14L);
+        Drawing own = (Drawing) resource(outsider, outsider, drawing(14), mock(Storage.class))
+                .add(drawing(14)).getEntity();
+        assertNull(own.getGameSessionId());
+    }
+
+    @Test
     public void testCapabilitiesAreSerializedButCannotBeSuppliedByClients() throws Exception {
         Drawing drawing = drawing(11);
         drawing.setCanEdit(true);
@@ -138,7 +184,7 @@ public class DrawingResourceTest {
         var json = mapper.readTree(mapper.writeValueAsString(drawing));
         assertTrue(json.get("canEdit").asBoolean());
         assertTrue(json.get("canDelete").asBoolean());
-        assertFalse(json.has("sessionDeviceId"));
+        assertFalse(json.has("gameSessionId"));
         Drawing supplied = mapper.readValue("{\"canEdit\":true,\"canDelete\":true}", Drawing.class);
         assertFalse(supplied.getCanEdit());
         assertFalse(supplied.getCanDelete());

@@ -52,6 +52,7 @@ import org.traccar.api.DateParameterConverterProvider;
 import org.traccar.api.MediaFilter;
 import org.traccar.api.ResourceErrorHandler;
 import org.traccar.api.StreamWriter;
+import org.traccar.api.game.GameSessionResource;
 import org.traccar.api.resource.ServerResource;
 import org.traccar.api.security.LoginService;
 import org.traccar.api.security.SecurityRequestFilter;
@@ -201,6 +202,8 @@ public class WebServer implements LifecycleObject {
                 ResourceErrorHandler.class,
                 StreamWriter.class);
         resourceConfig.packages(ServerResource.class.getPackage().getName());
+        // Game data model 2 (game sessions, controller lease, member endpoints).
+        resourceConfig.packages(GameSessionResource.class.getPackage().getName());
         if (resourceConfig.getClasses().stream().filter(ServerResource.class::equals).findAny().isEmpty()) {
             LOGGER.warn("Failed to load API resources");
         }

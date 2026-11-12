@@ -153,32 +153,34 @@ public class ConnectionManagerTest {
     }
 
     @Test
-    public void testDeviceAndGroupPermissionChangesRevalidateOnlyAffectedNotificationHistory() {
-        connectionManager.invalidatePermission(true, User.class, 1, Device.class, 100, false);
-        connectionManager.invalidatePermission(false, User.class, 1, Group.class, 200, false);
-        connectionManager.invalidatePermission(true, User.class, 1, Device.class, 100, true);
-        verify(listener, times(3)).onUpdateGameNotifications();
-        verify(secondListener, never()).onUpdateGameNotifications();
+    public void testGameAccessRefreshesOnlyTheListedAccountsAcrossBroadcast() throws Exception {
+        connectionManager.updateGameAccess(true, java.util.Set.of(1L));
+        verify(broadcastService).updateGameAccess(true, java.util.Set.of(1L));
+        verify(listener).onUpdateDeviceAccess();
+        verify(secondListener, never()).onUpdateDeviceAccess();
+
+        reset(listener, secondListener, broadcastService);
+        connectionManager.updateGameAccess(false, java.util.Set.of(2L));
+        verifyNoInteractions(broadcastService);
+        verify(listener, never()).onUpdateDeviceAccess();
+        verify(secondListener).onUpdateDeviceAccess();
     }
 
     @Test
     public void testTargetedGameNotificationInvalidationStaysPrivateAcrossBroadcast() throws Exception {
-        User recipient = new User();
-        recipient.setId(1);
-        recipient.getAttributes().put("traccarToolUserRole", "hunter");
-        recipient.getAttributes().put("traccarToolSessionDeviceId", 900);
-        when(storage.getObject(eq(User.class), any(Request.class))).thenReturn(recipient);
+        // The game publisher resolves the recipient member's account; nobody else hears of the alert.
+        when(storage.getObject(eq(User.class), any(Request.class))).thenReturn(new User());
 
-        connectionManager.updateGameNotifications(true, 900, 1L);
-        verify(broadcastService).updateGameNotifications(true, 900, 1L);
-        verify(listener).onUpdateGameNotifications();
-        verify(secondListener, never()).onUpdateGameNotifications();
+        connectionManager.updateGameUsers(true, java.util.Set.of(1L), "game-notifications");
+        verify(broadcastService).updateGameUsers(true, java.util.Set.of(1L), "game-notifications");
+        verify(listener).onUpdateGameAdmin("game-notifications");
+        verify(secondListener, never()).onUpdateGameAdmin(any());
 
         reset(listener, secondListener, broadcastService);
-        connectionManager.updateGameNotifications(false, 900, 1L);
+        connectionManager.updateGameUsers(false, java.util.Set.of(1L), "game-notifications");
         verifyNoInteractions(broadcastService);
-        verify(listener).onUpdateGameNotifications();
-        verify(secondListener, never()).onUpdateGameNotifications();
+        verify(listener).onUpdateGameAdmin("game-notifications");
+        verify(secondListener, never()).onUpdateGameAdmin(any());
     }
 
     @Test

@@ -43,10 +43,13 @@
   <include file="changelog-game-notifications-id-collation.xml" relativeToChangelogFile="true" />
   <include file="changelog-game-notifications-targeting.xml" relativeToChangelogFile="true" />
 
-    <include file="changelog-game-proximity.xml" relativeToChangelogFile="true" />
+  <include file="changelog-game-proximity.xml" relativeToChangelogFile="true" />
   <include file="changelog-game-sessions.xml" relativeToChangelogFile="true" />
   <include file="changelog-game-controller.xml" relativeToChangelogFile="true" />
   <include file="changelog-game-requests.xml" relativeToChangelogFile="true" />
   <include file="changelog-game-jokers.xml" relativeToChangelogFile="true" />
   <include file="changelog-game-jokers-fake-ping.xml" relativeToChangelogFile="true" />
+
+  <!-- Game data model 2: drops the model-1 game tables above and creates the model-2 schema. -->
+  <include file="changelog-game-model-2.xml" relativeToChangelogFile="true" />
 </databaseChangeLog>

@@ -22,7 +22,8 @@ import org.traccar.model.ObjectOperation;
 import org.traccar.model.Position;
 
 public interface BroadcastInterface {
-    default void updateGameProximity(boolean local, long sessionDeviceId, java.util.Set<Long> userIds) { }
+    /** The temporary (proximity) device access of these accounts changed: their device lists are recomputed. */
+    default void updateGameAccess(boolean local, java.util.Set<Long> userIds) { }
 
     default void updateDevice(boolean local, Device device) {}
 
@@ -32,20 +33,13 @@ public interface BroadcastInterface {
 
     default void updateCommand(boolean local, long deviceId) {}
 
-    default void updateGameNotifications(boolean local, long deviceId, Long recipientUserId) {}
-
     /** Invalidates an administrator-only game resource ("game-sessions" or "game-controller"). */
     default void updateGameAdmin(boolean local, String resource) {}
 
     /**
-     * Invalidates a game resource for administrators and the members of one session ({@code null}: every
-     * session), e.g. "game-requests" or "game-status".
-     */
-    default void updateGameMembers(boolean local, Long gameSessionId, String resource) {}
-
-    /**
-     * Invalidates a game resource for administrators and the listed users only, e.g. "game-jokers" for the owners
-     * whose jokers changed, so nobody else learns when a joker (a fake ping, for example) took effect.
+     * Invalidates a game resource for administrators and the listed users only. The game publisher resolves the
+     * accounts from member rows, e.g. "game-jokers" for the owners whose jokers changed, so nobody else learns when
+     * a joker (a fake ping, for example) took effect.
      */
     default void updateGameUsers(boolean local, java.util.Set<Long> userIds, String resource) {}
 

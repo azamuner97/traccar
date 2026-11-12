@@ -23,6 +23,7 @@ import liquibase.Contexts;
 import liquibase.Liquibase;
 import liquibase.database.Database;
 import liquibase.database.DatabaseFactory;
+import liquibase.database.core.H2Database;
 import liquibase.exception.LiquibaseException;
 import liquibase.exception.LockException;
 import liquibase.resource.DirectoryResourceAccessor;
@@ -37,8 +38,13 @@ import java.io.IOException;
 import java.lang.reflect.Method;
 import java.net.URL;
 import java.nio.file.Path;
+import java.util.List;
+import java.util.concurrent.CopyOnWriteArrayList;
 
 public class DatabaseModule extends AbstractModule {
+
+    /** H2 migration sessions kept open while the server runs; see {@link #provideDataSource}. */
+    private static final List<Database> MIGRATION_SESSIONS = new CopyOnWriteArrayList<>();
 
     @Singleton
     @Provides
@@ -99,9 +105,20 @@ public class DatabaseModule extends AbstractModule {
                         config.getString(Keys.DATABASE_DRIVER),
                         null, null, null, resourceAccessor);
 
-                try (Liquibase liquibase = new Liquibase(changelogName, resourceAccessor, database)) {
+                Liquibase liquibase = new Liquibase(changelogName, resourceAccessor, database);
+                try {
                     liquibase.clearCheckSums();
                     liquibase.update(new Contexts());
+                } finally {
+                    if (database instanceof H2Database) {
+                        // H2 2.4.240 binds a CHECK constraint to the session that created it: once that session
+                        // closes, every insert checked by the constraint fails ("database is already closed") until
+                        // the database is reopened. The migration session therefore stays open while the server
+                        // runs, so the game tables of data model 2 accept writes right after their creation.
+                        MIGRATION_SESSIONS.add(database);
+                    } else {
+                        liquibase.close();
+                    }
                 }
             } catch (LockException e) {
                 throw new DatabaseLockException();

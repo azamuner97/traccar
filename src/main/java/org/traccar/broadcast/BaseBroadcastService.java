@@ -27,26 +27,9 @@ import org.traccar.model.Position;
 
 public abstract class BaseBroadcastService implements BroadcastService {
     @Override
-    public void updateGameProximity(boolean local, long sessionDeviceId, java.util.Set<Long> userIds) {
+    public void updateGameAccess(boolean local, Set<Long> userIds) {
         BroadcastMessage message = new BroadcastMessage();
-        message.setGameProximityDeviceId(sessionDeviceId);
-        message.setGameProximityUserIds(userIds);
-        sendMessage(message);
-    }
-
-    @Override
-    public void updateGameNotifications(boolean local, long deviceId, Long recipientUserId) {
-        var message = new BroadcastMessage();
-        message.setGameNotificationsDeviceId(deviceId);
-        message.setGameNotificationsRecipientUserId(recipientUserId);
-        sendMessage(message);
-    }
-
-    @Override
-    public void updateGameMembers(boolean local, Long gameSessionId, String resource) {
-        var message = new BroadcastMessage();
-        message.setGameMembersResource(resource);
-        message.setGameMembersSessionId(gameSessionId);
+        message.setGameAccessUserIds(userIds);
         sendMessage(message);
     }
 
@@ -135,22 +118,14 @@ public abstract class BaseBroadcastService implements BroadcastService {
     protected abstract void sendMessage(BroadcastMessage message);
 
     protected void handleMessage(BroadcastMessage message) throws Exception {
-        if (message.getGameProximityDeviceId() != null) {
-            listeners.forEach(listener -> listener.updateGameProximity(
-                    false, message.getGameProximityDeviceId(), message.getGameProximityUserIds()));
-        } else if (message.getGameMembersResource() != null) {
-            listeners.forEach(listener -> listener.updateGameMembers(
-                    false, message.getGameMembersSessionId(), message.getGameMembersResource()));
+        if (message.getGameAccessUserIds() != null) {
+            listeners.forEach(listener -> listener.updateGameAccess(false, message.getGameAccessUserIds()));
         } else if (message.getGameUsersResource() != null) {
             listeners.forEach(listener -> listener.updateGameUsers(
                     false, message.getGameUsersIds() == null ? Set.of() : message.getGameUsersIds(),
                     message.getGameUsersResource()));
         } else if (message.getGameAdminResource() != null) {
             listeners.forEach(listener -> listener.updateGameAdmin(false, message.getGameAdminResource()));
-        } else if (message.getGameNotificationsDeviceId() != null) {
-            listeners.forEach(listener -> listener.updateGameNotifications(
-                    false, message.getGameNotificationsDeviceId(),
-                    message.getGameNotificationsRecipientUserId()));
         } else if (message.getDevice() != null) {
             listeners.forEach(listener -> listener.updateDevice(false, message.getDevice()));
         } else if (message.getPosition() != null) {

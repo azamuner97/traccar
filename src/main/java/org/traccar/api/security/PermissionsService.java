@@ -180,16 +180,9 @@ public class PermissionsService {
     }
 
     public void checkUserUpdate(long userId, User before, User after) throws StorageException, SecurityException {
+        // Game membership is a member row (data model 2), never an account attribute; drawing sharing reads it.
+        // Only the sharing switch is an attribute, and only administrators change it.
         if (!Objects.equals(
-                before.getAttributes().get(DrawingUtil.ATTRIBUTE_USER_ROLE),
-                after.getAttributes().get(DrawingUtil.ATTRIBUTE_USER_ROLE))
-                || !Objects.equals(
-                before.getAttributes().get(DrawingUtil.ATTRIBUTE_SESSION_DEVICE_ID),
-                after.getAttributes().get(DrawingUtil.ATTRIBUTE_SESSION_DEVICE_ID))
-                || !Objects.equals(
-                before.getAttributes().get(DrawingUtil.ATTRIBUTE_ASSIGNED_DEVICE_ID),
-                after.getAttributes().get(DrawingUtil.ATTRIBUTE_ASSIGNED_DEVICE_ID))
-                || !Objects.equals(
                 before.getAttributes().get(DrawingUtil.ATTRIBUTE_SHARE_GROUP_DRAWINGS),
                 after.getAttributes().get(DrawingUtil.ATTRIBUTE_SHARE_GROUP_DRAWINGS))) {
             checkAdmin(userId);

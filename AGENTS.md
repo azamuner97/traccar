@@ -125,6 +125,31 @@ Before commits or releases that affect integration, packaging, persistence, or
 server/web interaction, also run the full Docker integration loop and verify
 `http://localhost:8083/api/health`.
 
+## Game data model 2
+
+Game sessions and game state follow data model 2 (see `CUSTOMIZATIONS.md`):
+services and repositories in `org.traccar.game`, REST resources in
+`org.traccar.api.game`, the schema in `schema/changelog-game-model-2.xml`, and the
+API in `openapi.yaml` (game-session API version 5). Traccar Tool and the web app
+speak only model 2.
+
+- The model-2 changelog drops the model-1 game tables and their data. Starting a
+  server against a database that still has model-1 game data migrates it at once;
+  decide first how that database's model-1 Traccar resources (hidden state
+  device, generated accounts with model-1 markers, mirrors, groups) are removed.
+  Never do this to the persistent development database without the user's
+  explicit approval.
+- The model-2 suites (`org.traccar.game`, `org.traccar.api.game`) build their
+  databases from the real changelogs. They run on H2 in every build, and on
+  MySQL when `TRACCAR_TEST_MYSQL_URL` (containing `{database}`),
+  `TRACCAR_TEST_MYSQL_USER` and `TRACCAR_TEST_MYSQL_PASSWORD` name a throwaway
+  server, for example the image `compose.yml` pins, started with
+  `--tmpfs /var/lib/mysql` on a port other than the development database's.
+  Never point them at the development database.
+- Traccar Tool's OpenAPI contract test reads `openapi.yaml`; run it with
+  `TRACCAR_OPENAPI=../traccar/openapi.yaml venv_traccar/bin/python -m unittest discover -s tests`
+  from `Traccar-Tool` after changing game endpoints.
+
 ## Repository and data safety
 
 - Never copy production database contents, passwords, tokens, or other secrets

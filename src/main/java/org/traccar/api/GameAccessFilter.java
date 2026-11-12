@@ -22,7 +22,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.traccar.api.security.PermissionsService;
 import org.traccar.api.security.UserPrincipal;
-import org.traccar.database.GameAccessRule;
+import org.traccar.game.GameAccessRule;
 import org.traccar.model.Device;
 import org.traccar.model.Group;
 import org.traccar.model.User;
@@ -37,9 +37,12 @@ import java.util.Map;
 
 /**
  * Refuses permission grants and device or group moves that would let a hunter see a real participant tracker
- * of a session with break or fake jokers (mirror-only hunter access, see {@link GameAccessRule}). Applies to
- * every caller allowed to make the change, the controlling Tool included. Callers without that right are left to
- * Traccar's own refusal, so the answer never tells them about the game's trackers or hunters.
+ * of a session with break or fake jokers (mirror-only hunter access, see {@link GameAccessRule#check}, on members
+ * of data model 2). It intercepts the permission, device and group resources ({@code POST /permissions},
+ * {@code POST /permissions/bulk}, {@code PUT /devices/{id}}, {@code PUT /groups/{id}}) before they change anything,
+ * and answers 422. Applies to every caller allowed to make the change, the controlling Tool included. Callers
+ * without that right are left to Traccar's own refusal, so the answer never tells them about the game's trackers
+ * or hunters.
  */
 @Priority(Priorities.USER + 110)
 public class GameAccessFilter implements ContainerRequestFilter {

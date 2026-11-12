@@ -82,26 +82,35 @@ tags:
   - name: Stream
     description: Live video streaming
   - name: Game Sessions
-    description: Central game-session storage for Traccar Tool (administrators only)
-  - name: Game Notifications
-    description: Game notification journal
-  - name: Game Proximity
-    description: Participant proximity access and circles
-  - name: Game Requests
     description: >-
-      Self-service game requests of session members and the role-filtered game status. Hunters control
-      speedhunts on players and supporters of their session; the controlling Tool approves and executes the
-      requests. Players and supporters never learn whom a speedhunt targets.
+      Sessions, settings, members, resource rows, documents, timetable and logs (operators only). The game endpoints
+      describe game data model 2 (game-session API version 5): each participant is a member with a stable ID, typed
+      tables hold the game state, and the server computes every member's status. Operators are Traccar
+      administrators. Members are resolved from the caller's account; an account without membership gets 403 from
+      every member endpoint. Every time is an ISO-8601 instant in UTC. Players and supporters never receive member
+      state revisions, ping sources, other members' fake plans or inventories, bound run references, or anything
+      that names a speedhunt's target: a target and a non-target get identical answers.
+  - name: Game Effects
+    description: Requests, jokers, effects deliveries and the operator snapshot (operators only)
+  - name: Game Members
+    description: >-
+      The signed-in member's status, speedhunt history, requests, jokers and timetable pings, computed from the typed
+      game tables by role.
+  - name: Game Notifications
+    description: The notification journal, keyed by game session
+  - name: Game Proximity
+    description: Participant proximity grants and circles, keyed by game session; no generation
   - name: Game Controller
     description: >-
       Server-wide controller lease for Traccar Tool (administrators only). Fenced requests carry the current
-      controllerEpoch in the X-Game-Controller-Epoch header and are refused with 423 otherwise. Fenced are the
-      game-session runtime, resources, timetable progress and effects, every write of the executing session,
-      writes to /game-notifications and /game-proximity, and - while a lease is held - standard mutations
-      (devices, groups, users, permissions, geofences, DELETE /positions) of resources in any stored session's
-      resource mapping, and /notifications/send/* reaching members of the executing session. Users may always
-      update their own account. A request that carries the header must carry the current epoch, whatever it
-      changes.
+      controllerEpoch in the X-Game-Controller-Epoch header and are refused with 423 otherwise. Fenced are, for any
+      session, effects, timetable progress, members/*, resources/*, checkpoints/*, requests/* and jokers/*; every
+      write of the executing session; writes to /game-notifications and /game-proximity; and - while a lease is
+      held - standard mutations (devices, groups, users, permissions, geofences, DELETE /positions) of the Traccar
+      resources a session owns (members' accounts and trackers, mirrors, groups, geofences), and
+      /notifications/send/* reaching members of the executing session. Users may always update their own account.
+      A request that carries the header must carry the current epoch, whatever it changes. A change of control
+      ends every open game request.
 paths:
   /audit:
     get:
@@ -3958,26 +3967,23 @@ paths:
           content: {}
   /game-sessions/capabilities:
     get:
-      operationId: getGameSessionCapabilities
-      summary: Fetch the game-session API version (administrators only)
-      tags:
-        - Game Sessions
+      operationId: getGameCapabilities
+      summary: The game-session API version (5 for data model 2)
+      tags: [Game Sessions]
       responses:
         '200':
           description: OK
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/GameSessionCapabilities'
+                $ref: '#/components/schemas/GameCapabilities'
         '403':
-          description: Administrator access required
-          content: {}
+          $ref: '#/components/responses/Forbidden'
   /game-sessions:
     get:
       operationId: getGameSessions
-      summary: List stored game sessions (administrators only)
-      tags:
-        - Game Sessions
+      summary: Every stored session
+      tags: [Game Sessions]
       responses:
         '200':
           description: OK
@@ -3988,13 +3994,11 @@ paths:
                 items:
                   $ref: '#/components/schemas/GameSessionSummary'
         '403':
-          description: Administrator access required
-          content: {}
+          $ref: '#/components/responses/Forbidden'
     post:
-      operationId: postGameSession
-      summary: Create a game session with an immutable ID
-      tags:
-        - Game Sessions
+      operationId: createGameSession
+      summary: Creates a session at revision 1, with its settings at revision 1
+      tags: [Game Sessions]
       requestBody:
         required: true
         content:
@@ -4003,60 +4007,47 @@ paths:
               $ref: '#/components/schemas/GameSessionCreate'
       responses:
         '200':
-          description: Created session
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/GameSession'
+          $ref: '#/components/responses/Session'
         '400':
-          description: Invalid name, schema version or configuration
-          content: {}
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '409':
-          description: A game session with this name already exists
-          content: {}
+          $ref: '#/components/responses/Conflict'
   /game-sessions/{id}:
     parameters:
-      - $ref: '#/components/parameters/GameControllerEpoch'
       - $ref: '#/components/parameters/GameSessionId'
     get:
       operationId: getGameSession
-      summary: Fetch a game session with configuration, resource mapping, runtime and membership
-      tags:
-        - Game Sessions
+      summary: A session with its settings
+      tags: [Game Sessions]
       responses:
         '200':
-          description: OK
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/GameSession'
+          $ref: '#/components/responses/Session'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '404':
-          description: Game session not found
-          content: {}
+          $ref: '#/components/responses/NotFound'
     delete:
       operationId: deleteGameSession
-      summary: Delete saved game-session data; managed Traccar resources are not touched
-      tags:
-        - Game Sessions
+      summary: Deletes a session and every game record of it; its Traccar resources are cleaned up before
+      tags: [Game Sessions]
       responses:
-        '423':
-          description: The game controller lease is required, or another Tool instance holds it
-          content: {}
         '204':
           description: Deleted
-          content: {}
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '404':
-          description: Game session not found
-          content: {}
+          $ref: '#/components/responses/NotFound'
+        '423':
+          $ref: '#/components/responses/Locked'
   /game-sessions/{id}/name:
     parameters:
-      - $ref: '#/components/parameters/GameControllerEpoch'
       - $ref: '#/components/parameters/GameSessionId'
     put:
-      operationId: putGameSessionName
-      summary: Rename a game session; its ID and Traccar resource names do not change
-      tags:
-        - Game Sessions
+      operationId: renameGameSession
+      summary: Renames a session based on its settings revision; a retry of the same rename answers the session
+      tags: [Game Sessions]
       requestBody:
         required: true
         content:
@@ -4064,217 +4055,656 @@ paths:
             schema:
               $ref: '#/components/schemas/GameSessionRename'
       responses:
-        '423':
-          description: The game controller lease is required, or another Tool instance holds it
-          content: {}
         '200':
-          description: New configuration revision
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/GameSessionRevision'
+          $ref: '#/components/responses/Session'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
         '409':
-          description: Revision conflict or duplicate name
-          content: {}
+          $ref: '#/components/responses/Conflict'
+        '423':
+          $ref: '#/components/responses/Locked'
   /game-sessions/{id}/config:
     parameters:
-      - $ref: '#/components/parameters/GameControllerEpoch'
       - $ref: '#/components/parameters/GameSessionId'
     put:
-      operationId: putGameSessionConfig
-      summary: Replace the configuration document if it still has the expected revision
-      tags:
-        - Game Sessions
+      operationId: updateGameSessionSettings
+      summary: Replaces the settings document based on its revision
+      tags: [Game Sessions]
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/GameSessionDocumentUpdate'
+              allOf:
+                - $ref: '#/components/schemas/GameDocumentUpdate'
+                - required: [schemaVersion]
       responses:
-        '423':
-          description: The game controller lease is required, or another Tool instance holds it
-          content: {}
         '200':
-          description: New revision; an identical retry of the last write returns the current revision
+          $ref: '#/components/responses/Session'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '423':
+          $ref: '#/components/responses/Locked'
+  /game-sessions/{id}/snapshot:
+    parameters:
+      - $ref: '#/components/parameters/GameSessionId'
+    get:
+      operationId: getGameSessionSnapshot
+      summary: Everything the Tool loads and recovers a session from, read at one database snapshot
+      description: >-
+        Operator data at one consistent snapshot, with the session aggregate revision. Generated credentials are not
+        included. The response is not cached (Cache-Control no-store).
+      tags: [Game Effects]
+      responses:
+        '200':
+          description: OK
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/GameSessionRevision'
+                $ref: '#/components/schemas/GameSnapshot'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /game-sessions/{id}/members:
+    parameters:
+      - $ref: '#/components/parameters/GameSessionId'
+    get:
+      operationId: getGameMembers
+      summary: Every member of a session, active and retired
+      tags: [Game Sessions]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/GameMember'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    post:
+      operationId: planGameMember
+      summary: Plans a member without account or tracker; without a number it gets the next one never used
+      tags: [Game Sessions]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GameMemberInput'
+      responses:
+        '200':
+          $ref: '#/components/responses/Member'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
         '409':
-          description: Revision conflict
-          content: {}
+          $ref: '#/components/responses/Conflict'
+        '423':
+          $ref: '#/components/responses/Locked'
+  /game-sessions/{id}/members/{memberId}:
+    parameters:
+      - $ref: '#/components/parameters/GameSessionId'
+      - $ref: '#/components/parameters/GameMemberId'
+    get:
+      operationId: getGameMember
+      summary: One member
+      tags: [Game Sessions]
+      responses:
+        '200':
+          $ref: '#/components/responses/Member'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /game-sessions/{id}/members/{memberId}/name:
+    parameters:
+      - $ref: '#/components/parameters/GameSessionId'
+      - $ref: '#/components/parameters/GameMemberId'
+    put:
+      operationId: renameGameMember
+      summary: Changes an active member's display name; history keeps its snapshots
+      tags: [Game Sessions]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GameMemberName'
+      responses:
+        '200':
+          $ref: '#/components/responses/Member'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '423':
+          $ref: '#/components/responses/Locked'
+  /game-sessions/{id}/members/{memberId}/account:
+    parameters:
+      - $ref: '#/components/parameters/GameSessionId'
+      - $ref: '#/components/parameters/GameMemberId'
+    put:
+      operationId: bindGameMemberAccount
+      summary: Binds an account to an active member (one member of all sessions per account)
+      description: >-
+        A binding change revokes the member's proximity grants, ends its open requests, releases its armed plans and
+        advances its member state revision, in one transaction. A change that would let a hunter see a real
+        participant tracker of a session with break or fake jokers is refused with 422.
+      tags: [Game Sessions]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GameMemberAccount'
+      responses:
+        '200':
+          $ref: '#/components/responses/Member'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/Refused'
+        '423':
+          $ref: '#/components/responses/Locked'
+    delete:
+      operationId: unbindGameMemberAccount
+      summary: Unbinds a member's account (the way to free the spectator's account)
+      tags: [Game Sessions]
+      responses:
+        '200':
+          $ref: '#/components/responses/Member'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '423':
+          $ref: '#/components/responses/Locked'
+  /game-sessions/{id}/members/{memberId}/tracker:
+    parameters:
+      - $ref: '#/components/parameters/GameSessionId'
+      - $ref: '#/components/parameters/GameMemberId'
+    put:
+      operationId: bindGameMemberTracker
+      summary: Binds a real tracker to an active member (one member per session per tracker; never a mirror)
+      tags: [Game Sessions]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GameMemberTracker'
+      responses:
+        '200':
+          $ref: '#/components/responses/Member'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          $ref: '#/components/responses/Refused'
+        '423':
+          $ref: '#/components/responses/Locked'
+    delete:
+      operationId: unbindGameMemberTracker
+      summary: Unbinds a member's tracker
+      tags: [Game Sessions]
+      responses:
+        '200':
+          $ref: '#/components/responses/Member'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '423':
+          $ref: '#/components/responses/Locked'
+  /game-sessions/{id}/members/{memberId}/retire:
+    parameters:
+      - $ref: '#/components/parameters/GameSessionId'
+      - $ref: '#/components/parameters/GameMemberId'
+    post:
+      operationId: retireGameMember
+      summary: Retires a member, clearing its bindings and keeping its state and history; the spectator cannot be retired
+      tags: [Game Sessions]
+      responses:
+        '200':
+          $ref: '#/components/responses/Member'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '423':
+          $ref: '#/components/responses/Locked'
+  /game-sessions/{id}/members/{memberId}/role:
+    parameters:
+      - $ref: '#/components/parameters/GameSessionId'
+      - $ref: '#/components/parameters/GameMemberId'
+    post:
+      operationId: changeGameMemberRole
+      summary: Retires the member and plans a new one with the new role, which takes over its bindings
+      description: A member's role never changes; jokers are not carried over. The response is the new member.
+      tags: [Game Sessions]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GameMemberInput'
+      responses:
+        '200':
+          $ref: '#/components/responses/Member'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '423':
+          $ref: '#/components/responses/Locked'
   /game-sessions/{id}/resources:
     parameters:
-      - $ref: '#/components/parameters/GameControllerEpoch'
       - $ref: '#/components/parameters/GameSessionId'
-    put:
-      operationId: putGameSessionResources
-      summary: Replace the Traccar resource mapping, session device and membership
-      tags:
-        - Game Sessions
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/GameSessionResourcesUpdate'
+    get:
+      operationId: getGameResources
+      summary: The session's mirror, group and geofence rows, active and retiring
+      tags: [Game Sessions]
       responses:
-        '423':
-          description: The game controller lease is required, or another Tool instance holds it
-          content: {}
         '200':
-          description: New revision
+          description: OK
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/GameSessionRevision'
-        '400':
-          description: Invalid member or session device
-          content: {}
-        '409':
-          description: Revision conflict, or a user or session device already belongs to another session
-          content: {}
-        '422':
-          description: >-
-            Mirror-only hunter access: the session has break or fake jokers and a hunter would see a real
-            participant tracker
-          content: {}
-  /game-sessions/{id}/runtime:
+                $ref: '#/components/schemas/GameResources'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /game-sessions/{id}/resources/mirrors:
     parameters:
-      - $ref: '#/components/parameters/GameControllerEpoch'
       - $ref: '#/components/parameters/GameSessionId'
-    put:
-      operationId: putGameSessionRuntime
-      summary: Replace the Tool runtime checkpoint if it still has the expected revision
-      tags:
-        - Game Sessions
+    post:
+      operationId: addGameMirror
+      summary: Records a mirror device of a source member, to a role or to one member
+      tags: [Game Sessions]
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/GameSessionDocumentUpdate'
+              $ref: '#/components/schemas/GameMirrorInput'
       responses:
-        '423':
-          description: The game controller lease is required, or another Tool instance holds it
-          content: {}
         '200':
-          description: New revision
+          description: OK
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/GameSessionRevision'
+                $ref: '#/components/schemas/GameMirror'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '409':
-          description: Revision conflict
-          content: {}
+          $ref: '#/components/responses/Conflict'
+        '423':
+          $ref: '#/components/responses/Locked'
+  /game-sessions/{id}/resources/groups:
+    parameters:
+      - $ref: '#/components/parameters/GameSessionId'
+    post:
+      operationId: addGameGroup
+      summary: Records a Traccar group with its purpose (per-member purposes name the destination member)
+      tags: [Game Sessions]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GameGroupInput'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GameGroup'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '423':
+          $ref: '#/components/responses/Locked'
+  /game-sessions/{id}/resources/geofences:
+    parameters:
+      - $ref: '#/components/parameters/GameSessionId'
+    post:
+      operationId: addGameGeofence
+      summary: Records a managed geofence (configured, or planned with its plan key)
+      tags: [Game Sessions]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GameGeofenceInput'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GameGeofence'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '423':
+          $ref: '#/components/responses/Locked'
+  /game-sessions/{id}/resources/{kind}/{rowId}:
+    parameters:
+      - $ref: '#/components/parameters/GameSessionId'
+      - $ref: '#/components/parameters/GameResourceKind'
+      - $ref: '#/components/parameters/GameResourceRowId'
+    put:
+      operationId: rebindGameResource
+      summary: Replaces the Traccar device, group or geofence of an active row
+      tags: [Game Sessions]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GameResourceRebind'
+      responses:
+        '200':
+          $ref: '#/components/responses/Resource'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '423':
+          $ref: '#/components/responses/Locked'
+    delete:
+      operationId: removeGameResource
+      summary: Removes a retiring row once cleanup is done
+      tags: [Game Sessions]
+      responses:
+        '204':
+          description: Removed
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '423':
+          $ref: '#/components/responses/Locked'
+  /game-sessions/{id}/resources/{kind}/{rowId}/retire:
+    parameters:
+      - $ref: '#/components/parameters/GameSessionId'
+      - $ref: '#/components/parameters/GameResourceKind'
+      - $ref: '#/components/parameters/GameResourceRowId'
+    post:
+      operationId: retireGameResource
+      summary: Moves an active row to retiring; it stays game-owned until it is removed
+      tags: [Game Sessions]
+      responses:
+        '200':
+          $ref: '#/components/responses/Resource'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '423':
+          $ref: '#/components/responses/Locked'
+  /game-sessions/{id}/resources/{kind}/{rowId}/reactivate:
+    parameters:
+      - $ref: '#/components/parameters/GameSessionId'
+      - $ref: '#/components/parameters/GameResourceKind'
+      - $ref: '#/components/parameters/GameResourceRowId'
+    post:
+      operationId: reactivateGameResource
+      summary: Returns a retiring row to active while its Traccar resource and members still exist
+      tags: [Game Sessions]
+      responses:
+        '200':
+          $ref: '#/components/responses/Resource'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '423':
+          $ref: '#/components/responses/Locked'
   /game-sessions/{id}/credentials:
     parameters:
-      - $ref: '#/components/parameters/GameControllerEpoch'
       - $ref: '#/components/parameters/GameSessionId'
     get:
-      operationId: getGameSessionCredentials
-      summary: Fetch decrypted generated-account passwords
-      tags:
-        - Game Sessions
+      operationId: getGameCredentials
+      summary: The decrypted generated credentials (not cached)
+      tags: [Game Sessions]
       responses:
         '200':
-          description: Credentials document; revision 0 when none are stored
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/GameSessionDocument'
+          $ref: '#/components/responses/Document'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
         '503':
-          description: The credential key is missing or does not match the stored data
-          content: {}
+          description: The server's credential key is missing or wrong
     put:
-      operationId: putGameSessionCredentials
-      summary: Replace the encrypted generated-account passwords
-      tags:
-        - Game Sessions
+      operationId: updateGameCredentials
+      summary: Replaces the generated credentials based on their revision (0 for the first)
+      tags: [Game Sessions]
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/GameSessionDocumentUpdate'
+              $ref: '#/components/schemas/GameDocumentUpdate'
       responses:
-        '423':
-          description: The game controller lease is required, or another Tool instance holds it
-          content: {}
         '200':
-          description: New revision
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/GameSessionRevision'
+          $ref: '#/components/responses/Revision'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
         '409':
-          description: Revision conflict
-          content: {}
+          $ref: '#/components/responses/Conflict'
+        '423':
+          $ref: '#/components/responses/Locked'
         '503':
-          description: The credential key is missing
-          content: {}
+          description: The server's credential key is missing or wrong
   /game-sessions/{id}/geofence-plans:
     parameters:
-      - $ref: '#/components/parameters/GameControllerEpoch'
       - $ref: '#/components/parameters/GameSessionId'
     get:
-      operationId: getGameSessionGeofencePlans
-      summary: Fetch the geofence planner document with geometry
-      tags:
-        - Game Sessions
+      operationId: getGameGeofencePlans
+      summary: The parsed geofence plans (revision 0 and an empty document when none)
+      tags: [Game Sessions]
       responses:
         '200':
-          description: Plan document; revision 0 when none is stored
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/GameSessionDocument'
+          $ref: '#/components/responses/Document'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
     put:
-      operationId: putGameSessionGeofencePlans
-      summary: Replace the geofence planner document
-      tags:
-        - Game Sessions
+      operationId: updateGameGeofencePlans
+      summary: Replaces the geofence plans based on their revision
+      tags: [Game Sessions]
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/GameSessionDocumentUpdate'
+              $ref: '#/components/schemas/GameDocumentUpdate'
       responses:
-        '423':
-          description: The game controller lease is required, or another Tool instance holds it
-          content: {}
         '200':
-          description: New revision
+          $ref: '#/components/responses/Revision'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '423':
+          $ref: '#/components/responses/Locked'
+  /game-sessions/{id}/checkpoints:
+    parameters:
+      - $ref: '#/components/parameters/GameSessionId'
+    get:
+      operationId: getGameCheckpoints
+      summary: Every component checkpoint (internal recovery data; no game outcome depends on it)
+      tags: [Game Sessions]
+      responses:
+        '200':
+          description: OK
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/GameSessionRevision'
-        '409':
-          description: Revision conflict
-          content: {}
-  /game-sessions/{id}/timetable:
+                type: array
+                items:
+                  $ref: '#/components/schemas/GameCheckpoint'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /game-sessions/{id}/checkpoints/{component}:
     parameters:
-      - $ref: '#/components/parameters/GameControllerEpoch'
       - $ref: '#/components/parameters/GameSessionId'
+      - name: component
+        in: path
+        required: true
+        schema:
+          type: string
+          pattern: '^[A-Za-z0-9_-]{1,32}$'
     get:
-      operationId: getGameSessionTimetable
-      summary: Fetch the committed timetable with its active entries
-      tags:
-        - Game Sessions
+      operationId: getGameCheckpoint
+      summary: One checkpoint (revision 0 and an empty document when none)
+      tags: [Game Sessions]
       responses:
         '200':
-          description: Timetable; revision 0 when none is published
+          $ref: '#/components/responses/Checkpoint'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    put:
+      operationId: putGameCheckpoint
+      summary: Writes a checkpoint based on its revision; a retry of the same write answers it
+      tags: [Game Sessions]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: '#/components/schemas/GameDocumentUpdate'
+                - required: [schemaVersion]
+      responses:
+        '200':
+          $ref: '#/components/responses/Checkpoint'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '423':
+          $ref: '#/components/responses/Locked'
+    delete:
+      operationId: deleteGameCheckpoint
+      summary: Deletes a checkpoint; deleting a missing one does nothing
+      tags: [Game Sessions]
+      responses:
+        '204':
+          description: Deleted
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '423':
+          $ref: '#/components/responses/Locked'
+  /game-sessions/{id}/timetable:
+    parameters:
+      - $ref: '#/components/parameters/GameSessionId'
+    get:
+      operationId: getGameTimetable
+      summary: The published timetable with its active entries
+      tags: [Game Sessions]
+      responses:
+        '200':
+          description: OK
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/GameTimetable'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
     put:
-      operationId: putGameSessionTimetable
-      summary: Publish a parsed timetable; entries matching by time and participant keep their IDs
-      tags:
-        - Game Sessions
+      operationId: publishGameTimetable
+      summary: Publishes a parsed timetable; headers resolve to members by display name, else tracker name
+      tags: [Game Sessions]
       requestBody:
         required: true
         content:
@@ -4282,27 +4712,29 @@ paths:
             schema:
               $ref: '#/components/schemas/GameTimetablePublish'
       responses:
-        '423':
-          description: The game controller lease is required, or another Tool instance holds it
-          content: {}
         '200':
-          description: Published timetable
+          description: OK
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/GameTimetablePublished'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
         '409':
-          description: Revision conflict
-          content: {}
+          $ref: '#/components/responses/Conflict'
+        '423':
+          $ref: '#/components/responses/Locked'
   /game-sessions/{id}/timetable/progress:
     parameters:
-      - $ref: '#/components/parameters/GameControllerEpoch'
       - $ref: '#/components/parameters/GameSessionId'
     put:
-      operationId: putGameSessionTimetableProgress
-      summary: Record execution outcomes of timetable entries
-      tags:
-        - Game Sessions
+      operationId: updateGameTimetableProgress
+      summary: Records the execution state of entries (fenced)
+      tags: [Game Sessions]
       requestBody:
         required: true
         content:
@@ -4310,483 +4742,77 @@ paths:
             schema:
               $ref: '#/components/schemas/GameTimetableProgressUpdate'
       responses:
-        '423':
-          description: The game controller lease is required, or another Tool instance holds it
-          content: {}
         '204':
           description: Recorded
-          content: {}
         '400':
-          description: Unknown entry or status
-          content: {}
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '423':
+          $ref: '#/components/responses/Locked'
   /game-sessions/{id}/logs:
     parameters:
-      - $ref: '#/components/parameters/GameControllerEpoch'
       - $ref: '#/components/parameters/GameSessionId'
     get:
-      operationId: getGameSessionLogs
-      summary: Fetch session log entries in order
-      tags:
-        - Game Sessions
+      operationId: getGameLogs
+      summary: One page of the session log in insertion order, optionally of one category
+      tags: [Game Sessions]
       parameters:
-        - name: after
-          in: query
-          description: Cursor returned as nextCursor by the previous page
-          schema:
-            type: string
+        - $ref: '#/components/parameters/After'
         - name: limit
           in: query
           schema:
             type: integer
             minimum: 1
             maximum: 1000
+            default: 500
+        - name: category
+          in: query
+          schema:
+            type: string
       responses:
         '200':
           description: OK
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/GameSessionLogPage'
+                $ref: '#/components/schemas/GameLogPage'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
     post:
-      operationId: postGameSessionLogs
-      summary: Append session log entries
-      tags:
-        - Game Sessions
+      operationId: appendGameLogs
+      summary: Appends log entries
+      tags: [Game Sessions]
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/GameSessionLogAppend'
+              $ref: '#/components/schemas/GameLogAppend'
       responses:
-        '423':
-          description: The game controller lease is required, or another Tool instance holds it
-          content: {}
         '204':
           description: Appended
-          content: {}
-  /game-notifications:
-    parameters:
-      - $ref: '#/components/parameters/GameControllerEpoch'
-    get:
-      operationId: getGameNotifications
-      summary: Fetch the active notification history of a session device visible to the current user
-      tags:
-        - Game Notifications
-      parameters:
-        - name: sessionDeviceId
-          in: query
-          required: true
-          schema:
-            type: integer
-            format: int64
-        - name: generation
-          in: query
-          schema:
-            type: string
-        - name: after
-          in: query
-          schema:
-            type: string
-        - name: limit
-          in: query
-          schema:
-            type: integer
-            minimum: 1
-            maximum: 500
-      responses:
-        '200':
-          description: OK
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/GameNotificationPage'
-        '409':
-          description: Notification generation changed
-          content: {}
-    post:
-      operationId: postGameNotification
-      summary: Archive a game notification for a session device registered with a game session
-      tags:
-        - Game Notifications
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/GameNotificationCreate'
-      responses:
-        '423':
-          description: The game controller lease is required, or another Tool instance holds it
-          content: {}
-        '200':
-          description: Stored or existing identical record
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/GameNotificationCreation'
-        '409':
-          description: Stale generation, conflicting ID, or unregistered session device
-          content: {}
-  /game-notifications/history:
-    parameters:
-      - $ref: '#/components/parameters/GameControllerEpoch'
-    get:
-      operationId: getGameNotificationHistory
-      summary: Fetch the full notification history of a game session, including records kept after cleanup
-      tags:
-        - Game Notifications
-      parameters:
-        - name: gameSessionId
-          in: query
-          required: true
-          schema:
-            type: integer
-            format: int64
-        - name: after
-          in: query
-          schema:
-            type: string
-        - name: limit
-          in: query
-          schema:
-            type: integer
-            minimum: 1
-            maximum: 500
-      responses:
-        '200':
-          description: OK
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/GameNotificationHistoryPage'
-        '403':
-          description: Administrator access required
-          content: {}
-  /game-notifications/session/{id}:
-    parameters:
-      - $ref: '#/components/parameters/GameControllerEpoch'
-    post:
-      operationId: postGameNotificationSession
-      summary: Initialize the notification generation of a session device (idempotent)
-      tags:
-        - Game Notifications
-      parameters:
-        - name: id
-          in: path
-          required: true
-          schema:
-            type: integer
-            format: int64
-      responses:
-        '423':
-          description: The game controller lease is required, or another Tool instance holds it
-          content: {}
-        '200':
-          description: OK
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/GameNotificationState'
-  /game-notifications/session/{id}/reset:
-    parameters:
-      - $ref: '#/components/parameters/GameControllerEpoch'
-    post:
-      operationId: postGameNotificationSessionReset
-      summary: Replace the notification generation and clear its active history
-      tags:
-        - Game Notifications
-      parameters:
-        - name: id
-          in: path
-          required: true
-          schema:
-            type: integer
-            format: int64
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/GameNotificationReset'
-      responses:
-        '423':
-          description: The game controller lease is required, or another Tool instance holds it
-          content: {}
-        '200':
-          description: OK
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/GameNotificationState'
-        '409':
-          description: Notification generation changed
-          content: {}
-  /game-proximity/session/{id}:
-    parameters:
-      - $ref: '#/components/parameters/GameControllerEpoch'
-      - name: id
-        in: path
-        required: true
-        description: Hidden session device ID
-        schema:
-          type: integer
-          format: int64
-    get:
-      operationId: getGameProximity
-      summary: Fetch the proximity snapshot of a session device
-      tags:
-        - Game Proximity
-      responses:
-        '200':
-          description: OK
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/GameProximitySnapshot'
-    put:
-      operationId: putGameProximity
-      summary: Replace the proximity snapshot of a session device registered with a game session
-      tags:
-        - Game Proximity
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/GameProximitySnapshot'
-      responses:
-        '423':
-          description: The game controller lease is required, or another Tool instance holds it
-          content: {}
-        '200':
-          description: Stored snapshot
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/GameProximitySnapshot'
-        '409':
-          description: Generation or revision conflict, or unregistered session device
-          content: {}
-  /game-proximity/session/{id}/circles:
-    parameters:
-      - $ref: '#/components/parameters/GameControllerEpoch'
-    get:
-      operationId: getGameProximityCircles
-      summary: Fetch anonymous proximity circles for generated hunters and spectators
-      tags:
-        - Game Proximity
-      parameters:
-        - name: id
-          in: path
-          required: true
-          schema:
-            type: integer
-            format: int64
-      responses:
-        '200':
-          description: OK
-          content:
-            application/json:
-              schema:
-                type: array
-                items:
-                  $ref: '#/components/schemas/GameProximityPublicCircle'
-  /game-proximity/session/{id}/access:
-    parameters:
-      - $ref: '#/components/parameters/GameControllerEpoch'
-    get:
-      operationId: getGameProximityAccess
-      summary: Fetch the current participant's temporary device access
-      tags:
-        - Game Proximity
-      parameters:
-        - name: id
-          in: path
-          required: true
-          schema:
-            type: integer
-            format: int64
-      responses:
-        '200':
-          description: OK
-          content:
-            application/json:
-              schema:
-                type: array
-                items:
-                  type: object
-                  required: [deviceId, expiresAt]
-                  properties:
-                    deviceId:
-                      type: integer
-                      format: int64
-                    expiresAt:
-                      type: string
-                      format: date-time
-  /game-sessions/{id}/effects:
-    parameters:
-      - $ref: '#/components/parameters/GameSessionId'
-      - $ref: '#/components/parameters/GameControllerEpoch'
-    post:
-      operationId: postGameSessionEffects
-      summary: Apply one fenced, idempotent game operation
-      description: >-
-        Writes positions to this session's mirrors and game-state device, the related runtime change, archived
-        game notifications, queued pushes and log entries in one transaction. Repeating a deliveryId returns the
-        stored outcome (replayed true) without applying anything again; a different request under a used
-        deliveryId is a conflict. Latest positions reach WebSocket subscribers like tracker uploads, and the
-        destination devices show as online. Pushes are sent after commit, one attempt per recipient.
-      tags:
-        - Game Sessions
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/GameEffectsDelivery'
-      responses:
-        '200':
-          description: Outcome of the delivery
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/GameEffectsOutcome'
         '400':
-          description: Invalid delivery, e.g. a destination that is not a mirror or the game-state device
-          content: {}
-        '409':
-          description: Revision or generation conflict, or the deliveryId was used for different effects
-          content: {}
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
         '423':
-          description: The game controller lease is required, or another Tool instance holds it
-          content: {}
-  /game-requests:
-    get:
-      operationId: getGameRequests
-      summary: Requests visible to the signed-in member (hunters and spectators see all speedhunt requests)
-      tags:
-        - Game Requests
-      parameters:
-        - name: limit
-          in: query
-          schema:
-            type: integer
-            minimum: 1
-            maximum: 200
-      responses:
-        '200':
-          description: Newest first
-          content:
-            application/json:
-              schema:
-                type: array
-                items:
-                  $ref: '#/components/schemas/GameRequest'
-        '403':
-          description: The account does not take part in a game
-          content: {}
-    post:
-      operationId: postGameRequest
-      summary: Submit a request; it expires after two minutes unless the Tool handles it
-      tags:
-        - Game Requests
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/GameRequestSubmission'
-      responses:
-        '200':
-          description: Pending request
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/GameRequest'
-        '400':
-          description: Invalid request or unknown participant
-          content: {}
-        '403':
-          description: The member's role may not make this request
-          content: {}
-        '409':
-          description: >-
-            The game is not running, the speedhunt changed (stale revision), the participant is out or on a break
-            (speedhunt pings), another request for the participant is still open, no joker is available, a
-            break cannot start (no break duration is configured, the requester is already on a break, or a
-            speedhunt runs: the same message for every participant, so it never reveals the target), or a
-            timetable fake cannot be planned (the ping does not reach hunters, is too close, falls inside the
-            requester's break, or already has a fake), or a speedhunt fake names a ping beyond the session's
-            pings per speedhunt or the requester already has an unbound speedhunt fake
-          content: {}
-  /game-requests/{id}/cancel:
-    parameters:
-      - name: id
-        in: path
-        required: true
-        schema:
-          type: integer
-          format: int64
-    post:
-      operationId: cancelGameRequest
-      summary: Cancel the member's own pending or approved request
-      tags:
-        - Game Requests
-      responses:
-        '200':
-          description: Cancelled request
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/GameRequest'
-        '403':
-          description: Not the requester
-          content: {}
-        '409':
-          description: The request is no longer open
-          content: {}
-  /game-status:
-    get:
-      operationId: getGameStatus
-      summary: The signed-in member's role-filtered view of the game
-      tags:
-        - Game Requests
-      responses:
-        '200':
-          description: OK
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/GameStatus'
-        '403':
-          description: The account does not take part in a game
-          content: {}
-  /game-status/speedhunt:
-    get:
-      operationId: getGameSpeedhuntStatus
-      summary: Anonymous speedhunt progress in the viewer's game session
-      description: Administrators see the status of the currently executing session.
-      tags:
-        - Game Requests
-      responses:
-        '200':
-          description: OK
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/GameSpeedhuntProgress'
-        '403':
-          description: The account is neither a game member nor an administrator
-          content: {}
+          $ref: '#/components/responses/Locked'
   /game-sessions/{id}/requests:
     parameters:
       - $ref: '#/components/parameters/GameSessionId'
     get:
       operationId: getGameSessionRequests
-      summary: Requests of a session for the operator (open requests oldest first, or all newest first)
-      tags:
-        - Game Requests
+      summary: Open requests oldest first, or every request newest first (state=all)
+      tags: [Game Effects]
       parameters:
         - name: state
           in: query
@@ -4808,21 +4834,18 @@ paths:
                 type: array
                 items:
                   $ref: '#/components/schemas/GameRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
   /game-sessions/{id}/requests/{requestId}/decision:
     parameters:
       - $ref: '#/components/parameters/GameSessionId'
-      - $ref: '#/components/parameters/GameControllerEpoch'
-      - name: requestId
-        in: path
-        required: true
-        schema:
-          type: integer
-          format: int64
+      - $ref: '#/components/parameters/GameRequestId'
     post:
       operationId: decideGameRequest
-      summary: The controller's decision on a request (await operator approval, approve or reject)
-      tags:
-        - Game Requests
+      summary: The controller's decision - await (approval needed), approve or reject (fenced)
+      tags: [Game Effects]
       requestBody:
         required: true
         content:
@@ -4831,152 +4854,44 @@ paths:
               $ref: '#/components/schemas/GameRequestDecision'
       responses:
         '200':
-          description: Updated request
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/GameRequest'
+          $ref: '#/components/responses/Request'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
         '409':
-          description: The request is no longer open for this decision
-          content: {}
+          $ref: '#/components/responses/Conflict'
         '423':
-          description: The game controller lease is required, or another Tool instance holds it
-          content: {}
+          $ref: '#/components/responses/Locked'
   /game-sessions/{id}/requests/{requestId}/claim:
     parameters:
       - $ref: '#/components/parameters/GameSessionId'
-      - $ref: '#/components/parameters/GameControllerEpoch'
-      - name: requestId
-        in: path
-        required: true
-        schema:
-          type: integer
-          format: int64
+      - $ref: '#/components/parameters/GameRequestId'
+      - $ref: '#/components/parameters/ControllerEpoch'
     post:
       operationId: claimGameRequest
-      summary: Claim a pending or approved request for execution (an expired one becomes expired)
-      tags:
-        - Game Requests
-      requestBody:
-        content:
-          application/json:
-            schema:
-              type: object
+      summary: Claims a pending or approved request for execution under the controller epoch
+      tags: [Game Effects]
       responses:
         '200':
-          description: Executing (or expired) request
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/GameRequest'
-        '409':
-          description: The request is no longer open
-          content: {}
-        '423':
-          description: The game controller lease is required, or another Tool instance holds it
-          content: {}
-  /game-sessions/{id}/status:
-    parameters:
-      - $ref: '#/components/parameters/GameSessionId'
-    get:
-      operationId: getGameSessionStatus
-      summary: The complete status document the controlling Tool published
-      tags:
-        - Game Requests
-      responses:
-        '200':
-          description: OK
-          content:
-            application/json:
-              schema:
-                type: object
-  /game-jokers:
-    get:
-      operationId: getGameJokers
-      summary: >-
-        The signed-in player's or supporter's own jokers, open reservations and armed fake plans, and the
-        timetable pings a fake can replace. For hunters, the hunters' shared pool of speedhunt jokers (deviceId
-        0) with the uses their requests hold or arm.
-      tags:
-        - Game Requests
-      responses:
-        '200':
-          description: OK
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/GameJokerOwn'
+          $ref: '#/components/responses/Request'
         '403':
-          description: Only players, supporters and hunters see jokers
-          content: {}
-  /game-timetable:
-    get:
-      operationId: getGameTimetable
-      summary: >-
-        Hunters see only distinct scheduled times for pings that reach them. Spectators see each of those
-        pings with its state, and players and supporters see their own pings that can carry a fake. For each
-        role, the response includes up to 20 entries from the last hour and 200 upcoming entries. Cell contents
-        are excluded for all roles.
-      tags:
-        - Game Requests
-      responses:
-        '200':
-          description: Oldest first
-          content:
-            application/json:
-              schema:
-                type: array
-                items:
-                  oneOf:
-                    - $ref: '#/components/schemas/GameTimetableSlot'
-                    - $ref: '#/components/schemas/GameTimetablePing'
-        '403':
-          description: The account does not take part in a game
-          content: {}
-  /game-jokers/reservations/{id}/cancel:
-    parameters:
-      - name: id
-        in: path
-        required: true
-        schema:
-          type: integer
-          format: int64
-    post:
-      operationId: cancelGameJokerFake
-      summary: >-
-        Cancel the member's own armed fake or planned break; its joker returns. A timetable fake can be
-        cancelled until 60 seconds before its ping, a speedhunt fake until it is bound to a speedhunt, and a
-        planned break until the Tool starts it.
-      tags:
-        - Game Requests
-      responses:
-        '200':
-          description: The released reservation
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/GameJokerReservation'
-        '403':
-          description: Not a player or supporter
-          content: {}
+          $ref: '#/components/responses/Forbidden'
         '404':
-          description: >-
-            Unknown reservation, or not the member's own (answered alike, so it never tells a participant
-            anything about someone else's jokers or fakes)
-          content: {}
+          $ref: '#/components/responses/NotFound'
         '409':
-          description: The fake is no longer armed, or its ping is too close
-          content: {}
+          $ref: '#/components/responses/Conflict'
+        '423':
+          $ref: '#/components/responses/Locked'
   /game-sessions/{id}/jokers:
     parameters:
       - $ref: '#/components/parameters/GameSessionId'
     get:
-      operationId: getGameSessionJokers
-      summary: >-
-        Joker inventories of every player and supporter, the open reservations and the latest speedhunt
-        fakes bound to a speedhunt
-      tags:
-        - Game Requests
+      operationId: getGameJokerOverview
+      summary: Every inventory and the pool, open reservations with their plans, and the latest bound fakes
+      tags: [Game Effects]
       responses:
         '200':
           description: OK
@@ -4984,14 +4899,17 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/GameJokerOverview'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
   /game-sessions/{id}/jokers/ledger:
     parameters:
       - $ref: '#/components/parameters/GameSessionId'
     get:
-      operationId: getGameSessionJokerLedger
-      summary: Grants, revokes, reservations, releases and uses, newest first
-      tags:
-        - Game Requests
+      operationId: getGameJokerLedger
+      summary: The joker ledger, newest first
+      tags: [Game Effects]
       parameters:
         - name: limit
           in: query
@@ -4999,6 +4917,7 @@ paths:
             type: integer
             minimum: 1
             maximum: 1000
+            default: 200
       responses:
         '200':
           description: OK
@@ -5008,15 +4927,37 @@ paths:
                 type: array
                 items:
                   $ref: '#/components/schemas/GameJokerLedgerEntry'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /game-sessions/{id}/jokers/reconcile:
+    parameters:
+      - $ref: '#/components/parameters/GameSessionId'
+    get:
+      operationId: reconcileGameJokers
+      summary: Balances that differ from their ledger or consumed reservations; empty when consistent
+      tags: [Game Effects]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/GameJokerDiscrepancy'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
   /game-sessions/{id}/jokers/change:
     parameters:
       - $ref: '#/components/parameters/GameSessionId'
-      - $ref: '#/components/parameters/GameControllerEpoch'
     post:
-      operationId: changeGameSessionJokers
-      summary: Grant (positive quantity) or revoke (negative) unused jokers of one participant
-      tags:
-        - Game Requests
+      operationId: changeGameJokers
+      summary: Grants (positive) or revokes (negative) unused jokers of a member, or of the hunters' pool (fenced)
+      tags: [Game Effects]
       requestBody:
         required: true
         content:
@@ -5025,61 +4966,488 @@ paths:
               $ref: '#/components/schemas/GameJokerChange'
       responses:
         '200':
-          description: The participant's inventory of that type
+          description: OK
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/GameJokerInventory'
         '400':
-          description: Unknown participant or joker type, or a type not available yet
-          content: {}
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
         '409':
-          description: >-
-            Revoking more than the unused quantity, granting break jokers before a positive
-            game_settings.break_duration_minutes is configured, or granting break or fake jokers while a
-            hunter of the session sees a real participant tracker, directly or through a group
-            (mirror-only hunter access)
-          content: {}
+          $ref: '#/components/responses/Conflict'
         '423':
-          description: The game controller lease is required, or another Tool instance holds it
-          content: {}
+          $ref: '#/components/responses/Locked'
   /game-sessions/{id}/jokers/breaks:
     parameters:
       - $ref: '#/components/parameters/GameSessionId'
-      - $ref: '#/components/parameters/GameControllerEpoch'
     post:
-      operationId: planGameSessionBreak
-      summary: >-
-        Plan a participant's break from startsAt, or from now when it is missing or has passed. The break
-        joker is armed (reserved, with the plan) until the Tool starts the break, which waits at its start while
-        any speedhunt runs; owners and operators can cancel it until then.
-      tags:
-        - Game Requests
+      operationId: planGameBreak
+      summary: Plans a member's break from startsAt (now when missing or past); without a joker only with overAllocate
+      tags: [Game Effects]
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/GameJokerBreakPlan'
+              $ref: '#/components/schemas/GameBreakPlan'
       responses:
         '200':
-          description: The armed planned break
+          description: OK
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/GameJokerReservation'
         '400':
-          description: Not a player or supporter of the session, or a start that is not a time
-          content: {}
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
         '409':
-          description: >-
-            No break duration configured, the participant is out of the game, the break would overlap
-            another break of the participant, no break joker is available without overAllocate, or a hunter
-            sees a real participant tracker (mirror-only hunter access)
-          content: {}
+          $ref: '#/components/responses/Conflict'
         '423':
-          description: The game controller lease is required, or another Tool instance holds it
-          content: {}
+          $ref: '#/components/responses/Locked'
+  /game-sessions/{id}/effects:
+    parameters:
+      - $ref: '#/components/parameters/GameSessionId'
+      - $ref: '#/components/parameters/ControllerEpoch'
+    post:
+      operationId: applyGameEffects
+      summary: Applies one fenced, idempotent effects delivery
+      description: >-
+        Request outcomes, typed operations, joker uses, mirror positions, alerts, pushes and logs commit in one
+        transaction; positions, invalidations, proximity changes and queued pushes are published after commit. A
+        repeated delivery ID answers the recorded outcome; the same ID with other content answers 409. The run of a
+        speedhunt's first delivered ping binds every armed speedhunt fake, and the server applies the target's own
+        fake to the target's hunter mirror positions.
+      tags: [Game Effects]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GameEffectsDelivery'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GameEffectsOutcome'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '423':
+          $ref: '#/components/responses/Locked'
+  /game-status:
+    get:
+      operationId: getGameStatus
+      summary: The signed-in member's role projection of the game
+      tags: [Game Members]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GameStatus'
+        '403':
+          $ref: '#/components/responses/NoMembership'
+  /game-status/speedhunt-history:
+    get:
+      operationId: getGameSpeedhuntHistory
+      summary: The session's speedhunts with their pings, the same anonymous projection for every member (not cached)
+      tags: [Game Members]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GameSpeedhuntHistory'
+        '403':
+          $ref: '#/components/responses/NoMembership'
+  /game-status/speedhunt:
+    get:
+      operationId: getGameSpeedhuntProgress
+      summary: Anonymous speedhunt progress of the member's session; administrators get the executing session's
+      tags: [Game Members]
+      responses:
+        '200':
+          description: OK (not cached)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GameSpeedhuntProgress'
+        '403':
+          $ref: '#/components/responses/NoMembership'
+  /game-requests:
+    get:
+      operationId: getGameRequests
+      summary: Own requests; hunters and spectators also every speedhunt request (roster labels for hunters)
+      tags: [Game Members]
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 50
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/GameRequest'
+        '403':
+          $ref: '#/components/responses/NoMembership'
+    post:
+      operationId: submitGameRequest
+      summary: Submits a joker request (players and supporters) or a speedhunt action (hunters, with baseRevision)
+      tags: [Game Members]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GameRequestSubmission'
+      responses:
+        '200':
+          $ref: '#/components/responses/Request'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/NoMembership'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /game-requests/{id}/cancel:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+    post:
+      operationId: cancelGameRequest
+      summary: The requester cancels a request that waits for approval or execution; its joker returns
+      tags: [Game Members]
+      responses:
+        '200':
+          $ref: '#/components/responses/Request'
+        '403':
+          $ref: '#/components/responses/NoMembership'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /game-jokers:
+    get:
+      operationId: getGameJokers
+      summary: Own jokers of a player or supporter, or the hunters' pool of speedhunt jokers; spectators get 403
+      tags: [Game Members]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GameOwnJokers'
+        '403':
+          $ref: '#/components/responses/NoMembership'
+  /game-jokers/reservations/{id}/cancel:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int64
+    post:
+      operationId: cancelGameJokerReservation
+      summary: The owner cancels an armed fake or planned break that has not taken effect
+      description: Another owner's reservation answers exactly like a missing one (404).
+      tags: [Game Members]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GameJokerReservation'
+        '403':
+          $ref: '#/components/responses/NoMembership'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /game-timetable:
+    get:
+      operationId: getGameTimetablePings
+      summary: Timetable pings without cell content
+      description: >-
+        Players and supporters get their own pings that can carry a fake (with fakeAllowed), spectators every ping
+        that reaches hunters, hunters only the times of those pings (GameTimetableSlot).
+      tags: [Game Members]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  anyOf:
+                    - $ref: '#/components/schemas/GameTimetablePing'
+                    - $ref: '#/components/schemas/GameTimetableSlot'
+        '403':
+          $ref: '#/components/responses/NoMembership'
+  /game-notifications:
+    get:
+      operationId: getGameNotifications
+      summary: One page of the current generation
+      description: >-
+        An administrator naming gameSessionId reads everything of that session; anyone else reads their own
+        session's alerts as its member (session alerts, their role group's alerts, targeted alerts about themselves
+        and live-recipient alerts for their role). A member naming another session gets 403.
+      tags: [Game Notifications]
+      parameters:
+        - name: gameSessionId
+          in: query
+          schema:
+            type: integer
+            format: int64
+        - name: generation
+          in: query
+          description: The generation the client holds; 409 when it changed
+          schema:
+            type: string
+            format: uuid
+        - $ref: '#/components/parameters/After'
+        - $ref: '#/components/parameters/NotificationLimit'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GameNotificationPage'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/NoMembership'
+        '409':
+          $ref: '#/components/responses/Conflict'
+    post:
+      operationId: createGameNotification
+      summary: Archives one alert in the current generation (operators, fenced)
+      tags: [Game Notifications]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GameNotificationCreate'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GameNotificationCreation'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '423':
+          $ref: '#/components/responses/Locked'
+  /game-notifications/history:
+    get:
+      operationId: getGameNotificationHistory
+      summary: Operator history of a session across generations
+      tags: [Game Notifications]
+      parameters:
+        - name: gameSessionId
+          in: query
+          required: true
+          schema:
+            type: integer
+            format: int64
+        - $ref: '#/components/parameters/After'
+        - $ref: '#/components/parameters/NotificationLimit'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GameNotificationHistoryPage'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /game-notifications/session/{id}:
+    parameters:
+      - $ref: '#/components/parameters/GameSessionId'
+    get:
+      operationId: getGameNotificationState
+      summary: The stream state of a session (null before its first generation)
+      tags: [Game Notifications]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/GameNotificationState'
+                  - type: 'null'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    post:
+      operationId: initializeGameNotifications
+      summary: Starts the session's first generation; an initialized session keeps its own (fenced)
+      tags: [Game Notifications]
+      responses:
+        '200':
+          $ref: '#/components/responses/NotificationState'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '423':
+          $ref: '#/components/responses/Locked'
+  /game-notifications/session/{id}/reset:
+    parameters:
+      - $ref: '#/components/parameters/GameSessionId'
+    post:
+      operationId: resetGameNotifications
+      summary: Starts a new generation and deletes the session's history (fenced)
+      tags: [Game Notifications]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GameNotificationReset'
+      responses:
+        '200':
+          $ref: '#/components/responses/NotificationState'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '423':
+          $ref: '#/components/responses/Locked'
+  /game-proximity/session/{id}:
+    parameters:
+      - $ref: '#/components/parameters/GameSessionId'
+    get:
+      operationId: getGameProximity
+      summary: The operators' view - revision, unexpired grants and circles with their members
+      tags: [Game Proximity]
+      responses:
+        '200':
+          $ref: '#/components/responses/Proximity'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    put:
+      operationId: replaceGameProximity
+      summary: Replaces the published content based on its revision; the server assigns the next (fenced)
+      tags: [Game Proximity]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GameProximityReplace'
+      responses:
+        '200':
+          $ref: '#/components/responses/Proximity'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '423':
+          $ref: '#/components/responses/Locked'
+  /game-proximity/session/{id}/reset:
+    parameters:
+      - $ref: '#/components/parameters/GameSessionId'
+    post:
+      operationId: resetGameProximity
+      summary: Publishes empty content with the next revision (fenced)
+      tags: [Game Proximity]
+      responses:
+        '200':
+          $ref: '#/components/responses/Proximity'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '423':
+          $ref: '#/components/responses/Locked'
+  /game-proximity/circles:
+    get:
+      operationId: getGameProximityCircles
+      summary: The circles of the caller's session, without member identities (hunters and the spectator)
+      tags: [Game Proximity]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/GameProximityPublicCircle'
+        '403':
+          $ref: '#/components/responses/NoMembership'
+  /game-proximity/access:
+    get:
+      operationId: getGameProximityAccess
+      summary: The caller's own temporary access to other participants' trackers (players and supporters)
+      description: Trackers the account sees permanently anyway are left out.
+      tags: [Game Proximity]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/GameProximityAccess'
+        '403':
+          $ref: '#/components/responses/NoMembership'
   /game-controller:
     get:
       operationId: getGameController
@@ -5229,6 +5597,78 @@ paths:
               schema:
                 $ref: '#/components/schemas/GameControllerHistoryPage'
 components:
+  responses:
+    BadRequest:
+      description: Invalid input, or a reference to a row that does not exist
+    Forbidden:
+      description: Administrator access required
+    NoMembership:
+      description: The account does not take part in a game, or its role may not use this
+    NotFound:
+      description: Unknown session or row
+    Conflict:
+      description: A conflict with a game rule, the stored state or a revision
+    Refused:
+      description: The change would let a hunter see a real participant tracker
+    Locked:
+      description: The game controller lease is required (X-Game-Controller-Epoch)
+    Session:
+      description: OK
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/GameSession'
+    Member:
+      description: OK
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/GameMember'
+    Resource:
+      description: OK
+      content:
+        application/json:
+          schema:
+            anyOf:
+              - $ref: '#/components/schemas/GameMirror'
+              - $ref: '#/components/schemas/GameGroup'
+              - $ref: '#/components/schemas/GameGeofence'
+    Document:
+      description: OK
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/GameDocument'
+    Revision:
+      description: OK
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/GameRevision'
+    Checkpoint:
+      description: OK
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/GameCheckpoint'
+    Request:
+      description: OK
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/GameRequest'
+    NotificationState:
+      description: OK
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/GameNotificationState'
+    Proximity:
+      description: OK
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/GameProximitySnapshot'
   schemas:
     Position:
       type: object
@@ -6097,517 +6537,6 @@ components:
           type: object
           properties: {}
           description: Additional action attributes
-    GameSessionCapabilities:
-      type: object
-      required: [apiVersion]
-      properties:
-        apiVersion:
-          type: integer
-          description: Game-session API version; mismatched Tool builds stop before acquiring control or writing data
-    GameSessionSummary:
-      type: object
-      required: [id, name, schemaVersion, sessionDeviceId, configRevision, resourcesRevision, runtimeRevision, createdAt, updatedAt]
-      properties:
-        id:
-          type: integer
-          format: int64
-          description: Immutable game-session ID
-        name:
-          type: string
-          maxLength: 128
-        schemaVersion:
-          type: integer
-        sessionDeviceId:
-          type: [integer, 'null']
-          format: int64
-          description: Hidden game-state device, once device setup created it
-        configRevision:
-          type: integer
-          format: int64
-        resourcesRevision:
-          type: integer
-          format: int64
-        runtimeRevision:
-          type: integer
-          format: int64
-        createdAt:
-          type: string
-          format: date-time
-        updatedAt:
-          type: string
-          format: date-time
-    GameSessionMember:
-      type: object
-      required: [userId, role, number, assignedDeviceId, login]
-      properties:
-        userId:
-          type: integer
-          format: int64
-        role:
-          type: string
-          enum: [player, supporter, hunter, spectator]
-        number:
-          type: [integer, 'null']
-          minimum: 1
-        assignedDeviceId:
-          type: [integer, 'null']
-          format: int64
-        login:
-          type: string
-          maxLength: 128
-    GameSession:
-      type: object
-      required: [id, name, schemaVersion, sessionDeviceId, configRevision, config, resourcesRevision, resources, runtimeRevision, runtime, members, createdAt, updatedAt]
-      properties:
-        id:
-          type: integer
-          format: int64
-        name:
-          type: string
-        schemaVersion:
-          type: integer
-        sessionDeviceId:
-          type: [integer, 'null']
-          format: int64
-        configRevision:
-          type: integer
-          format: int64
-        config:
-          type: object
-          description: Session configuration owned by the operator
-        resourcesRevision:
-          type: integer
-          format: int64
-        resources:
-          type: object
-          description: Mapping of game-owned Traccar resources
-        runtimeRevision:
-          type: integer
-          format: int64
-        runtime:
-          type: object
-          description: Tool runtime checkpoint
-        members:
-          type: array
-          items:
-            $ref: '#/components/schemas/GameSessionMember'
-        createdAt:
-          type: string
-          format: date-time
-        updatedAt:
-          type: string
-          format: date-time
-    GameSessionCreate:
-      type: object
-      required: [name, schemaVersion, config]
-      properties:
-        name:
-          type: string
-          maxLength: 128
-        schemaVersion:
-          type: integer
-          minimum: 1
-        config:
-          type: object
-    GameSessionRename:
-      type: object
-      required: [expectedRevision, name]
-      properties:
-        expectedRevision:
-          type: integer
-          format: int64
-          description: Configuration revision the rename is based on
-        name:
-          type: string
-          maxLength: 128
-    GameSessionDocumentUpdate:
-      type: object
-      required: [expectedRevision, document]
-      properties:
-        expectedRevision:
-          type: integer
-          format: int64
-          minimum: 0
-        schemaVersion:
-          type: [integer, 'null']
-          description: Only used for configuration updates
-        document:
-          type: object
-    GameSessionResourcesUpdate:
-      type: object
-      required: [expectedRevision, sessionDeviceId, resources, members]
-      properties:
-        expectedRevision:
-          type: integer
-          format: int64
-          minimum: 0
-        sessionDeviceId:
-          type: [integer, 'null']
-          format: int64
-        resources:
-          type: object
-        members:
-          type: array
-          items:
-            $ref: '#/components/schemas/GameSessionMember'
-    GameSessionRevision:
-      type: object
-      required: [revision]
-      properties:
-        revision:
-          type: integer
-          format: int64
-    GameSessionDocument:
-      type: object
-      required: [revision, document]
-      properties:
-        revision:
-          type: integer
-          format: int64
-        document:
-          type: object
-    GameTimetableEntry:
-      type: object
-      required: [id, scheduledAt, participant, content, status, statusAt]
-      properties:
-        id:
-          type: integer
-          format: int64
-          description: Stable entry ID, kept while time and participant stay the same
-        scheduledAt:
-          type: string
-          format: date-time
-        participant:
-          type: string
-          maxLength: 128
-        content:
-          type: string
-          maxLength: 512
-          description: Timetable cell value
-        status:
-          type: string
-          enum: [scheduled, sent, skipped, failed]
-        statusAt:
-          type: [string, 'null']
-          format: date-time
-    GameTimetable:
-      type: object
-      required: [revision, columns, source, entries]
-      properties:
-        revision:
-          type: integer
-          format: int64
-        columns:
-          type: array
-          items:
-            type: string
-        source:
-          type: object
-          description: Metadata about the published workbook, without file contents
-        entries:
-          type: array
-          items:
-            $ref: '#/components/schemas/GameTimetableEntry'
-    GameTimetableEntryInput:
-      type: object
-      required: [scheduledAt, participant, content]
-      properties:
-        scheduledAt:
-          type: string
-          format: date-time
-        participant:
-          type: string
-          maxLength: 128
-        content:
-          type: string
-          maxLength: 512
-    GameTimetablePublish:
-      type: object
-      required: [expectedRevision, columns, source, entries]
-      properties:
-        expectedRevision:
-          type: integer
-          format: int64
-          minimum: 0
-        columns:
-          type: array
-          minItems: 1
-          items:
-            type: string
-        source:
-          type: object
-        entries:
-          type: array
-          items:
-            $ref: '#/components/schemas/GameTimetableEntryInput'
-    GameTimetablePublished:
-      type: object
-      required: [revision, structureChanged, entries]
-      properties:
-        revision:
-          type: integer
-          format: int64
-        structureChanged:
-          type: boolean
-          description: Columns or scheduled times changed
-        entries:
-          type: array
-          items:
-            $ref: '#/components/schemas/GameTimetableEntry'
-    GameTimetableProgressUpdate:
-      type: object
-      required: [entries]
-      properties:
-        entries:
-          type: array
-          items:
-            type: object
-            required: [id, status]
-            properties:
-              id:
-                type: integer
-                format: int64
-              status:
-                type: string
-                enum: [scheduled, sent, skipped, failed]
-    GameSessionLogEntry:
-      type: object
-      required: [id, category, occurredAt, message]
-      properties:
-        id:
-          type: integer
-          format: int64
-        category:
-          type: string
-          pattern: '^[A-Za-z0-9_-]{1,32}$'
-        occurredAt:
-          type: string
-          format: date-time
-        message:
-          type: string
-    GameSessionLogPage:
-      type: object
-      required: [items, nextCursor, hasMore]
-      properties:
-        items:
-          type: array
-          items:
-            $ref: '#/components/schemas/GameSessionLogEntry'
-        nextCursor:
-          type: string
-        hasMore:
-          type: boolean
-    GameSessionLogAppend:
-      type: object
-      required: [entries]
-      properties:
-        entries:
-          type: array
-          minItems: 1
-          maxItems: 500
-          items:
-            type: object
-            required: [category, occurredAt, message]
-            properties:
-              category:
-                type: string
-                pattern: '^[A-Za-z0-9_-]{1,32}$'
-              occurredAt:
-                type: string
-                format: date-time
-              message:
-                type: string
-                maxLength: 16384
-    GameNotificationAlert:
-      type: object
-      required: [id, type, audience, occurredAt, timeZone, message]
-      properties:
-        id:
-          type: string
-          pattern: '^[A-Za-z0-9_-]{1,64}$'
-        type:
-          type: string
-        audience:
-          type: string
-        occurredAt:
-          type: string
-          format: date-time
-        timeZone:
-          type: string
-        message:
-          type: string
-        recipientUserId:
-          type: integer
-          format: int64
-        sourceDeviceId:
-          type: integer
-          format: int64
-    GameNotificationEntry:
-      allOf:
-        - $ref: '#/components/schemas/GameNotificationAlert'
-        - type: object
-          required: [gameStateDeviceId, generation, createdAt]
-          properties:
-            gameStateDeviceId:
-              type: integer
-              format: int64
-              description: 0 once whole-session cleanup deleted the session device
-            generation:
-              type: string
-            createdAt:
-              type: string
-              format: date-time
-            recipientLabel:
-              type: string
-              description: Recipient name kept for operator history after the account is deleted
-    GameNotificationPage:
-      type: object
-      required: [version, sessionDeviceId, generation, resetAt, items, nextCursor, hasMore]
-      properties:
-        version:
-          type: integer
-        sessionDeviceId:
-          type: integer
-          format: int64
-        generation:
-          type: [string, 'null']
-        resetAt:
-          type: [string, 'null']
-        personalSourceDeviceId:
-          type: [integer, 'null']
-          format: int64
-        items:
-          type: array
-          items:
-            $ref: '#/components/schemas/GameNotificationEntry'
-        nextCursor:
-          type: string
-        hasMore:
-          type: boolean
-    GameNotificationHistoryPage:
-      type: object
-      required: [gameSessionId, items, nextCursor, hasMore]
-      properties:
-        gameSessionId:
-          type: integer
-          format: int64
-        items:
-          type: array
-          items:
-            $ref: '#/components/schemas/GameNotificationEntry'
-        nextCursor:
-          type: string
-        hasMore:
-          type: boolean
-    GameNotificationCreate:
-      type: object
-      required: [sessionDeviceId, generation, alert]
-      properties:
-        sessionDeviceId:
-          type: integer
-          format: int64
-        generation:
-          type: string
-        alert:
-          $ref: '#/components/schemas/GameNotificationAlert'
-    GameNotificationCreation:
-      type: object
-      required: [version, generation, item, created]
-      properties:
-        version:
-          type: integer
-        generation:
-          type: string
-        item:
-          $ref: '#/components/schemas/GameNotificationEntry'
-        created:
-          type: boolean
-    GameNotificationState:
-      type: object
-      required: [version, sessionDeviceId, generation, resetAt]
-      properties:
-        version:
-          type: integer
-        sessionDeviceId:
-          type: integer
-          format: int64
-        generation:
-          type: [string, 'null']
-        resetAt:
-          type: [string, 'null']
-    GameNotificationReset:
-      type: object
-      required: [expectedGeneration, replacementGeneration]
-      properties:
-        expectedGeneration:
-          type: string
-        replacementGeneration:
-          type: string
-    GameProximityGrant:
-      type: object
-      required: [episodeId, recipientUserId, sourceDeviceId, targetDeviceId, expiresAt]
-      properties:
-        episodeId:
-          type: string
-        recipientUserId:
-          type: integer
-          format: int64
-        sourceDeviceId:
-          type: integer
-          format: int64
-        targetDeviceId:
-          type: integer
-          format: int64
-        expiresAt:
-          type: string
-          format: date-time
-    GameProximityPublicCircle:
-      type: object
-      required: [id, latitude, longitude, diameterMeters, playerCount, supporterCount, expiresAt]
-      properties:
-        id:
-          type: string
-        latitude:
-          type: number
-        longitude:
-          type: number
-        diameterMeters:
-          type: number
-        playerCount:
-          type: integer
-        supporterCount:
-          type: integer
-        expiresAt:
-          type: string
-          format: date-time
-    GameProximityCircle:
-      allOf:
-        - $ref: '#/components/schemas/GameProximityPublicCircle'
-        - type: object
-          required: [participantDeviceIds]
-          properties:
-            participantDeviceIds:
-              type: array
-              items:
-                type: integer
-                format: int64
-    GameProximitySnapshot:
-      type: object
-      required: [generation, revision, grants, circles]
-      properties:
-        generation:
-          type: string
-        revision:
-          type: integer
-          format: int64
-        grants:
-          type: array
-          items:
-            $ref: '#/components/schemas/GameProximityGrant'
-        circles:
-          type: array
-          items:
-            $ref: '#/components/schemas/GameProximityCircle'
     GameControllerHolder:
       type: object
       required: [userId, userLabel, instanceId, label]
@@ -6733,160 +6662,418 @@ components:
         gameSessionId:
           type: [integer, 'null']
           format: int64
-    GameEffectsPosition:
+    Time:
+      type: string
+      format: date-time
+      description: ISO-8601 instant in UTC
+    NullableTime:
+      type: [string, 'null']
+      format: date-time
+    Id:
+      type: integer
+      format: int64
+    NullableId:
+      type: [integer, 'null']
+      format: int64
+    Role:
+      type: string
+      enum: [player, supporter, hunter, spectator]
+    GameCapabilities:
       type: object
-      required: [latitude, longitude]
-      description: One destination; give deviceId or uniqueId of a mirror or the game-state device
+      required: [apiVersion]
       properties:
-        deviceId:
-          type: [integer, 'null']
-          format: int64
-        uniqueId:
-          type: [string, 'null']
-        latitude:
-          type: number
-          minimum: -90
-          maximum: 90
-        longitude:
-          type: number
-          minimum: -180
-          maximum: 180
-        fixTime:
-          type: [string, 'null']
-          format: date-time
-          description: Defaults to the delivery time; an older fix is stored but does not become latest
-        attributes:
-          type: [object, 'null']
-          additionalProperties:
-            type: [string, number, boolean]
-    GameEffectsPush:
+        apiVersion:
+          type: integer
+          const: 5
+    GameSessionSummary:
       type: object
-      required: [userId, message]
+      properties:
+        id:
+          $ref: '#/components/schemas/Id'
+        name:
+          type: string
+        schemaVersion:
+          type: integer
+        revision:
+          type: integer
+          description: The session aggregate revision (operators only)
+        settingsRevision:
+          type: integer
+        createdAt:
+          $ref: '#/components/schemas/Time'
+        updatedAt:
+          $ref: '#/components/schemas/Time'
+    GameSession:
+      type: object
+      properties:
+        id:
+          $ref: '#/components/schemas/Id'
+        name:
+          type: string
+        schemaVersion:
+          type: integer
+        revision:
+          type: integer
+        createdAt:
+          $ref: '#/components/schemas/Time'
+        updatedAt:
+          $ref: '#/components/schemas/Time'
+        settings:
+          type: object
+          properties:
+            schemaVersion:
+              type: integer
+            revision:
+              type: integer
+            settings:
+              type: object
+              description: The validated settings document; game rules are its game_settings object
+            updatedAt:
+              $ref: '#/components/schemas/Time'
+    GameSessionCreate:
+      type: object
+      required: [name, schemaVersion, config]
+      properties:
+        name:
+          type: string
+          maxLength: 128
+          description: Unique; also the spectator login, so no path separators
+        schemaVersion:
+          type: integer
+          minimum: 1
+        settingsSchemaVersion:
+          type: integer
+          minimum: 1
+          description: Defaults to schemaVersion
+        config:
+          type: object
+          description: The settings document
+    GameSessionRename:
+      type: object
+      required: [expectedRevision, name]
+      properties:
+        expectedRevision:
+          type: integer
+          minimum: 0
+          description: The settings revision
+        name:
+          type: string
+    GameDocumentUpdate:
+      type: object
+      required: [expectedRevision, document]
+      properties:
+        expectedRevision:
+          type: integer
+          minimum: 0
+        schemaVersion:
+          type: integer
+          minimum: 1
+          description: Required for settings and checkpoints
+        document:
+          type: object
+    GameRevision:
+      type: object
+      properties:
+        revision:
+          type: integer
+    GameDocument:
+      type: object
+      properties:
+        revision:
+          type: integer
+          description: 0 when none is stored
+        document:
+          type: object
+    GameCheckpoint:
+      type: object
+      properties:
+        component:
+          type: string
+        schemaVersion:
+          type: integer
+        revision:
+          type: integer
+        document:
+          type: object
+        updatedAt:
+          $ref: '#/components/schemas/NullableTime'
+    GameMember:
+      type: object
+      description: A stable place in a game; numbers are never reused and the role never changes
+      properties:
+        id:
+          $ref: '#/components/schemas/Id'
+        gameSessionId:
+          $ref: '#/components/schemas/Id'
+        role:
+          $ref: '#/components/schemas/Role'
+        number:
+          type: integer
+        displayName:
+          type: string
+        userId:
+          $ref: '#/components/schemas/NullableId'
+        trackerId:
+          $ref: '#/components/schemas/NullableId'
+        state:
+          type: string
+          enum: [active, retired]
+        createdAt:
+          $ref: '#/components/schemas/Time'
+        retiredAt:
+          $ref: '#/components/schemas/NullableTime'
+        stateRevision:
+          type: [integer, 'null']
+          description: Member state revision of a player or supporter (operators and hunters only)
+    GameMemberInput:
+      type: object
+      required: [role, displayName]
+      properties:
+        role:
+          $ref: '#/components/schemas/Role'
+        number:
+          type: [integer, 'null']
+          minimum: 1
+        displayName:
+          type: string
+          maxLength: 128
+    GameMemberName:
+      type: object
+      required: [displayName]
+      properties:
+        displayName:
+          type: string
+    GameMemberAccount:
+      type: object
+      required: [userId]
       properties:
         userId:
-          type: integer
-          format: int64
-        subject:
-          type: [string, 'null']
-          maxLength: 512
-        message:
-          type: string
-          maxLength: 8192
-        notificator:
-          type: [string, 'null']
-          description: Defaults to traccar
-        alertId:
-          type: [string, 'null']
-          description: Queued only if this delivery archived that alert for the first time
-    GameEffectsDelivery:
+          $ref: '#/components/schemas/Id'
+    GameMemberTracker:
       type: object
-      required: [deliveryId]
+      required: [deviceId]
       properties:
-        deliveryId:
+        deviceId:
+          $ref: '#/components/schemas/Id'
+    GameMirror:
+      type: object
+      properties:
+        id:
+          $ref: '#/components/schemas/Id'
+        gameSessionId:
+          $ref: '#/components/schemas/Id'
+        deviceId:
+          $ref: '#/components/schemas/NullableId'
+        sourceMemberId:
+          $ref: '#/components/schemas/Id'
+        destinationRole:
+          type: [string, 'null']
+        destinationMemberId:
+          $ref: '#/components/schemas/NullableId'
+        state:
           type: string
-          pattern: '^[A-Za-z0-9_-]{8,64}$'
-        positions:
-          type: [array, 'null']
-          maxItems: 200
+          enum: [active, retiring]
+    GameGroup:
+      type: object
+      properties:
+        id:
+          $ref: '#/components/schemas/Id'
+        gameSessionId:
+          $ref: '#/components/schemas/Id'
+        groupId:
+          $ref: '#/components/schemas/NullableId'
+        purpose:
+          type: string
+        memberId:
+          $ref: '#/components/schemas/NullableId'
+        state:
+          type: string
+          enum: [active, retiring]
+    GameGeofence:
+      type: object
+      properties:
+        id:
+          $ref: '#/components/schemas/Id'
+        gameSessionId:
+          $ref: '#/components/schemas/Id'
+        geofenceId:
+          $ref: '#/components/schemas/NullableId'
+        planKey:
+          type: [string, 'null']
+        purpose:
+          type: string
+          enum: [configured, planned]
+        state:
+          type: string
+          enum: [active, retiring]
+    GameResources:
+      type: object
+      properties:
+        mirrors:
+          type: array
           items:
-            $ref: '#/components/schemas/GameEffectsPosition'
-        runtime:
-          oneOf:
-            - type: 'null'
-            - type: object
-              required: [expectedRevision, document]
-              properties:
-                expectedRevision:
-                  type: integer
-                  format: int64
-                document:
-                  type: object
-        notifications:
-          oneOf:
-            - type: 'null'
-            - type: object
-              required: [sessionDeviceId, generation, alerts]
-              properties:
-                sessionDeviceId:
-                  type: integer
-                  format: int64
-                generation:
-                  type: string
-                alerts:
-                  type: array
-                  minItems: 1
-                  maxItems: 100
-                  items:
-                    $ref: '#/components/schemas/GameNotificationAlert'
-        pushes:
-          type: [array, 'null']
-          maxItems: 500
+            $ref: '#/components/schemas/GameMirror'
+        groups:
+          type: array
           items:
-            $ref: '#/components/schemas/GameEffectsPush'
-        requests:
-          type: [array, 'null']
-          description: Outcomes of requests this operation executed or refused
+            $ref: '#/components/schemas/GameGroup'
+        geofences:
+          type: array
           items:
-            $ref: '#/components/schemas/GameRequestCompletion'
+            $ref: '#/components/schemas/GameGeofence'
+    GameMirrorInput:
+      type: object
+      required: [deviceId, sourceMemberId]
+      description: Exactly one of destinationRole and destinationMemberId
+      properties:
+        deviceId:
+          $ref: '#/components/schemas/Id'
+        sourceMemberId:
+          $ref: '#/components/schemas/Id'
+        destinationRole:
+          type: [string, 'null']
+          enum: [player, supporter, hunter, null]
+        destinationMemberId:
+          $ref: '#/components/schemas/NullableId'
+    GameGroupInput:
+      type: object
+      required: [groupId, purpose]
+      properties:
+        groupId:
+          $ref: '#/components/schemas/Id'
+        purpose:
+          type: string
+          enum: [player, supporter, hunter, playerToHunter, supporterToHunter, playerToPlayer, supporterToPlayer,
+                 playerToSupporter, supporterToSupporter, hunterToPlayer, hunterToSupporter]
+        memberId:
+          $ref: '#/components/schemas/NullableId'
+    GameGeofenceInput:
+      type: object
+      required: [geofenceId, purpose]
+      properties:
+        geofenceId:
+          $ref: '#/components/schemas/Id'
+        planKey:
+          type: [string, 'null']
+        purpose:
+          type: string
+          enum: [configured, planned]
+    GameResourceRebind:
+      type: object
+      required: [resourceId]
+      properties:
+        resourceId:
+          $ref: '#/components/schemas/Id'
+    GameTimetableEntry:
+      type: object
+      properties:
+        id:
+          $ref: '#/components/schemas/Id'
+        scheduledAt:
+          $ref: '#/components/schemas/Time'
+        memberId:
+          $ref: '#/components/schemas/Id'
+        participant:
+          type: [string, 'null']
+        content:
+          type: string
         status:
+          type: string
+          enum: [scheduled, sent, skipped, failed]
+        statusAt:
+          $ref: '#/components/schemas/NullableTime'
+    GameTimetable:
+      type: object
+      properties:
+        revision:
+          type: integer
+        columns:
+          type: array
+        source:
+          type: object
+        entries:
+          type: array
+          items:
+            $ref: '#/components/schemas/GameTimetableEntry'
+    GameTimetablePublish:
+      type: object
+      required: [expectedRevision, columns, entries]
+      properties:
+        expectedRevision:
+          type: integer
+          minimum: 0
+        columns:
+          type: array
+          description: The time column, then one header per participant
+          items:
+            type: string
+        source:
           type: [object, 'null']
-          description: Replaces the published status document
-        jokers:
-          type: [array, 'null']
-          description: >-
-            Joker uses of this delivery. Get hunter positions jokers for manual and live hunter relay (deviceId
-            is the participant): a use without an available joker needs overAllocate and is recorded beyond the
-            allocation; reserved uses are never taken. A speedhunt joker with the delivery of a run's first ping
-            (deviceId is the participant the speedhunt targets): it uses the pool joker a hunter's request holds
-            or armed for that participant, or else one joker of the hunters' pool, beyond the allocation only
-            with overAllocate. Breaks start only through their requests and plans.
+        entries:
+          type: array
           items:
             type: object
-            required: [deviceId, type]
+            required: [scheduledAt, participant, content]
             properties:
-              deviceId:
-                type: integer
-                format: int64
-              type:
+              scheduledAt:
+                $ref: '#/components/schemas/Time'
+              participant:
                 type: string
-                enum: [hunterPositions, speedhunt]
-              overAllocate:
-                type: [boolean, 'null']
-              detail:
-                type: [string, 'null']
-        caughtParticipants:
-          type: [array, 'null']
-          description: >-
-            Real trackers of newly caught participants; their open requests end and their reservations, armed
-            fakes included, are released
+              content:
+                type: string
+    GameTimetablePublished:
+      type: object
+      properties:
+        revision:
+          type: integer
+        structureChanged:
+          type: boolean
+        entries:
+          type: array
           items:
-            type: integer
-            format: int64
-        fakes:
-          type: [array, 'null']
-          description: >-
-            Armed fakes and planned breaks settled by this delivery: a timetable fake used when this delivery's
-            positions give the hunters the fake, or released when its ping was skipped or failed; a speedhunt
-            fake bound (and used) by the delivery of a run's first ping; a planned break used when the Tool
-            starts it, or released when the operator cancels it or its time passed while no Tool ran. One that
-            is no longer armed is skipped.
+            $ref: '#/components/schemas/GameTimetableEntry'
+    GameTimetableProgressUpdate:
+      type: object
+      required: [entries]
+      properties:
+        entries:
+          type: array
           items:
             type: object
-            required: [reservationId, outcome]
+            required: [id, status]
             properties:
-              reservationId:
-                type: integer
-                format: int64
-              outcome:
+              id:
+                $ref: '#/components/schemas/Id'
+              status:
                 type: string
-                enum: [used, released, bound]
-              detail:
-                type: [string, 'null']
-              run:
-                type: [string, 'null']
-                description: bound only; the Tool's reference of the speedhunt
-        logs:
-          type: [array, 'null']
+                enum: [scheduled, sent, skipped, failed]
+    GameLogPage:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            type: object
+            properties:
+              id:
+                $ref: '#/components/schemas/Id'
+              category:
+                type: string
+              occurredAt:
+                $ref: '#/components/schemas/Time'
+              message:
+                type: string
+        nextCursor:
+          type: string
+        hasMore:
+          type: boolean
+    GameLogAppend:
+      type: object
+      required: [entries]
+      properties:
+        entries:
+          type: array
+          maxItems: 500
           items:
             type: object
             required: [category, occurredAt, message]
@@ -6894,143 +7081,36 @@ components:
               category:
                 type: string
               occurredAt:
-                type: string
-                format: date-time
+                $ref: '#/components/schemas/Time'
               message:
                 type: string
-    GameEffectsOutcome:
-      type: object
-      required: [deliveryId, replayed, epoch, positions, runtimeRevision, generation, alerts, pushes, requests,
-                 statusRevision, jokers, fakes]
-      properties:
-        deliveryId:
-          type: string
-        replayed:
-          type: boolean
-        epoch:
-          type: integer
-          format: int64
-        positions:
-          type: array
-          items:
-            type: object
-            required: [deviceId, positionId, latest, fixTime]
-            properties:
-              deviceId:
-                type: integer
-                format: int64
-              positionId:
-                type: integer
-                format: int64
-              latest:
-                type: boolean
-              fixTime:
-                type: string
-                format: date-time
-        runtimeRevision:
-          type: [integer, 'null']
-          format: int64
-        generation:
-          type: [string, 'null']
-        alerts:
-          type: array
-          items:
-            type: object
-            required: [alertId, created]
-            properties:
-              alertId:
-                type: string
-              created:
-                type: boolean
-        pushes:
-          type: array
-          items:
-            type: object
-            required: [id, userId, status, detail]
-            properties:
-              id:
-                type: [integer, 'null']
-                format: int64
-              userId:
-                type: [integer, 'null']
-                format: int64
-              status:
-                type: string
-                enum: [queued, attempting, sent, failed, uncertain, skipped, rejected]
-              detail:
-                type: [string, 'null']
-        requests:
-          type: array
-          items:
-            type: object
-            required: [id, status]
-            properties:
-              id:
-                type: integer
-                format: int64
-              status:
-                type: string
-        statusRevision:
-          type: [integer, 'null']
-          format: int64
-        jokers:
-          type: array
-          items:
-            type: object
-            required: [deviceId, type, overAllocated]
-            properties:
-              deviceId:
-                type: integer
-                format: int64
-              type:
-                type: string
-              overAllocated:
-                type: boolean
-        fakes:
-          type: array
-          items:
-            type: object
-            required: [reservationId, status]
-            properties:
-              reservationId:
-                type: integer
-                format: int64
-              status:
-                type: string
-                enum: [consumed, released, skipped]
+                maxLength: 16384
     GameRequest:
       type: object
-      required: [id, gameSessionId, type, requesterUserId, requesterLabel, requesterRole, targetDeviceId,
-                 targetLabel, baseRevision, parameters, status, approvalRequired, message, detail, createdAt,
-                 expiresAt, decidedAt, completedAt]
+      description: >-
+        Members get no detail or epoch; hunters get roster labels and no message. baseRevision is the target's member
+        state revision of a hunter's request.
       properties:
         id:
-          type: integer
-          format: int64
+          $ref: '#/components/schemas/Id'
         gameSessionId:
-          type: integer
-          format: int64
+          $ref: '#/components/schemas/Id'
         type:
           type: string
           enum: [speedhuntStaticPing, speedhuntLivePing, speedhuntStopLivePing, speedhuntTerminate,
                  jokerHunterPositions, jokerBreak, jokerFakePing]
-        requesterUserId:
-          type: [integer, 'null']
-          format: int64
+        requesterMemberId:
+          $ref: '#/components/schemas/NullableId'
         requesterLabel:
           type: [string, 'null']
-          description: The requester’s group and roster number in hunter responses
         requesterRole:
-          type: string
-        targetDeviceId:
-          type: [integer, 'null']
-          format: int64
+          type: [string, 'null']
+        targetMemberId:
+          $ref: '#/components/schemas/NullableId'
         targetLabel:
           type: [string, 'null']
-          description: The target’s group and roster number in hunter responses
         baseRevision:
           type: [integer, 'null']
-          format: int64
         parameters:
           type: object
         status:
@@ -7038,88 +7118,38 @@ components:
           enum: [pending, approved, executing, succeeded, failed, rejected, expired, cancelled]
         approvalRequired:
           type: [boolean, 'null']
-          description: True once the Tool queued it for the operator's approval
         message:
           type: [string, 'null']
-          description: Outcome or progress message, null in hunter responses
         detail:
           type: [string, 'null']
-          description: Operator-only detail; always null for members
+        epoch:
+          type: [integer, 'null']
         createdAt:
-          type: string
-          format: date-time
+          $ref: '#/components/schemas/Time'
         expiresAt:
-          type: string
-          format: date-time
+          $ref: '#/components/schemas/NullableTime'
         decidedAt:
-          type: [string, 'null']
-          format: date-time
+          $ref: '#/components/schemas/NullableTime'
         completedAt:
-          type: [string, 'null']
-          format: date-time
+          $ref: '#/components/schemas/NullableTime'
+        updatedAt:
+          $ref: '#/components/schemas/NullableTime'
     GameRequestSubmission:
       type: object
       required: [type]
-      description: >-
-        Hunters' speedhunt requests need targetDeviceId and baseRevision. A static or live ping that would
-        start a speedhunt (the participant's published startsRun) reserves one joker of the hunters' shared
-        pool and is refused (409) when none is left; a succeeded request arms it until the run's first ping
-        uses it, and the Tool releases it when a live ping ends before any upload reached anyone. Jokers (jokerHunterPositions,
-        jokerBreak, jokerFakePing) are always for the requesting player or supporter and reserve one
-        available joker; a break lasts the duration configured in the session's game settings and is timed by
-        the Tool. A break starts now, or from parameters.startsAt (a planned break; a start that has passed
-        when it is submitted starts now). A planned break is accepted while a speedhunt runs: its succeeded
-        request arms the joker, and the Tool starts the break at its start, waiting while any speedhunt runs.
-        Breaks of one participant never overlap. A fake ping (jokerFakePing) names a coordinate and either entryId or pingNumber, never both.
-        On a timetable ping it names one of the requester's own upcoming timetable pings (entryId from
-        /game-jokers timetableEntries); when the request succeeds the fake is armed (still reserved) and its
-        joker is used when the hunters receive the fake at that ping. On the next speedhunt it names a ping
-        number (1 to the session's pings per speedhunt, any positive number when unlimited); it is armed for the
-        next speedhunt, whoever it targets, and is bound (used, never refunded) when that run's first ping is
-        sent. At most one fake per timetable ping and one unbound speedhunt fake per participant.
       properties:
         type:
           type: string
-          enum: [speedhuntStaticPing, speedhuntLivePing, speedhuntStopLivePing, speedhuntTerminate,
-                 jokerHunterPositions, jokerBreak, jokerFakePing]
-        targetDeviceId:
-          type: [integer, 'null']
-          format: int64
-          description: Assigned tracker of a player or supporter of the member's session
+        targetMemberId:
+          $ref: '#/components/schemas/NullableId'
         baseRevision:
           type: [integer, 'null']
-          format: int64
-          description: The participant's speedhunt revision from /game-status the request is based on
+          description: The target's member state revision (hunters' speedhunt actions)
         parameters:
           type: [object, 'null']
-          properties:
-            durationMinutes:
-              type: number
-              exclusiveMinimum: 0
-              maximum: 240
-            startsAt:
-              type: string
-              format: date-time
-              description: jokerBreak only; the planned start
-            entryId:
-              type: integer
-              format: int64
-              description: jokerFakePing on a timetable ping (not with pingNumber)
-            pingNumber:
-              type: integer
-              minimum: 1
-              maximum: 1000
-              description: jokerFakePing on the next speedhunt (not with entryId)
-            latitude:
-              type: number
-              minimum: -90
-              maximum: 90
-              description: jokerFakePing
-            longitude:
-              type: number
-              minimum: -180
-              maximum: 180
-              description: jokerFakePing
+          description: >-
+            jokerFakePing - latitude, longitude and either entryId or pingNumber (with runToken for a running
+            speedhunt); jokerBreak - optional startsAt; speedhunt pings - optional confirmConsecutive
     GameRequestDecision:
       type: object
       required: [decision]
@@ -7131,132 +7161,11 @@ components:
           type: [string, 'null']
         detail:
           type: [string, 'null']
-    GameRequestCompletion:
-      type: object
-      required: [id, status]
-      properties:
-        id:
-          type: integer
-          format: int64
-        status:
-          type: string
-          enum: [succeeded, failed, rejected]
-        message:
-          type: [string, 'null']
-        detail:
-          type: [string, 'null']
-    GameSpeedhuntProgress:
-      type: object
-      required: [active]
-      properties:
-        active:
-          type: boolean
-        pingCount:
-          type: integer
-          minimum: 1
-          description: Number of confirmed pings in the current hunt, when available
-        pingLimit:
-          type: integer
-          minimum: 1
-          description: Configured pings per hunt, when limited
-    GameStatus:
-      type: object
-      required: [gameSessionId, role, controllerActive, serverTime, revision, status]
-      properties:
-        gameSessionId:
-          type: integer
-          format: int64
-        role:
-          type: string
-          enum: [player, supporter, hunter, spectator]
-        controllerActive:
-          type: boolean
-          description: Whether a Tool controls and executes this session right now
-        serverTime:
-          type: string
-          format: date-time
-        revision:
-          type: integer
-          format: int64
-        status:
-          type: object
-          description: >-
-            Anonymous speedhunt progress for everyone. Hunters and spectators also see participants with
-            per-participant speedhunt revisions and breaks, and game limits. Hunters receive group and roster
-            number in the participant name field. Players and supporters see only their own break and armed fake plans.
-          properties:
-            speedhunt:
-              allOf:
-                - $ref: '#/components/schemas/GameSpeedhuntProgress'
-                - type: object
-                  properties:
-                    pingHistory:
-                      type: array
-                      description: Confirmed pings of the current hunt in ping order, when published by the Tool
-                      items:
-                        type: object
-                        required: [number, sentAt]
-                        properties:
-                          number:
-                            type: integer
-                            minimum: 1
-                          sentAt:
-                            type: string
-                            format: date-time
-            break:
-              $ref: '#/components/schemas/GameBreak'
-            fakes:
-              type: array
-              description: The member's own armed fakes (players and supporters only)
-              items:
-                $ref: '#/components/schemas/GameJokerFakePlan'
-            liveShares:
-              type: array
-              description: Active participant live shares confirmed for hunters in the current execution (hunters only)
-              items:
-                type: object
-                required: [deviceId, name]
-                properties:
-                  deviceId:
-                    type: integer
-                    format: int64
-                  name:
-                    type: string
-                    description: Hunter-facing roster label
-                  reason:
-                    type: string
-                    maxLength: 500
-                    description: Operator-entered live tracking reason, when available
-                  source:
-                    type: string
-                    enum: [manual, geofence, speedhunt]
-                    description: How the share started, when published by the Tool
-                  endsAt:
-                    type: string
-                    format: date-time
-    GameBreak:
-      type: object
-      required: [active]
-      description: >-
-        A participant's break as published by the Tool. A break past endsAt no longer protects the participant,
-        even before the Tool has published its end; compare with serverTime.
-      properties:
-        active:
-          type: boolean
-        startedAt:
-          type: string
-          format: date-time
-        endsAt:
-          type: string
-          format: date-time
     GameJokerInventory:
       type: object
-      required: [deviceId, type, granted, used, reserved, available, overAllocated]
       properties:
-        deviceId:
-          type: integer
-          format: int64
-          description: The participant's real tracker, or 0 for the hunters' shared pool (speedhunt jokers)
+        memberId:
+          $ref: '#/components/schemas/NullableId'
         type:
           type: string
           enum: [hunterPositions, fakePing, break, speedhunt]
@@ -7264,174 +7173,66 @@ components:
           type: integer
         used:
           type: integer
-          description: Uses, including uses beyond the allocation
         reserved:
           type: integer
-          description: Uses held by open requests
         available:
           type: integer
-          minimum: 0
         overAllocated:
           type: integer
-          description: Uses beyond the granted quantity
     GameJokerReservation:
       type: object
-      required: [id, deviceId, type, requestId, status, createdAt, armed, bound, plan, use]
-      description: >-
-        A use held by an open request, or an armed fake (no request, armed true). The owner's view also lists
-        their latest speedhunt fakes that were bound to a speedhunt (status consumed, bound true). Plans are
-        visible only to their owner and the operators.
       properties:
         id:
-          type: integer
-          format: int64
-        deviceId:
-          type: integer
-          format: int64
+          $ref: '#/components/schemas/Id'
+        memberId:
+          $ref: '#/components/schemas/NullableId'
         type:
           type: string
         requestId:
-          type: [integer, 'null']
-          format: int64
+          $ref: '#/components/schemas/NullableId'
         status:
           type: string
-        createdAt:
-          type: [string, 'null']
-          format: date-time
+          enum: [reserved, consumed, released]
         armed:
           type: boolean
-        bound:
+        overAllocated:
           type: boolean
-        plan:
-          $ref: '#/components/schemas/GameJokerFakePlan'
+        createdAt:
+          $ref: '#/components/schemas/Time'
         use:
-          type: [string, 'null']
-          enum: [timetable, speedhunt, null]
-          description: How a fake ping is used (its plan names entryId or pingNumber); null for other jokers
-    GameJokerFakePlan:
-      type: object
-      description: A fake's plan; empty for other jokers
-      properties:
-        reservationId:
-          type: integer
-          format: int64
-        type:
           type: string
-        use:
-          type: [string, 'null']
-          enum: [timetable, speedhunt, null]
-          description: In the member's status fakes, how the fake ping is used
-        entryId:
-          type: integer
-          format: int64
-          description: The timetable entry a timetable fake replaces for the hunters
-        pingNumber:
-          type: integer
-          description: The ping of the next speedhunt a speedhunt fake replaces for the hunters
-        boundAt:
-          type: string
-          format: date-time
-          description: When a speedhunt fake was bound to a speedhunt
-        startsAt:
-          type: string
-          format: date-time
-          description: The planned start of a planned break
-        armedAt:
-          type: string
-          format: date-time
-        plannedBy:
-          type: string
-          enum: [operator]
-          description: A planned break an operator planned
-        boundTo:
-          type: string
-          description: >-
-            The Tool's opaque reference of the speedhunt a fake was bound to; never shown to the owner, so it
-            cannot tell them whom the speedhunt targets
-        scheduledAt:
-          type: string
-          format: date-time
-        latitude:
-          type: number
-        longitude:
-          type: number
-        requestId:
-          type: integer
-          format: int64
-    GameJokerOwn:
-      type: object
-      required: [inventories, reservations, timetableEntries, pingsPerSpeedhunt]
-      properties:
-        pingsPerSpeedhunt:
-          type: [integer, 'null']
-          description: >-
-            The session's pings per speedhunt, the highest ping a speedhunt fake may name; null when speedhunts
-            have no ping limit (any ping up to 1000)
-        inventories:
-          type: array
-          items:
-            $ref: '#/components/schemas/GameJokerInventory'
-        reservations:
-          type: array
-          items:
-            $ref: '#/components/schemas/GameJokerReservation'
-        timetableEntries:
-          type: array
-          description: >-
-            The member's own active timetable pings at least 60 seconds ahead that reach the hunters (blank or a
-            target code with hunters); taken when a fake is already requested or armed for it
-          items:
-            type: object
-            required: [entryId, scheduledAt, taken]
-            properties:
-              entryId:
-                type: integer
-                format: int64
-              scheduledAt:
-                type: string
-                format: date-time
-              taken:
-                type: boolean
-    GameTimetableSlot:
-      type: object
-      description: One distinct scheduled time in a hunter's timetable
-      required: [scheduledAt]
-      additionalProperties: false
-      properties:
-        scheduledAt:
-          type: string
-          format: date-time
-    GameTimetablePing:
-      type: object
-      required: [entryId, scheduledAt, deviceId, state, stateAt, fakeAllowed]
-      properties:
-        entryId:
-          type: integer
-          format: int64
-        scheduledAt:
-          type: string
-          format: date-time
-        deviceId:
-          type: integer
-          format: int64
-          description: The participant's real tracker
-        state:
-          type: string
-          enum: [scheduled, sent, skipped, failed]
-          description: >-
-            As recorded by the Tool: sent, skipped (nothing was to be sent, the participant was out, or a break
-            withheld the hunters) or failed (no position, an upload error or no recipient)
-        stateAt:
-          type: [string, 'null']
-          format: date-time
-        fakeAllowed:
-          type: [boolean, 'null']
-          description: >-
-            For the owner: whether a fake can still be planned on this ping (at least 60 seconds ahead and none
-            planned yet); null for spectators
+          enum: [timetable, speedhunt, runningSpeedhunt, plannedBreak]
+        fake:
+          type: object
+          properties:
+            latitude:
+              type: number
+            longitude:
+              type: number
+            entryId:
+              $ref: '#/components/schemas/Id'
+            scheduledAt:
+              $ref: '#/components/schemas/Time'
+            pingNumber:
+              type: integer
+            bound:
+              type: boolean
+            boundRunId:
+              $ref: '#/components/schemas/Id'
+              description: Operators only; opaque to owners
+        plannedBreak:
+          type: object
+          properties:
+            breakId:
+              $ref: '#/components/schemas/Id'
+            startsAt:
+              $ref: '#/components/schemas/Time'
+            state:
+              type: string
+            plannedBy:
+              type: string
     GameJokerOverview:
       type: object
-      required: [inventories, reservations, boundFakes]
       properties:
         inventories:
           type: array
@@ -7443,78 +7244,889 @@ components:
             $ref: '#/components/schemas/GameJokerReservation'
         boundFakes:
           type: array
-          description: >-
-            The latest speedhunt fakes of the session that were bound to a speedhunt (status consumed, bound
-            true), newest first, with the run reference (boundTo) in their plan
           items:
             $ref: '#/components/schemas/GameJokerReservation'
+    GameOwnJokers:
+      type: object
+      description: The hunters' pool has only the speedhunt inventory and no timetable entries
+      properties:
+        inventories:
+          type: array
+          items:
+            $ref: '#/components/schemas/GameJokerInventory'
+        reservations:
+          type: array
+          items:
+            $ref: '#/components/schemas/GameJokerReservation'
+        timetableEntries:
+          type: array
+          items:
+            type: object
+            properties:
+              entryId:
+                $ref: '#/components/schemas/Id'
+              scheduledAt:
+                $ref: '#/components/schemas/Time'
+              taken:
+                type: boolean
+        pingsPerSpeedhunt:
+          type: [integer, 'null']
     GameJokerLedgerEntry:
       type: object
-      required: [id, deviceId, type, kind, quantity, requestId, reservationId, actor, detail, occurredAt]
       properties:
         id:
-          type: integer
-          format: int64
-        deviceId:
-          type: integer
-          format: int64
+          $ref: '#/components/schemas/Id'
+        memberId:
+          $ref: '#/components/schemas/NullableId'
         type:
           type: string
-          description: >-
-            The joker type; entries recorded before the two fake types were merged keep fakeTimetable or
-            fakeSpeedhunt
         kind:
           type: string
-          enum: [grant, revoke, reserve, arm, release, use, overuse]
+          enum: [grant, revoke, reserve, arm, use, overuse, release]
         quantity:
           type: integer
         requestId:
-          type: [integer, 'null']
-          format: int64
+          $ref: '#/components/schemas/NullableId'
         reservationId:
-          type: [integer, 'null']
-          format: int64
+          $ref: '#/components/schemas/NullableId'
         actor:
           type: [string, 'null']
         detail:
           type: [string, 'null']
         occurredAt:
-          type: string
-          format: date-time
-    GameJokerBreakPlan:
+          $ref: '#/components/schemas/Time'
+    GameJokerDiscrepancy:
       type: object
-      required: [deviceId]
       properties:
-        deviceId:
+        memberId:
+          $ref: '#/components/schemas/NullableId'
+        type:
+          type: string
+        field:
+          type: string
+        stored:
           type: integer
-          format: int64
-          description: The participant's real tracker
-        startsAt:
-          type: [string, 'null']
-          format: date-time
-          description: The planned start; now when missing or past
-        overAllocate:
-          type: [boolean, 'null']
-          description: Plan the break although no break joker is available (a use beyond the allocation)
+        expected:
+          type: integer
     GameJokerChange:
       type: object
-      required: [deviceId, type, quantity]
+      required: [type, quantity]
       properties:
-        deviceId:
-          type: integer
-          format: int64
+        memberId:
+          $ref: '#/components/schemas/NullableId'
+          description: Null for the hunters' pool (speedhunt jokers)
         type:
           type: string
           enum: [hunterPositions, fakePing, break, speedhunt]
-          description: speedhunt jokers belong to the hunters' pool (deviceId 0), the other types to participants
         quantity:
           type: integer
           minimum: -1000
           maximum: 1000
-          not:
-            const: 0
         reason:
           type: [string, 'null']
+    GameBreakPlan:
+      type: object
+      required: [memberId]
+      properties:
+        memberId:
+          $ref: '#/components/schemas/Id'
+        startsAt:
+          $ref: '#/components/schemas/NullableTime'
+        overAllocate:
+          type: [boolean, 'null']
+    GameOperation:
+      type: object
+      required: [type]
+      description: >-
+        One typed state operation; the server validates each transition against the row's current state and answers
+        409 for an illegal one. Ping sources are real or operatorFake; the server stores jokerFake when the target's
+        own fake applies.
+      properties:
+        type:
+          type: string
+          enum: [catch, release, pingDelivered, pingFailed, runEnded, liveUploadStarted, liveUploadSample,
+                 liveUploadEnded, breakPlanned, breakWaiting, breakStarted, breakEnded, breakCancelled, breakMissed,
+                 fakeUsed, fakeReleased, checkpoint]
+      additionalProperties: true
+    GameEffectsDelivery:
+      type: object
+      required: [deliveryId]
+      properties:
+        deliveryId:
+          type: string
+          pattern: '^[A-Za-z0-9_-]{8,64}$'
+        positions:
+          type: [array, 'null']
+          maxItems: 200
+          items:
+            type: object
+            properties:
+              deviceId:
+                $ref: '#/components/schemas/NullableId'
+              uniqueId:
+                type: [string, 'null']
+              latitude:
+                type: number
+              longitude:
+                type: number
+              fixTime:
+                $ref: '#/components/schemas/NullableTime'
+              attributes:
+                type: [object, 'null']
+              fakeReservationId:
+                $ref: '#/components/schemas/NullableId'
+              fallbackLatitude:
+                type: [number, 'null']
+              fallbackLongitude:
+                type: [number, 'null']
+        operations:
+          type: [array, 'null']
+          maxItems: 200
+          items:
+            $ref: '#/components/schemas/GameOperation'
+        notifications:
+          type: [object, 'null']
+          properties:
+            generation:
+              type: string
+              format: uuid
+            alerts:
+              type: array
+              maxItems: 100
+              items:
+                $ref: '#/components/schemas/GameNotificationAlert'
+        pushes:
+          type: [array, 'null']
+          maxItems: 500
+          items:
+            type: object
+            required: [memberId, message]
+            properties:
+              memberId:
+                $ref: '#/components/schemas/Id'
+              subject:
+                type: [string, 'null']
+              message:
+                type: string
+              notificator:
+                type: [string, 'null']
+              alertId:
+                type: [string, 'null']
+        logs:
+          type: [array, 'null']
+          items:
+            type: object
+            properties:
+              category:
+                type: string
+              occurredAt:
+                $ref: '#/components/schemas/Time'
+              message:
+                type: string
+        requests:
+          type: [array, 'null']
+          items:
+            type: object
+            required: [id, status]
+            properties:
+              id:
+                $ref: '#/components/schemas/Id'
+              status:
+                type: string
+                enum: [succeeded, failed, rejected]
+              message:
+                type: [string, 'null']
+              detail:
+                type: [string, 'null']
+        jokers:
+          type: [array, 'null']
+          description: Operator uses of "Get hunter positions" jokers
+          items:
+            type: object
+            properties:
+              memberId:
+                $ref: '#/components/schemas/Id'
+              type:
+                type: string
+                const: hunterPositions
+              overAllocate:
+                type: [boolean, 'null']
+              detail:
+                type: [string, 'null']
+    GameEffectsOutcome:
+      type: object
+      description: The recorded outcome of a delivery (operator data; it names joker fakes)
+      properties:
+        deliveryId:
+          type: string
+        replayed:
+          type: boolean
+        epoch:
+          type: integer
+        positions:
+          type: array
+          items:
+            type: object
+        operations:
+          type: array
+          items:
+            type: object
+            properties:
+              index:
+                type: integer
+              operation:
+                type: string
+              id:
+                $ref: '#/components/schemas/Id'
+              runId:
+                $ref: '#/components/schemas/Id'
+              number:
+                type: integer
+              source:
+                type: string
+              status:
+                type: string
+        generation:
+          type: [string, 'null']
+        alerts:
+          type: array
+          items:
+            type: object
+        pushes:
+          type: array
+          items:
+            type: object
+        requests:
+          type: array
+          items:
+            type: object
+        jokers:
+          type: array
+          items:
+            type: object
+        fakes:
+          type: array
+          items:
+            type: object
+            properties:
+              reservationId:
+                $ref: '#/components/schemas/Id'
+              status:
+                type: string
+        sessionRevision:
+          type: integer
+    GameSnapshot:
+      type: object
+      description: >-
+        Operator data at one database snapshot. state holds every catch interval, every run with its pings (newest
+        first, with ping sources), every break and live upload, the member state revisions by member ID and the
+        per-member speedhunt statistics; requests are the open ones; fakePlans the plans of reserved fake ping
+        jokers.
+      properties:
+        gameSessionId:
+          $ref: '#/components/schemas/Id'
+        revision:
+          type: integer
+          description: The session aggregate revision
+        readAt:
+          $ref: '#/components/schemas/Time'
+        executingEpoch:
+          type: [integer, 'null']
+        session:
+          $ref: '#/components/schemas/GameSession'
+        members:
+          type: array
+          items:
+            $ref: '#/components/schemas/GameMember'
+        resources:
+          $ref: '#/components/schemas/GameResources'
+        state:
+          type: object
+          properties:
+            catches:
+              type: array
+              items:
+                type: object
+            runs:
+              type: array
+              items:
+                type: object
+                properties:
+                  run:
+                    type: object
+                  pings:
+                    type: array
+                    items:
+                      type: object
+            breaks:
+              type: array
+              items:
+                type: object
+            liveUploads:
+              type: array
+              items:
+                type: object
+            memberRevisions:
+              type: object
+              additionalProperties:
+                type: integer
+            statistics:
+              type: array
+              items:
+                type: object
+        requests:
+          type: array
+          items:
+            $ref: '#/components/schemas/GameRequest'
+        jokers:
+          $ref: '#/components/schemas/GameJokerOverview'
+        fakePlans:
+          type: array
+          items:
+            type: object
+        timetable:
+          $ref: '#/components/schemas/GameTimetable'
+        geofencePlans:
+          $ref: '#/components/schemas/GameDocument'
+        checkpoints:
+          type: array
+          items:
+            $ref: '#/components/schemas/GameCheckpoint'
+        notifications:
+          oneOf:
+            - $ref: '#/components/schemas/GameNotificationState'
+            - type: 'null'
+        proximity:
+          $ref: '#/components/schemas/GameProximitySnapshot'
+    GameStatus:
+      type: object
+      description: >-
+        The caller's membership, whether a Tool controls the game, the server time for countdowns, a hash of the
+        projection (it changes only with what this member observes; members never see the session revision) and the
+        role projection.
+      properties:
+        gameSessionId:
+          $ref: '#/components/schemas/Id'
+        memberId:
+          $ref: '#/components/schemas/Id'
+        role:
+          $ref: '#/components/schemas/Role'
+        number:
+          type: integer
+        displayName:
+          type: string
+        controllerActive:
+          type: boolean
+        serverTime:
+          $ref: '#/components/schemas/Time'
+        hash:
+          type: string
+          pattern: '^[0-9a-f]{32}$'
+        status:
+          description: The projection of the caller's role
+          anyOf:
+            - $ref: '#/components/schemas/GamePlayerView'
+            - $ref: '#/components/schemas/GameHunterView'
+            - $ref: '#/components/schemas/GameSpectatorView'
+    GameSpeedhuntProgress:
+      type: object
+      description: >-
+        The current speedhunt without its target, the same for every member; inactive while no Tool controls the
+        game. pingCount and pingLimit are left out while zero or unlimited.
+      required: [active]
+      properties:
+        active:
+          type: boolean
+        pingCount:
+          type: integer
+        pingLimit:
+          type: integer
+        pingHistory:
+          type: array
+          items:
+            $ref: '#/components/schemas/GamePingTime'
+    GamePingTime:
+      type: object
+      properties:
+        number:
+          type: integer
+        sentAt:
+          $ref: '#/components/schemas/Time'
+    GameBreak:
+      type: object
+      required: [active]
+      properties:
+        active:
+          type: boolean
+        startedAt:
+          $ref: '#/components/schemas/Time'
+        endsAt:
+          $ref: '#/components/schemas/Time'
+          description: Past endsAt and still active means ending (no Tool has ended it yet)
+    GamePlayerView:
+      type: object
+      description: Players and supporters - no revisions, sources, other members' plans or target identities
+      required: [speedhunt, break, participantOverview, fakes, plannedBreaks]
+      properties:
+        speedhunt:
+          $ref: '#/components/schemas/GameSpeedhuntProgress'
+        break:
+          $ref: '#/components/schemas/GameBreak'
+        runningFake:
+          type: object
+          description: Ping slots of a running speedhunt any player or supporter may plan a fake on
+          properties:
+            runToken:
+              type: string
+              pattern: '^[0-9a-f]{32}$'
+            firstPing:
+              type: integer
+            lastPing:
+              type: integer
+        participantOverview:
+          type: array
+          description: The catch roster - active players and supporters with a tracker
+          items:
+            type: object
+            properties:
+              memberId:
+                $ref: '#/components/schemas/Id'
+              role:
+                type: string
+                enum: [player, supporter]
+              number:
+                type: integer
+              name:
+                type: string
+              caught:
+                type: boolean
+        fakes:
+          type: array
+          description: The caller's own armed fakes
+          items:
+            type: object
+            properties:
+              reservationId:
+                $ref: '#/components/schemas/Id'
+              use:
+                type: string
+                enum: [timetable, speedhunt, runningSpeedhunt]
+              latitude:
+                type: number
+              longitude:
+                type: number
+              entryId:
+                $ref: '#/components/schemas/Id'
+              scheduledAt:
+                $ref: '#/components/schemas/Time'
+              pingNumber:
+                type: integer
+              runToken:
+                type: string
+        plannedBreaks:
+          type: array
+          description: The caller's own planned and waiting breaks
+          items:
+            type: object
+            properties:
+              breakId:
+                $ref: '#/components/schemas/Id'
+              reservationId:
+                $ref: '#/components/schemas/NullableId'
+              startsAt:
+                $ref: '#/components/schemas/Time'
+              state:
+                type: string
+                enum: [planned, waiting]
+              plannedBy:
+                type: string
+                enum: [participant, operator]
+    GameParticipant:
+      type: object
+      properties:
+        memberId:
+          $ref: '#/components/schemas/Id'
+        role:
+          type: string
+          enum: [player, supporter]
+        number:
+          type: integer
+        name:
+          type: string
+          description: Roster label for hunters (role group name and number), display name for the spectator
+        trackerId:
+          $ref: '#/components/schemas/Id'
+          description: Spectator only
+        caught:
+          type: boolean
+        speedhunt:
+          type: object
+          properties:
+            running:
+              type: boolean
+            pings:
+              type: integer
+            pingHistory:
+              type: array
+              items:
+                $ref: '#/components/schemas/GamePingTime'
+            startsRun:
+              type: boolean
+            live:
+              type: boolean
+            liveUntil:
+              $ref: '#/components/schemas/Time'
+            revision:
+              type: integer
+              description: The member state revision hunter requests carry as baseRevision
+        break:
+          $ref: '#/components/schemas/GameBreak'
+    GameLimits:
+      type: object
+      properties:
+        pingsPerSpeedhunt:
+          type: [integer, 'null']
+        fixedLiveMinutes:
+          type: [number, 'null']
+        allowConsecutiveSpeedhunts:
+          type: boolean
+        limitEnforcement:
+          type: string
+          enum: [warn, block]
+        requestApprovals:
+          type: object
+          properties:
+            speedhuntStaticPing:
+              type: boolean
+            speedhuntLivePing:
+              type: boolean
+    GameHunterView:
+      type: object
+      required: [speedhunt, participants, limits, lastSpeedhuntMemberId, liveShares]
+      properties:
+        speedhunt:
+          $ref: '#/components/schemas/GameSpeedhuntProgress'
+        participants:
+          type: array
+          items:
+            $ref: '#/components/schemas/GameParticipant'
+        limits:
+          $ref: '#/components/schemas/GameLimits'
+        lastSpeedhuntMemberId:
+          $ref: '#/components/schemas/NullableId'
+        liveShares:
+          type: array
+          items:
+            type: object
+            properties:
+              memberId:
+                $ref: '#/components/schemas/Id'
+              name:
+                type: string
+              endsAt:
+                $ref: '#/components/schemas/Time'
+              source:
+                type: string
+                enum: [manual, geofence, speedhunt]
+              reason:
+                type: string
+    GameSpectatorView:
+      type: object
+      description: The hunters' view with display names and real trackers, without live shares
+      required: [speedhunt, participants, limits]
+      properties:
+        speedhunt:
+          $ref: '#/components/schemas/GameSpeedhuntProgress'
+        participants:
+          type: array
+          items:
+            $ref: '#/components/schemas/GameParticipant'
+        limits:
+          $ref: '#/components/schemas/GameLimits'
+    GameSpeedhuntHistory:
+      type: object
+      properties:
+        gameSessionId:
+          $ref: '#/components/schemas/Id'
+        runs:
+          type: array
+          items:
+            type: object
+            properties:
+              runId:
+                $ref: '#/components/schemas/Id'
+              startedAt:
+                $ref: '#/components/schemas/Time'
+              status:
+                type: string
+                enum: [inProgress, finished]
+              pings:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    pingId:
+                      $ref: '#/components/schemas/Id'
+                    number:
+                      type: integer
+                    sentAt:
+                      $ref: '#/components/schemas/Time'
+                    mode:
+                      type: string
+                      enum: [static, live]
+    GameTimetablePing:
+      type: object
+      required: [entryId, scheduledAt, memberId, state]
+      properties:
+        entryId:
+          $ref: '#/components/schemas/Id'
+        scheduledAt:
+          $ref: '#/components/schemas/Time'
+        memberId:
+          $ref: '#/components/schemas/Id'
+        state:
+          type: string
+          enum: [scheduled, sent, skipped, failed]
+        stateAt:
+          $ref: '#/components/schemas/NullableTime'
+        fakeAllowed:
+          type: [boolean, 'null']
+    GameTimetableSlot:
+      type: object
+      required: [scheduledAt]
+      properties:
+        scheduledAt:
+          $ref: '#/components/schemas/Time'
+    GameNotificationAlert:
+      type: object
+      required: [id, type, audience, occurredAt, timeZone, message]
+      properties:
+        id:
+          type: string
+          pattern: '^[A-Za-z0-9_-]{1,64}$'
+        type:
+          type: string
+        audience:
+          type: string
+        occurredAt:
+          $ref: '#/components/schemas/Time'
+        timeZone:
+          type: string
+        message:
+          type: string
+          maxLength: 8192
+        recipientMemberId:
+          $ref: '#/components/schemas/NullableId'
+        sourceMemberId:
+          $ref: '#/components/schemas/NullableId'
+    GameNotificationEntry:
+      type: object
+      properties:
+        id:
+          type: string
+        type:
+          type: string
+        audience:
+          type: string
+        occurredAt:
+          $ref: '#/components/schemas/Time'
+        timeZone:
+          type: string
+        message:
+          type: string
+        recipientMemberId:
+          $ref: '#/components/schemas/NullableId'
+        recipientLabel:
+          type: [string, 'null']
+        sourceMemberId:
+          $ref: '#/components/schemas/NullableId'
+        sourceLabel:
+          type: [string, 'null']
+        generation:
+          type: string
+        createdAt:
+          $ref: '#/components/schemas/Time'
+    GameNotificationPage:
+      type: object
+      properties:
+        generation:
+          type: [string, 'null']
+        resetAt:
+          $ref: '#/components/schemas/NullableTime'
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/GameNotificationEntry'
+        nextCursor:
+          type: string
+        hasMore:
+          type: boolean
+    GameNotificationHistoryPage:
+      type: object
+      properties:
+        gameSessionId:
+          $ref: '#/components/schemas/Id'
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/GameNotificationEntry'
+        nextCursor:
+          type: string
+        hasMore:
+          type: boolean
+    GameNotificationCreate:
+      type: object
+      required: [gameSessionId, generation, alert]
+      properties:
+        gameSessionId:
+          $ref: '#/components/schemas/Id'
+        generation:
+          type: string
+          format: uuid
+        alert:
+          $ref: '#/components/schemas/GameNotificationAlert'
+    GameNotificationCreation:
+      type: object
+      properties:
+        generation:
+          type: string
+        item:
+          $ref: '#/components/schemas/GameNotificationEntry'
+        created:
+          type: boolean
+    GameNotificationState:
+      type: object
+      properties:
+        gameSessionId:
+          $ref: '#/components/schemas/Id'
+        generation:
+          type: string
+        resetAt:
+          $ref: '#/components/schemas/Time'
+        revision:
+          type: integer
+    GameNotificationReset:
+      type: object
+      required: [expectedGeneration, replacementGeneration]
+      properties:
+        expectedGeneration:
+          type: string
+          format: uuid
+        replacementGeneration:
+          type: string
+          format: uuid
+    GameProximityGrantInput:
+      type: object
+      required: [episodeId, recipientMemberId, targetMemberId, expiresAt]
+      description: Grants come in reciprocal pairs with one episodeId and one expiry
+      properties:
+        episodeId:
+          type: string
+          pattern: '^[A-Za-z0-9_-]{1,64}$'
+        recipientMemberId:
+          $ref: '#/components/schemas/Id'
+        targetMemberId:
+          $ref: '#/components/schemas/Id'
+        expiresAt:
+          $ref: '#/components/schemas/Time'
+    GameProximityCircleInput:
+      type: object
+      required: [id, latitude, longitude, diameterMeters, expiresAt, memberIds]
+      properties:
+        id:
+          type: string
+          pattern: '^[A-Za-z0-9_-]{1,64}$'
+        latitude:
+          type: number
+        longitude:
+          type: number
+        diameterMeters:
+          type: number
+          exclusiveMinimum: 0
+        expiresAt:
+          $ref: '#/components/schemas/Time'
+        memberIds:
+          type: array
+          minItems: 2
+          items:
+            $ref: '#/components/schemas/Id'
+    GameProximityReplace:
+      type: object
+      required: [expectedRevision]
+      properties:
+        expectedRevision:
+          type: integer
+          minimum: 0
+        grants:
+          type: array
+          items:
+            $ref: '#/components/schemas/GameProximityGrantInput'
+        circles:
+          type: array
+          items:
+            $ref: '#/components/schemas/GameProximityCircleInput'
+    GameProximitySnapshot:
+      type: object
+      properties:
+        revision:
+          type: integer
+        grants:
+          type: array
+          items:
+            type: object
+            properties:
+              episodeId:
+                type: string
+              recipientMemberId:
+                $ref: '#/components/schemas/Id'
+              targetMemberId:
+                $ref: '#/components/schemas/Id'
+              userId:
+                $ref: '#/components/schemas/Id'
+              deviceId:
+                $ref: '#/components/schemas/Id'
+              expiresAt:
+                $ref: '#/components/schemas/Time'
+        circles:
+          type: array
+          items:
+            allOf:
+              - $ref: '#/components/schemas/GameProximityPublicCircle'
+              - type: object
+                properties:
+                  memberIds:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Id'
+    GameProximityPublicCircle:
+      type: object
+      properties:
+        id:
+          type: string
+        latitude:
+          type: number
+        longitude:
+          type: number
+        diameterMeters:
+          type: number
+        playerCount:
+          type: integer
+        supporterCount:
+          type: integer
+        expiresAt:
+          $ref: '#/components/schemas/Time'
+    GameProximityAccess:
+      type: object
+      properties:
+        memberId:
+          $ref: '#/components/schemas/Id'
+          description: The target member
+        deviceId:
+          $ref: '#/components/schemas/Id'
+          description: The target member's tracker
+        expiresAt:
+          $ref: '#/components/schemas/Time'
+
   parameters:
     GameControllerEpoch:
       name: X-Game-Controller-Epoch
@@ -7528,10 +8140,63 @@ components:
       name: id
       in: path
       required: true
-      description: Immutable game-session ID
+      description: Game-session ID
       schema:
         type: integer
         format: int64
+    GameMemberId:
+      name: memberId
+      in: path
+      required: true
+      schema:
+        type: integer
+        format: int64
+    GameRequestId:
+      name: requestId
+      in: path
+      required: true
+      schema:
+        type: integer
+        format: int64
+    GameResourceKind:
+      name: kind
+      in: path
+      required: true
+      description: Unknown kinds answer 404
+      schema:
+        type: string
+        enum: [mirrors, groups, geofences]
+    GameResourceRowId:
+      name: rowId
+      in: path
+      required: true
+      description: The game resource row, not the Traccar resource
+      schema:
+        type: integer
+        format: int64
+    ControllerEpoch:
+      name: X-Game-Controller-Epoch
+      in: header
+      description: The current controller epoch; required (423 without it)
+      schema:
+        type: integer
+        format: int64
+    After:
+      name: after
+      in: query
+      description: The nextCursor of the previous page
+      schema:
+        type: string
+        pattern: '^[0-9]{1,18}$'
+    NotificationLimit:
+      name: limit
+      in: query
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 500
+        default: 100
+
   securitySchemes:
     BasicAuth:
       type: http

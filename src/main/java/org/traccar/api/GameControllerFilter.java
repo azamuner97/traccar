@@ -24,8 +24,9 @@ import jakarta.ws.rs.core.Response;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.traccar.api.security.UserPrincipal;
-import org.traccar.database.GameControllerService;
-import org.traccar.database.GameSessionService;
+import org.traccar.game.GameControllerService;
+import org.traccar.game.GameOwnershipService;
+import org.traccar.game.GameTransactions;
 
 import javax.sql.DataSource;
 import java.io.ByteArrayInputStream;
@@ -39,11 +40,14 @@ import java.util.concurrent.atomic.AtomicBoolean;
 /**
  * Fences mutations with the game controller lease.
  * <ul>
- * <li>Game endpoints that change execution state require the current {@code controllerEpoch}; configuration
- * edits of a stored session that is not executing need only their revision check.</li>
- * <li>Standard mutations of resources in any stored session's resource mapping, and pushes that reach members
- * of the executing session, require the epoch while a lease is held. While no lease is held, administrators may
- * make them; the change is recorded for Tool to report on its next acquisition.</li>
+ * <li>Game endpoints that change execution state require the current {@code controllerEpoch}: effects, timetable
+ * progress, members, resource rows, checkpoints, requests and jokers of any session, every write of the executing
+ * session, and every write of game notifications and proximity. Configuration edits of a stored session that is not
+ * executing (name, settings, credentials, geofence plans, timetable, logs) need only their revision check.</li>
+ * <li>Standard mutations of the Traccar resources that any session owns ({@link GameOwnershipService}: members'
+ * accounts and trackers, mirrors, groups and geofences), and pushes that reach members of the executing session,
+ * require the epoch while a lease is held. While no lease is held, administrators may make them; the change is
+ * recorded for Tool to report on its next acquisition.</li>
  * <li>A request that carries an epoch must carry the current one, whatever it changes.</li>
  * </ul>
  * Users updating their own account are never fenced: participants register push tokens and save preferences
@@ -60,8 +64,10 @@ public class GameControllerFilter implements ContainerRequestFilter, ContainerRe
     private static final String UNFENCED_PROPERTY = "org.traccar.gameControllerUnfenced";
 
     private static final Set<String> STANDARD = Set.of("devices", "groups", "users", "geofences");
-    private static final Set<String> ALWAYS_FENCED_PARTS = Set.of(
-            "resources", "runtime", "timetable/progress", "effects");
+    /** Parts of a session path fenced whatever session they name: exact parts, and first segments. */
+    private static final Set<String> ALWAYS_FENCED_PARTS = Set.of("timetable/progress", "effects");
+    private static final Set<String> ALWAYS_FENCED_SEGMENTS = Set.of(
+            "members", "resources", "checkpoints", "requests", "jokers");
 
     private enum Decision { NONE, REQUIRED, OWNED, STANDARD }
 
@@ -87,7 +93,10 @@ public class GameControllerFilter implements ContainerRequestFilter, ContainerRe
     private GameControllerService controller;
 
     @Inject
-    private GameSessionService sessions;
+    private GameOwnershipService ownership;
+
+    @Inject
+    private GameTransactions transactions;
 
     @Inject
     private DataSource dataSource;
@@ -215,8 +224,8 @@ public class GameControllerFilter implements ContainerRequestFilter, ContainerRe
                 }
                 Long id = number(path.get(1));
                 String part = String.join("/", path.subList(2, path.size()));
-                if (ALWAYS_FENCED_PARTS.contains(part) || part.startsWith("requests/")
-                        || part.startsWith("jokers/")) {
+                if (ALWAYS_FENCED_PARTS.contains(part)
+                        || path.size() > 2 && ALWAYS_FENCED_SEGMENTS.contains(path.get(2))) {
                     return Decision.REQUIRED;
                 }
                 Long executing = controller.executingSessionId();
@@ -231,7 +240,7 @@ public class GameControllerFilter implements ContainerRequestFilter, ContainerRe
                 }
                 Long deviceId = path.size() > 1 ? positionDevice(number(path.get(1)))
                         : number(request.getUriInfo().getQueryParameters().getFirst("deviceId"));
-                return deviceId != null && sessions.owned().devices().contains(deviceId)
+                return deviceId != null && ownership.owned().devices().contains(deviceId)
                         ? Decision.OWNED : Decision.STANDARD;
             }
             case "notifications" -> {
@@ -242,7 +251,7 @@ public class GameControllerFilter implements ContainerRequestFilter, ContainerRe
                 if (executing == null) {
                     return Decision.STANDARD;
                 }
-                Set<Long> members = sessions.memberUserIds(executing);
+                Set<Long> members = memberAccounts(executing);
                 List<String> recipients = request.getUriInfo().getQueryParameters().get("userId");
                 boolean reachesMember = recipients == null || recipients.isEmpty()
                         ? !members.isEmpty()
@@ -262,11 +271,18 @@ public class GameControllerFilter implements ContainerRequestFilter, ContainerRe
         }
     }
 
+    /** The accounts bound to active members of a session. */
+    private Set<Long> memberAccounts(long sessionId) throws Exception {
+        return transactions.read(transaction -> Set.copyOf(transaction.list("SELECT userid FROM"
+                + " tc_game_session_members WHERE gamesessionid = ? AND state = 'active' AND userid IS NOT NULL",
+                rows -> rows.getLong(1), sessionId)));
+    }
+
     private boolean owned(Map<String, Set<Long>> targets) throws Exception {
         if (targets.isEmpty()) {
             return false;
         }
-        var owned = sessions.owned();
+        var owned = ownership.owned();
         for (var entry : targets.entrySet()) {
             Set<Long> ids = switch (entry.getKey()) {
                 case "devices" -> owned.devices();

@@ -59,15 +59,16 @@ public class Drawing extends BaseModel {
         this.ownerId = ownerId;
     }
 
-    private Long sessionDeviceId;
+    private Long gameSessionId;
 
+    /** The game session (data model 2) its owner took part in when drawing it; it scopes game sharing. */
     @JsonIgnore
-    public Long getSessionDeviceId() {
-        return sessionDeviceId;
+    public Long getGameSessionId() {
+        return gameSessionId;
     }
 
-    public void setSessionDeviceId(Long sessionDeviceId) {
-        this.sessionDeviceId = sessionDeviceId;
+    public void setGameSessionId(Long gameSessionId) {
+        this.gameSessionId = gameSessionId;
     }
 
     private String type;

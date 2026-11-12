@@ -34,6 +34,7 @@ import java.sql.SQLException;
 import java.sql.Statement;
 import java.sql.Timestamp;
 import java.sql.Types;
+import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.Date;
 import java.util.HashMap;
@@ -148,6 +149,7 @@ public final class QueryBuilder implements AutoCloseable {
             case Double doubleValue -> setDouble(index, doubleValue);
             case String stringValue -> setString(index, stringValue);
             case Date dateValue -> setDate(index, dateValue);
+            case LocalDateTime dateTimeValue -> statement.setObject(index + 1, dateTimeValue);
             default -> {}
         }
     }

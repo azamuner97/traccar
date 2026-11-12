@@ -31,6 +31,9 @@ import org.traccar.storage.query.Request;
 import jakarta.inject.Inject;
 import javax.sql.DataSource;
 import java.sql.SQLException;
+import java.time.LocalDateTime;
+import java.time.ZoneOffset;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Date;
 import java.util.Collections;
@@ -274,8 +277,9 @@ public class DatabaseStorage extends Storage {
                     results.add(conditionId);
                 }
                 if (condition.getIncludeTemporary()) {
+                    // Game proximity grants (data model 2) expire at a UTC DATETIME(3), written as LocalDateTime.
                     results.add(conditionId);
-                    results.add(System.currentTimeMillis());
+                    results.add(LocalDateTime.now(ZoneOffset.UTC).truncatedTo(ChronoUnit.MILLIS));
                 }
             }
             case Condition.LatestPositions condition -> {

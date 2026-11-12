@@ -98,16 +98,14 @@ public class DrawingUtilTest {
         assertFalse(line.getTextItalic());
     }
 
-    private User user(long id, String role, Long sessionDeviceId, boolean enabled) {
+    private static DrawingUtil.Membership member(String role, long session) {
+        return new DrawingUtil.Membership(session, role);
+    }
+
+    private User user(long id, boolean enabled) {
         User user = new User();
         user.setId(id);
         user.setDisableDrawings(!enabled);
-        if (role != null) {
-            user.getAttributes().put(DrawingUtil.ATTRIBUTE_USER_ROLE, role);
-        }
-        if (sessionDeviceId != null) {
-            user.getAttributes().put(DrawingUtil.ATTRIBUTE_SESSION_DEVICE_ID, sessionDeviceId);
-        }
         return user;
     }
 
@@ -115,83 +113,82 @@ public class DrawingUtilTest {
     public void testDrawingAccessPolicy() {
         Drawing drawing = new Drawing();
         drawing.setOwnerId(10);
-        drawing.setSessionDeviceId(100L);
+        drawing.setGameSessionId(100L);
 
-        User owner = user(10, "hunter", 100L, true);
-        assertTrue(DrawingUtil.canView(owner, drawing));
-        assertTrue(DrawingUtil.canEdit(owner, drawing));
-        assertTrue(DrawingUtil.canDelete(owner, drawing));
+        User owner = user(10, true);
+        var hunter = member("hunter", 100);
+        assertTrue(DrawingUtil.canView(owner, hunter, drawing));
+        assertTrue(DrawingUtil.canEdit(owner, hunter, drawing));
+        assertTrue(DrawingUtil.canDelete(owner, hunter, drawing));
 
-        User disabledOwner = user(10, "hunter", 100L, false);
-        assertTrue(DrawingUtil.canView(disabledOwner, drawing));
-        assertFalse(DrawingUtil.canEdit(disabledOwner, drawing));
-        assertFalse(DrawingUtil.canDelete(disabledOwner, drawing));
+        User disabledOwner = user(10, false);
+        assertTrue(DrawingUtil.canView(disabledOwner, hunter, drawing));
+        assertFalse(DrawingUtil.canEdit(disabledOwner, hunter, drawing));
+        assertFalse(DrawingUtil.canDelete(disabledOwner, hunter, drawing));
 
-        User unrelated = user(11, "player", 100L, true);
-        assertFalse(DrawingUtil.canView(unrelated, drawing));
-        assertFalse(DrawingUtil.canEdit(unrelated, drawing));
+        User unrelated = user(11, true);
+        assertFalse(DrawingUtil.canView(unrelated, member("player", 100), drawing));
+        assertFalse(DrawingUtil.canEdit(unrelated, member("player", 100), drawing));
 
-        User spectator = user(12, "spectator", 100L, false);
-        assertTrue(DrawingUtil.canView(spectator, drawing));
-        assertFalse(DrawingUtil.canCreateOrEdit(spectator));
-        assertFalse(DrawingUtil.canEdit(spectator, drawing));
+        User spectator = user(12, false);
+        var watching = member("spectator", 100);
+        assertTrue(DrawingUtil.canView(spectator, watching, drawing));
+        assertFalse(DrawingUtil.canCreateOrEdit(spectator, watching));
+        assertFalse(DrawingUtil.canEdit(spectator, watching, drawing));
+        assertFalse(DrawingUtil.canView(user(13, false), member("spectator", 101), drawing));
+        // An account without membership is no spectator, whatever its attributes say.
+        User marked = user(14, true);
+        marked.getAttributes().put("traccarToolUserRole", "spectator");
+        marked.getAttributes().put("traccarToolSessionDeviceId", 100);
+        assertFalse(DrawingUtil.canView(marked, null, drawing));
+        assertTrue(DrawingUtil.canCreateOrEdit(marked, null));
 
-        User otherSpectator = user(13, "spectator", 101L, false);
-        assertFalse(DrawingUtil.canView(otherSpectator, drawing));
-        User unscopedSpectator = user(14, "spectator", null, false);
-        assertFalse(DrawingUtil.canView(unscopedSpectator, drawing));
-
-        User administrator = user(15, null, null, false);
+        User administrator = user(15, false);
         administrator.setAdministrator(true);
-        assertTrue(DrawingUtil.canView(administrator, drawing));
-        assertTrue(DrawingUtil.canCreateOrEdit(administrator));
-        assertFalse(DrawingUtil.canEdit(administrator, drawing));
-        assertTrue(DrawingUtil.canDelete(administrator, drawing));
+        assertTrue(DrawingUtil.canView(administrator, null, drawing));
+        assertTrue(DrawingUtil.canCreateOrEdit(administrator, null));
+        assertFalse(DrawingUtil.canEdit(administrator, null, drawing));
+        assertTrue(DrawingUtil.canDelete(administrator, null, drawing));
     }
 
     @Test
     public void testSharingIsSameRoleSameSessionAndRequiresBothAccounts() {
         for (String role : new String[] {"player", "supporter", "hunter"}) {
-            User owner = user(10, role, 100L, true);
-            User peer = user(11, role, 100L, true);
+            User owner = user(10, true);
+            User peer = user(11, true);
+            var ownerMember = member(role, 100);
+            var peerMember = member(role, 100);
             Drawing drawing = new Drawing();
             drawing.setOwnerId(10);
-            drawing.setSessionDeviceId(100L);
+            drawing.setGameSessionId(100L);
             owner.getAttributes().put(DrawingUtil.ATTRIBUTE_SHARE_GROUP_DRAWINGS, true);
-            assertFalse(DrawingUtil.canView(peer, drawing, owner));
+            assertFalse(DrawingUtil.canView(peer, peerMember, drawing, owner, ownerMember));
             peer.getAttributes().put(DrawingUtil.ATTRIBUTE_SHARE_GROUP_DRAWINGS, true);
-            assertTrue(DrawingUtil.canView(peer, drawing, owner));
-            assertTrue(DrawingUtil.canEdit(peer, drawing, owner));
-            assertTrue(DrawingUtil.canDelete(peer, drawing, owner));
-            assertFalse(DrawingUtil.canEdit(peer, drawing, null));
+            assertTrue(DrawingUtil.canView(peer, peerMember, drawing, owner, ownerMember));
+            assertTrue(DrawingUtil.canEdit(peer, peerMember, drawing, owner, ownerMember));
+            assertTrue(DrawingUtil.canDelete(peer, peerMember, drawing, owner, ownerMember));
+            assertFalse(DrawingUtil.canEdit(peer, peerMember, drawing));
+            assertFalse(DrawingUtil.canView(peer, peerMember, drawing, owner, null));
             owner.getAttributes().put(DrawingUtil.ATTRIBUTE_SHARE_GROUP_DRAWINGS, false);
-            assertFalse(DrawingUtil.canView(peer, drawing, owner));
+            assertFalse(DrawingUtil.canView(peer, peerMember, drawing, owner, ownerMember));
             owner.getAttributes().put(DrawingUtil.ATTRIBUTE_SHARE_GROUP_DRAWINGS, "true");
-            assertFalse(DrawingUtil.canView(peer, drawing, owner));
+            assertFalse(DrawingUtil.canView(peer, peerMember, drawing, owner, ownerMember));
             owner.getAttributes().put(DrawingUtil.ATTRIBUTE_SHARE_GROUP_DRAWINGS, true);
             owner.setDisableDrawings(true);
-            assertFalse(DrawingUtil.canView(peer, drawing, owner));
+            assertFalse(DrawingUtil.canView(peer, peerMember, drawing, owner, ownerMember));
             owner.setDisableDrawings(false);
             peer.setDisableDrawings(true);
-            assertFalse(DrawingUtil.canView(peer, drawing, owner));
+            assertFalse(DrawingUtil.canView(peer, peerMember, drawing, owner, ownerMember));
             peer.setDisableDrawings(false);
-            peer.getAttributes().put(DrawingUtil.ATTRIBUTE_SESSION_DEVICE_ID, 101);
-            assertFalse(DrawingUtil.canEdit(peer, drawing, owner));
-            peer.getAttributes().put(DrawingUtil.ATTRIBUTE_SESSION_DEVICE_ID, 100);
-            peer.getAttributes().put(DrawingUtil.ATTRIBUTE_USER_ROLE, "other");
-            assertFalse(DrawingUtil.canView(peer, drawing, owner));
-            peer.getAttributes().put(DrawingUtil.ATTRIBUTE_USER_ROLE, role);
-            drawing.setSessionDeviceId(101L);
-            assertFalse(DrawingUtil.canView(peer, drawing, owner));
-        }
-    }
-
-    @Test
-    public void testInvalidSessionMarkersFailClosed() {
-        User user = user(1, "hunter", null, true);
-        for (Object invalid : new Object[] {true, 100.5, -1, "invalid", "1.0"}) {
-            user.getAttributes().put(DrawingUtil.ATTRIBUTE_SESSION_DEVICE_ID, invalid);
-            assertNull(DrawingUtil.getSessionDeviceId(user));
+            assertFalse(DrawingUtil.canEdit(peer, member(role, 101), drawing, owner, ownerMember));
+            // The spectator sees every drawing of its session, shared or not, and edits none.
+            assertTrue(DrawingUtil.canView(peer, member("spectator", 100), drawing, owner, ownerMember));
+            assertFalse(DrawingUtil.canEdit(peer, member("spectator", 100), drawing, owner, ownerMember));
+            assertFalse(DrawingUtil.canView(peer, null, drawing, owner, ownerMember));
+            drawing.setGameSessionId(101L);
+            assertFalse(DrawingUtil.canView(peer, peerMember, drawing, owner, ownerMember));
+            drawing.setGameSessionId(null);
+            assertFalse(DrawingUtil.canView(peer, peerMember, drawing, owner, ownerMember));
         }
     }
 

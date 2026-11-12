@@ -1,0 +1,943 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<databaseChangeLog xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+  xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-3.4.xsd">
+
+  <!--
+    Game data model 2 (Claude outputs/data-architecture-plan.md).
+
+    Fresh sessions only, without legacy data: every session-scoped game table of model 1 and its rows are dropped,
+    together with model-1 game drawings, and the model-2 schema is created. Only the server-wide lease row
+    (tc_game_controller) stays, so the controller epoch keeps increasing. Traccar resources that model-1 sessions
+    created (generated accounts, mirrors, groups, the hidden state device) are not touched here; the Tool's
+    session cleanup or a fresh development database removes them.
+
+    Included in changelog-master.xml after the model-1 game changelogs (the switchover, step 6). A fresh database
+    runs the model-1 changelogs first and drops their tables here.
+
+    Rules of this schema:
+    - Constraint and index names use the gm prefix.
+    - Foreign keys between game tables have no referential action. Deleting a session deletes its rows in
+      dependency order. MySQL forbids CHECK constraints on columns that a referential action uses, and the
+      cross-table rules below need CHECK constraints on member, entry and run references.
+    - Foreign keys to Traccar tables (users, devices, groups, geofences) use SET NULL for bindings, which a
+      reconciler restores, and CASCADE for access rows. No CHECK uses those columns.
+    - References inside a session are composite (gamesessionid, id), so a row can never point into another session.
+    - "At most one active X" uses a nullable marker column under an ordinary unique constraint: the marker equals
+      the key while the row is active and is null otherwise. MySQL has no partial indexes.
+    - Member bindings are current state: retiring a member clears its account and tracker, so plain unique
+      constraints apply. History keeps label snapshots.
+    - Timestamps are UTC DATETIME(3), written and read as LocalDateTime at UTC (GameTime).
+  -->
+
+  <changeSet author="traccar-tool" id="game-model-2-drop-model-1">
+    <!-- Children first: MySQL ignores DROP TABLE ... CASCADE, so foreign keys decide the order. -->
+    <dropTable tableName="tc_game_push_outbox" />
+    <dropTable tableName="tc_game_deliveries" />
+    <dropTable tableName="tc_game_joker_ledger" />
+    <dropTable tableName="tc_game_joker_reservations" />
+    <dropTable tableName="tc_game_jokers" />
+    <dropTable tableName="tc_game_requests" />
+    <dropTable tableName="tc_game_session_status" />
+    <dropTable tableName="tc_game_controller_history" />
+    <dropTable tableName="tc_game_notifications" />
+    <dropTable tableName="tc_game_proximity_grants" />
+    <dropTable tableName="tc_game_proximity_circles" />
+    <dropTable tableName="tc_game_proximity_state" />
+    <dropTable tableName="tc_game_timetable_entries" />
+    <dropTable tableName="tc_game_timetables" />
+    <dropTable tableName="tc_game_session_logs" />
+    <dropTable tableName="tc_game_geofence_plans" />
+    <dropTable tableName="tc_game_session_credentials" />
+    <dropTable tableName="tc_game_session_members" />
+
+    <!-- The lease row stays, so the controller epoch keeps increasing; it is re-pointed at model-2 sessions below. -->
+    <dropForeignKeyConstraint baseTableName="tc_game_controller" constraintName="fk_game_controller_session" />
+    <update tableName="tc_game_controller">
+      <column name="gamesessionid" valueComputed="NULL" />
+    </update>
+    <dropTable tableName="tc_game_sessions" />
+
+    <!-- Game drawings belonged to model-1 sessions; drawings of ordinary accounts stay. -->
+    <delete tableName="tc_drawings">
+      <where>sessiondeviceid IS NOT NULL</where>
+    </delete>
+    <dropForeignKeyConstraint baseTableName="tc_drawings" constraintName="fk_drawings_sessiondeviceid" />
+    <dropColumn tableName="tc_drawings" columnName="sessiondeviceid" />
+  </changeSet>
+
+  <!-- Session identity, configuration and internal documents. -->
+  <changeSet author="traccar-tool" id="game-model-2-sessions">
+    <createTable tableName="tc_game_sessions">
+      <column name="id" type="BIGINT" autoIncrement="true">
+        <constraints primaryKey="true" primaryKeyName="pk_gm_sessions" nullable="false" />
+      </column>
+      <column name="name" type="VARCHAR(128)"><constraints nullable="false" /></column>
+      <column name="schemaversion" type="INT"><constraints nullable="false" /></column>
+      <column name="revision" type="BIGINT"><constraints nullable="false" /></column>
+      <column name="createdat" type="DATETIME(3)"><constraints nullable="false" /></column>
+      <column name="updatedat" type="DATETIME(3)"><constraints nullable="false" /></column>
+    </createTable>
+    <addUniqueConstraint tableName="tc_game_sessions" columnNames="name" constraintName="uq_gm_sessions_name" />
+
+    <createTable tableName="tc_game_session_settings">
+      <column name="gamesessionid" type="BIGINT">
+        <constraints primaryKey="true" primaryKeyName="pk_gm_session_settings" nullable="false" />
+      </column>
+      <column name="schemaversion" type="INT"><constraints nullable="false" /></column>
+      <column name="revision" type="BIGINT"><constraints nullable="false" /></column>
+      <column name="settings" type="CLOB"><constraints nullable="false" /></column>
+      <column name="updatedat" type="DATETIME(3)"><constraints nullable="false" /></column>
+    </createTable>
+    <addForeignKeyConstraint baseTableName="tc_game_session_settings" baseColumnNames="gamesessionid"
+      referencedTableName="tc_game_sessions" referencedColumnNames="id" constraintName="fk_gm_settings_session" />
+
+    <createTable tableName="tc_game_session_credentials">
+      <column name="gamesessionid" type="BIGINT">
+        <constraints primaryKey="true" primaryKeyName="pk_gm_session_credentials" nullable="false" />
+      </column>
+      <column name="revision" type="BIGINT"><constraints nullable="false" /></column>
+      <column name="ciphertext" type="CLOB"><constraints nullable="false" /></column>
+    </createTable>
+    <addForeignKeyConstraint baseTableName="tc_game_session_credentials" baseColumnNames="gamesessionid"
+      referencedTableName="tc_game_sessions" referencedColumnNames="id" constraintName="fk_gm_credentials_session" />
+
+    <createTable tableName="tc_game_session_checkpoints">
+      <column name="gamesessionid" type="BIGINT"><constraints nullable="false" /></column>
+      <column name="component" type="VARCHAR(32)"><constraints nullable="false" /></column>
+      <column name="schemaversion" type="INT"><constraints nullable="false" /></column>
+      <column name="revision" type="BIGINT"><constraints nullable="false" /></column>
+      <column name="document" type="CLOB"><constraints nullable="false" /></column>
+      <column name="updatedat" type="DATETIME(3)"><constraints nullable="false" /></column>
+    </createTable>
+    <addPrimaryKey tableName="tc_game_session_checkpoints" columnNames="gamesessionid,component"
+      constraintName="pk_gm_session_checkpoints" />
+    <addForeignKeyConstraint baseTableName="tc_game_session_checkpoints" baseColumnNames="gamesessionid"
+      referencedTableName="tc_game_sessions" referencedColumnNames="id" constraintName="fk_gm_checkpoints_session" />
+
+    <createTable tableName="tc_game_session_logs">
+      <column name="id" type="BIGINT" autoIncrement="true">
+        <constraints primaryKey="true" primaryKeyName="pk_gm_session_logs" nullable="false" />
+      </column>
+      <column name="gamesessionid" type="BIGINT"><constraints nullable="false" /></column>
+      <column name="category" type="VARCHAR(32)"><constraints nullable="false" /></column>
+      <column name="occurredat" type="DATETIME(3)"><constraints nullable="false" /></column>
+      <column name="message" type="TEXT"><constraints nullable="false" /></column>
+    </createTable>
+    <addForeignKeyConstraint baseTableName="tc_game_session_logs" baseColumnNames="gamesessionid"
+      referencedTableName="tc_game_sessions" referencedColumnNames="id" constraintName="fk_gm_logs_session" />
+    <createIndex tableName="tc_game_session_logs" indexName="idx_gm_logs_session">
+      <column name="gamesessionid" /><column name="id" />
+    </createIndex>
+
+    <!-- The lease points at the executing session of model 2. -->
+    <addForeignKeyConstraint baseTableName="tc_game_controller" baseColumnNames="gamesessionid"
+      referencedTableName="tc_game_sessions" referencedColumnNames="id" constraintName="fk_gm_controller_session"
+      onDelete="SET NULL" />
+
+    <createTable tableName="tc_game_controller_history">
+      <column name="id" type="BIGINT" autoIncrement="true">
+        <constraints primaryKey="true" primaryKeyName="pk_gm_controller_history" nullable="false" />
+      </column>
+      <column name="epoch" type="BIGINT"><constraints nullable="false" /></column>
+      <column name="event" type="VARCHAR(32)"><constraints nullable="false" /></column>
+      <column name="userid" type="INT" />
+      <column name="userlabel" type="VARCHAR(128)" />
+      <column name="instanceid" type="VARCHAR(64)" />
+      <column name="label" type="VARCHAR(128)" />
+      <column name="gamesessionid" type="BIGINT" />
+      <column name="detail" type="VARCHAR(512)" />
+      <column name="occurredat" type="DATETIME(3)"><constraints nullable="false" /></column>
+    </createTable>
+    <createIndex tableName="tc_game_controller_history" indexName="idx_gm_controller_history_event">
+      <column name="event" /><column name="id" />
+    </createIndex>
+    <addForeignKeyConstraint baseTableName="tc_game_controller_history" baseColumnNames="userid"
+      referencedTableName="tc_users" referencedColumnNames="id" constraintName="fk_gm_controller_history_user"
+      onDelete="SET NULL" />
+    <addForeignKeyConstraint baseTableName="tc_game_controller_history" baseColumnNames="gamesessionid"
+      referencedTableName="tc_game_sessions" referencedColumnNames="id"
+      constraintName="fk_gm_controller_history_session" onDelete="SET NULL" />
+
+    <addColumn tableName="tc_drawings">
+      <column name="gamesessionid" type="BIGINT" />
+    </addColumn>
+    <addForeignKeyConstraint baseTableName="tc_drawings" baseColumnNames="gamesessionid"
+      referencedTableName="tc_game_sessions" referencedColumnNames="id" constraintName="fk_gm_drawings_session"
+      onDelete="CASCADE" />
+  </changeSet>
+
+  <!-- Members and the Traccar resources a session owns. -->
+  <changeSet author="traccar-tool" id="game-model-2-members">
+    <createTable tableName="tc_game_session_members">
+      <column name="id" type="BIGINT" autoIncrement="true">
+        <constraints primaryKey="true" primaryKeyName="pk_gm_members" nullable="false" />
+      </column>
+      <column name="gamesessionid" type="BIGINT"><constraints nullable="false" /></column>
+      <column name="role" type="VARCHAR(16)"><constraints nullable="false" /></column>
+      <column name="number" type="INT"><constraints nullable="false" /></column>
+      <column name="displayname" type="VARCHAR(128)"><constraints nullable="false" /></column>
+      <column name="userid" type="INT" />
+      <column name="trackerid" type="INT" />
+      <column name="state" type="VARCHAR(16)"><constraints nullable="false" /></column>
+      <column name="createdat" type="DATETIME(3)"><constraints nullable="false" /></column>
+      <column name="retiredat" type="DATETIME(3)" />
+    </createTable>
+    <addUniqueConstraint tableName="tc_game_session_members" columnNames="gamesessionid,id"
+      constraintName="uq_gm_members_session_id" />
+    <!-- Numbers are never reused, also after retirement; the spectator is always number 1. -->
+    <addUniqueConstraint tableName="tc_game_session_members" columnNames="gamesessionid,role,number"
+      constraintName="uq_gm_members_number" />
+    <!-- An account is bound in at most one session; a tracker at most once per session. -->
+    <addUniqueConstraint tableName="tc_game_session_members" columnNames="userid" constraintName="uq_gm_members_user" />
+    <addUniqueConstraint tableName="tc_game_session_members" columnNames="gamesessionid,trackerid"
+      constraintName="uq_gm_members_tracker" />
+    <addForeignKeyConstraint baseTableName="tc_game_session_members" baseColumnNames="gamesessionid"
+      referencedTableName="tc_game_sessions" referencedColumnNames="id" constraintName="fk_gm_members_session" />
+    <addForeignKeyConstraint baseTableName="tc_game_session_members" baseColumnNames="userid"
+      referencedTableName="tc_users" referencedColumnNames="id" constraintName="fk_gm_members_user"
+      onDelete="SET NULL" />
+    <addForeignKeyConstraint baseTableName="tc_game_session_members" baseColumnNames="trackerid"
+      referencedTableName="tc_devices" referencedColumnNames="id" constraintName="fk_gm_members_tracker"
+      onDelete="SET NULL" />
+
+    <createTable tableName="tc_game_mirrors">
+      <column name="id" type="BIGINT" autoIncrement="true">
+        <constraints primaryKey="true" primaryKeyName="pk_gm_mirrors" nullable="false" />
+      </column>
+      <column name="gamesessionid" type="BIGINT"><constraints nullable="false" /></column>
+      <column name="deviceid" type="INT" />
+      <column name="sourcememberid" type="BIGINT"><constraints nullable="false" /></column>
+      <column name="destinationrole" type="VARCHAR(16)" />
+      <column name="destinationmemberid" type="BIGINT" />
+      <column name="state" type="VARCHAR(16)"><constraints nullable="false" /></column>
+    </createTable>
+    <addUniqueConstraint tableName="tc_game_mirrors" columnNames="deviceid" constraintName="uq_gm_mirrors_device" />
+    <addUniqueConstraint tableName="tc_game_mirrors" columnNames="sourcememberid,destinationrole"
+      constraintName="uq_gm_mirrors_role" />
+    <addUniqueConstraint tableName="tc_game_mirrors" columnNames="sourcememberid,destinationmemberid"
+      constraintName="uq_gm_mirrors_member" />
+    <addForeignKeyConstraint baseTableName="tc_game_mirrors" baseColumnNames="gamesessionid"
+      referencedTableName="tc_game_sessions" referencedColumnNames="id" constraintName="fk_gm_mirrors_session" />
+    <addForeignKeyConstraint baseTableName="tc_game_mirrors" baseColumnNames="deviceid"
+      referencedTableName="tc_devices" referencedColumnNames="id" constraintName="fk_gm_mirrors_device"
+      onDelete="SET NULL" />
+    <addForeignKeyConstraint baseTableName="tc_game_mirrors" baseColumnNames="gamesessionid,sourcememberid"
+      referencedTableName="tc_game_session_members" referencedColumnNames="gamesessionid,id"
+      constraintName="fk_gm_mirrors_source" />
+    <addForeignKeyConstraint baseTableName="tc_game_mirrors" baseColumnNames="gamesessionid,destinationmemberid"
+      referencedTableName="tc_game_session_members" referencedColumnNames="gamesessionid,id"
+      constraintName="fk_gm_mirrors_destination" />
+
+    <createTable tableName="tc_game_session_groups">
+      <column name="id" type="BIGINT" autoIncrement="true">
+        <constraints primaryKey="true" primaryKeyName="pk_gm_session_groups" nullable="false" />
+      </column>
+      <column name="gamesessionid" type="BIGINT"><constraints nullable="false" /></column>
+      <column name="groupid" type="INT" />
+      <column name="purpose" type="VARCHAR(32)"><constraints nullable="false" /></column>
+      <column name="memberid" type="BIGINT" />
+      <column name="state" type="VARCHAR(16)"><constraints nullable="false" /></column>
+    </createTable>
+    <addUniqueConstraint tableName="tc_game_session_groups" columnNames="groupid" constraintName="uq_gm_groups_group" />
+    <addUniqueConstraint tableName="tc_game_session_groups" columnNames="gamesessionid,purpose,memberid"
+      constraintName="uq_gm_groups_purpose" />
+    <addForeignKeyConstraint baseTableName="tc_game_session_groups" baseColumnNames="gamesessionid"
+      referencedTableName="tc_game_sessions" referencedColumnNames="id" constraintName="fk_gm_groups_session" />
+    <addForeignKeyConstraint baseTableName="tc_game_session_groups" baseColumnNames="groupid"
+      referencedTableName="tc_groups" referencedColumnNames="id" constraintName="fk_gm_groups_group"
+      onDelete="SET NULL" />
+    <addForeignKeyConstraint baseTableName="tc_game_session_groups" baseColumnNames="gamesessionid,memberid"
+      referencedTableName="tc_game_session_members" referencedColumnNames="gamesessionid,id"
+      constraintName="fk_gm_groups_member" />
+
+    <createTable tableName="tc_game_geofence_plans">
+      <column name="gamesessionid" type="BIGINT">
+        <constraints primaryKey="true" primaryKeyName="pk_gm_geofence_plans" nullable="false" />
+      </column>
+      <column name="revision" type="BIGINT"><constraints nullable="false" /></column>
+      <column name="data" type="CLOB"><constraints nullable="false" /></column>
+      <column name="updatedat" type="DATETIME(3)"><constraints nullable="false" /></column>
+    </createTable>
+    <addForeignKeyConstraint baseTableName="tc_game_geofence_plans" baseColumnNames="gamesessionid"
+      referencedTableName="tc_game_sessions" referencedColumnNames="id" constraintName="fk_gm_geofence_plans_session" />
+
+    <createTable tableName="tc_game_session_geofences">
+      <column name="id" type="BIGINT" autoIncrement="true">
+        <constraints primaryKey="true" primaryKeyName="pk_gm_session_geofences" nullable="false" />
+      </column>
+      <column name="gamesessionid" type="BIGINT"><constraints nullable="false" /></column>
+      <column name="geofenceid" type="INT" />
+      <column name="plankey" type="VARCHAR(128)"><constraints nullable="false" /></column>
+      <column name="purpose" type="VARCHAR(32)"><constraints nullable="false" /></column>
+      <column name="state" type="VARCHAR(16)"><constraints nullable="false" /></column>
+    </createTable>
+    <addUniqueConstraint tableName="tc_game_session_geofences" columnNames="geofenceid"
+      constraintName="uq_gm_geofences_geofence" />
+    <addUniqueConstraint tableName="tc_game_session_geofences" columnNames="gamesessionid,plankey"
+      constraintName="uq_gm_geofences_plan" />
+    <addForeignKeyConstraint baseTableName="tc_game_session_geofences" baseColumnNames="gamesessionid"
+      referencedTableName="tc_game_sessions" referencedColumnNames="id" constraintName="fk_gm_geofences_session" />
+    <addForeignKeyConstraint baseTableName="tc_game_session_geofences" baseColumnNames="geofenceid"
+      referencedTableName="tc_geofences" referencedColumnNames="id" constraintName="fk_gm_geofences_geofence"
+      onDelete="SET NULL" />
+  </changeSet>
+
+  <!-- Timetables, requests and joker accounting. -->
+  <changeSet author="traccar-tool" id="game-model-2-requests">
+    <createTable tableName="tc_game_timetables">
+      <column name="gamesessionid" type="BIGINT">
+        <constraints primaryKey="true" primaryKeyName="pk_gm_timetables" nullable="false" />
+      </column>
+      <column name="revision" type="BIGINT"><constraints nullable="false" /></column>
+      <column name="headers" type="CLOB"><constraints nullable="false" /></column>
+      <column name="source" type="CLOB"><constraints nullable="false" /></column>
+      <column name="updatedat" type="DATETIME(3)"><constraints nullable="false" /></column>
+    </createTable>
+    <addForeignKeyConstraint baseTableName="tc_game_timetables" baseColumnNames="gamesessionid"
+      referencedTableName="tc_game_sessions" referencedColumnNames="id" constraintName="fk_gm_timetables_session" />
+
+    <createTable tableName="tc_game_timetable_entries">
+      <column name="id" type="BIGINT" autoIncrement="true">
+        <constraints primaryKey="true" primaryKeyName="pk_gm_timetable_entries" nullable="false" />
+      </column>
+      <column name="gamesessionid" type="BIGINT"><constraints nullable="false" /></column>
+      <column name="memberid" type="BIGINT"><constraints nullable="false" /></column>
+      <column name="scheduledat" type="DATETIME(3)"><constraints nullable="false" /></column>
+      <column name="content" type="VARCHAR(512)"><constraints nullable="false" /></column>
+      <column name="active" type="BOOLEAN"><constraints nullable="false" /></column>
+      <column name="revision" type="BIGINT"><constraints nullable="false" /></column>
+      <column name="status" type="VARCHAR(16)"><constraints nullable="false" /></column>
+      <column name="statusat" type="DATETIME(3)" />
+    </createTable>
+    <addUniqueConstraint tableName="tc_game_timetable_entries" columnNames="gamesessionid,id"
+      constraintName="uq_gm_entries_session_id" />
+    <addUniqueConstraint tableName="tc_game_timetable_entries" columnNames="gamesessionid,scheduledat,memberid"
+      constraintName="uq_gm_entries_slot" />
+    <addForeignKeyConstraint baseTableName="tc_game_timetable_entries" baseColumnNames="gamesessionid"
+      referencedTableName="tc_game_sessions" referencedColumnNames="id" constraintName="fk_gm_entries_session" />
+    <addForeignKeyConstraint baseTableName="tc_game_timetable_entries" baseColumnNames="gamesessionid,memberid"
+      referencedTableName="tc_game_session_members" referencedColumnNames="gamesessionid,id"
+      constraintName="fk_gm_entries_member" />
+    <createIndex tableName="tc_game_timetable_entries" indexName="idx_gm_entries_due">
+      <column name="gamesessionid" /><column name="active" /><column name="scheduledat" />
+    </createIndex>
+
+    <createTable tableName="tc_game_requests">
+      <column name="id" type="BIGINT" autoIncrement="true">
+        <constraints primaryKey="true" primaryKeyName="pk_gm_requests" nullable="false" />
+      </column>
+      <column name="gamesessionid" type="BIGINT"><constraints nullable="false" /></column>
+      <column name="type" type="VARCHAR(32)"><constraints nullable="false" /></column>
+      <column name="requestermemberid" type="BIGINT" />
+      <column name="requesterlabel" type="VARCHAR(128)" />
+      <column name="requesterrole" type="VARCHAR(16)"><constraints nullable="false" /></column>
+      <column name="targetmemberid" type="BIGINT" />
+      <column name="targetlabel" type="VARCHAR(128)" />
+      <column name="baserevision" type="BIGINT" />
+      <column name="parameters" type="VARCHAR(1024)"><constraints nullable="false" /></column>
+      <column name="status" type="VARCHAR(16)"><constraints nullable="false" /></column>
+      <column name="approvalrequired" type="BOOLEAN" />
+      <column name="message" type="VARCHAR(512)" />
+      <column name="detail" type="VARCHAR(512)" />
+      <column name="epoch" type="BIGINT" />
+      <column name="createdat" type="DATETIME(3)"><constraints nullable="false" /></column>
+      <column name="expiresat" type="DATETIME(3)"><constraints nullable="false" /></column>
+      <column name="decidedat" type="DATETIME(3)" />
+      <column name="completedat" type="DATETIME(3)" />
+      <column name="updatedat" type="DATETIME(3)"><constraints nullable="false" /></column>
+    </createTable>
+    <addUniqueConstraint tableName="tc_game_requests" columnNames="gamesessionid,id"
+      constraintName="uq_gm_requests_session_id" />
+    <addForeignKeyConstraint baseTableName="tc_game_requests" baseColumnNames="gamesessionid"
+      referencedTableName="tc_game_sessions" referencedColumnNames="id" constraintName="fk_gm_requests_session" />
+    <addForeignKeyConstraint baseTableName="tc_game_requests" baseColumnNames="gamesessionid,requestermemberid"
+      referencedTableName="tc_game_session_members" referencedColumnNames="gamesessionid,id"
+      constraintName="fk_gm_requests_requester" />
+    <addForeignKeyConstraint baseTableName="tc_game_requests" baseColumnNames="gamesessionid,targetmemberid"
+      referencedTableName="tc_game_session_members" referencedColumnNames="gamesessionid,id"
+      constraintName="fk_gm_requests_target" />
+    <createIndex tableName="tc_game_requests" indexName="idx_gm_requests_session_status">
+      <column name="gamesessionid" /><column name="status" />
+    </createIndex>
+    <createIndex tableName="tc_game_requests" indexName="idx_gm_requests_status_expiry">
+      <column name="status" /><column name="expiresat" />
+    </createIndex>
+
+    <!-- Jokers that members hold. -->
+    <createTable tableName="tc_game_jokers">
+      <column name="gamesessionid" type="BIGINT"><constraints nullable="false" /></column>
+      <column name="memberid" type="BIGINT"><constraints nullable="false" /></column>
+      <column name="type" type="VARCHAR(32)"><constraints nullable="false" /></column>
+      <column name="granted" type="INT"><constraints nullable="false" /></column>
+      <column name="used" type="INT"><constraints nullable="false" /></column>
+      <column name="updatedat" type="DATETIME(3)"><constraints nullable="false" /></column>
+    </createTable>
+    <addPrimaryKey tableName="tc_game_jokers" columnNames="gamesessionid,memberid,type" constraintName="pk_gm_jokers" />
+    <addForeignKeyConstraint baseTableName="tc_game_jokers" baseColumnNames="gamesessionid"
+      referencedTableName="tc_game_sessions" referencedColumnNames="id" constraintName="fk_gm_jokers_session" />
+    <addForeignKeyConstraint baseTableName="tc_game_jokers" baseColumnNames="gamesessionid,memberid"
+      referencedTableName="tc_game_session_members" referencedColumnNames="gamesessionid,id"
+      constraintName="fk_gm_jokers_member" />
+
+    <!-- The hunters' shared pool: one row per session and pool type. -->
+    <createTable tableName="tc_game_joker_pools">
+      <column name="gamesessionid" type="BIGINT"><constraints nullable="false" /></column>
+      <column name="type" type="VARCHAR(32)"><constraints nullable="false" /></column>
+      <column name="granted" type="INT"><constraints nullable="false" /></column>
+      <column name="used" type="INT"><constraints nullable="false" /></column>
+      <column name="updatedat" type="DATETIME(3)"><constraints nullable="false" /></column>
+    </createTable>
+    <addPrimaryKey tableName="tc_game_joker_pools" columnNames="gamesessionid,type" constraintName="pk_gm_joker_pools" />
+    <addForeignKeyConstraint baseTableName="tc_game_joker_pools" baseColumnNames="gamesessionid"
+      referencedTableName="tc_game_sessions" referencedColumnNames="id" constraintName="fk_gm_joker_pools_session" />
+
+    <!-- Accounting only: the plan of a fake or a planned break lives in its own table. -->
+    <createTable tableName="tc_game_joker_reservations">
+      <column name="id" type="BIGINT" autoIncrement="true">
+        <constraints primaryKey="true" primaryKeyName="pk_gm_joker_reservations" nullable="false" />
+      </column>
+      <column name="gamesessionid" type="BIGINT"><constraints nullable="false" /></column>
+      <column name="memberid" type="BIGINT" />
+      <column name="type" type="VARCHAR(32)"><constraints nullable="false" /></column>
+      <column name="requestid" type="BIGINT" />
+      <column name="status" type="VARCHAR(16)"><constraints nullable="false" /></column>
+      <column name="overallocated" type="BOOLEAN"><constraints nullable="false" /></column>
+      <column name="createdat" type="DATETIME(3)"><constraints nullable="false" /></column>
+      <column name="updatedat" type="DATETIME(3)"><constraints nullable="false" /></column>
+    </createTable>
+    <addUniqueConstraint tableName="tc_game_joker_reservations" columnNames="gamesessionid,id"
+      constraintName="uq_gm_reservations_session_id" />
+    <addForeignKeyConstraint baseTableName="tc_game_joker_reservations" baseColumnNames="gamesessionid"
+      referencedTableName="tc_game_sessions" referencedColumnNames="id" constraintName="fk_gm_reservations_session" />
+    <addForeignKeyConstraint baseTableName="tc_game_joker_reservations" baseColumnNames="gamesessionid,memberid"
+      referencedTableName="tc_game_session_members" referencedColumnNames="gamesessionid,id"
+      constraintName="fk_gm_reservations_member" />
+    <addForeignKeyConstraint baseTableName="tc_game_joker_reservations" baseColumnNames="gamesessionid,requestid"
+      referencedTableName="tc_game_requests" referencedColumnNames="gamesessionid,id"
+      constraintName="fk_gm_reservations_request" />
+    <createIndex tableName="tc_game_joker_reservations" indexName="idx_gm_reservations_status">
+      <column name="gamesessionid" /><column name="status" />
+    </createIndex>
+
+    <createTable tableName="tc_game_joker_ledger">
+      <column name="id" type="BIGINT" autoIncrement="true">
+        <constraints primaryKey="true" primaryKeyName="pk_gm_joker_ledger" nullable="false" />
+      </column>
+      <column name="gamesessionid" type="BIGINT"><constraints nullable="false" /></column>
+      <column name="memberid" type="BIGINT" />
+      <column name="type" type="VARCHAR(32)"><constraints nullable="false" /></column>
+      <column name="kind" type="VARCHAR(16)"><constraints nullable="false" /></column>
+      <column name="quantity" type="INT"><constraints nullable="false" /></column>
+      <column name="requestid" type="BIGINT" />
+      <column name="reservationid" type="BIGINT" />
+      <column name="actor" type="VARCHAR(128)" />
+      <column name="detail" type="VARCHAR(512)" />
+      <column name="occurredat" type="DATETIME(3)"><constraints nullable="false" /></column>
+    </createTable>
+    <addForeignKeyConstraint baseTableName="tc_game_joker_ledger" baseColumnNames="gamesessionid"
+      referencedTableName="tc_game_sessions" referencedColumnNames="id" constraintName="fk_gm_ledger_session" />
+    <addForeignKeyConstraint baseTableName="tc_game_joker_ledger" baseColumnNames="gamesessionid,memberid"
+      referencedTableName="tc_game_session_members" referencedColumnNames="gamesessionid,id"
+      constraintName="fk_gm_ledger_member" />
+    <addForeignKeyConstraint baseTableName="tc_game_joker_ledger" baseColumnNames="gamesessionid,requestid"
+      referencedTableName="tc_game_requests" referencedColumnNames="gamesessionid,id"
+      constraintName="fk_gm_ledger_request" />
+    <addForeignKeyConstraint baseTableName="tc_game_joker_ledger" baseColumnNames="gamesessionid,reservationid"
+      referencedTableName="tc_game_joker_reservations" referencedColumnNames="gamesessionid,id"
+      constraintName="fk_gm_ledger_reservation" />
+    <createIndex tableName="tc_game_joker_ledger" indexName="idx_gm_ledger_session">
+      <column name="gamesessionid" /><column name="id" />
+    </createIndex>
+  </changeSet>
+
+  <!-- Current game state and operations. -->
+  <changeSet author="traccar-tool" id="game-model-2-state">
+    <!-- Lock target and revision of one player or supporter; hunter requests carry the revision. -->
+    <createTable tableName="tc_game_member_state">
+      <column name="memberid" type="BIGINT">
+        <constraints primaryKey="true" primaryKeyName="pk_gm_member_state" nullable="false" />
+      </column>
+      <column name="gamesessionid" type="BIGINT"><constraints nullable="false" /></column>
+      <column name="revision" type="BIGINT"><constraints nullable="false" /></column>
+      <column name="updatedat" type="DATETIME(3)"><constraints nullable="false" /></column>
+    </createTable>
+    <addForeignKeyConstraint baseTableName="tc_game_member_state" baseColumnNames="gamesessionid"
+      referencedTableName="tc_game_sessions" referencedColumnNames="id" constraintName="fk_gm_member_state_session" />
+    <addForeignKeyConstraint baseTableName="tc_game_member_state" baseColumnNames="gamesessionid,memberid"
+      referencedTableName="tc_game_session_members" referencedColumnNames="gamesessionid,id"
+      constraintName="fk_gm_member_state_member" />
+
+    <createTable tableName="tc_game_catches">
+      <column name="id" type="BIGINT" autoIncrement="true">
+        <constraints primaryKey="true" primaryKeyName="pk_gm_catches" nullable="false" />
+      </column>
+      <column name="gamesessionid" type="BIGINT"><constraints nullable="false" /></column>
+      <column name="memberid" type="BIGINT"><constraints nullable="false" /></column>
+      <column name="caughtat" type="DATETIME(3)"><constraints nullable="false" /></column>
+      <column name="releasedat" type="DATETIME(3)" />
+      <column name="activememberid" type="BIGINT" />
+      <column name="actor" type="VARCHAR(128)" />
+    </createTable>
+    <addUniqueConstraint tableName="tc_game_catches" columnNames="activememberid" constraintName="uq_gm_catches_active" />
+    <addForeignKeyConstraint baseTableName="tc_game_catches" baseColumnNames="gamesessionid"
+      referencedTableName="tc_game_sessions" referencedColumnNames="id" constraintName="fk_gm_catches_session" />
+    <addForeignKeyConstraint baseTableName="tc_game_catches" baseColumnNames="gamesessionid,memberid"
+      referencedTableName="tc_game_session_members" referencedColumnNames="gamesessionid,id"
+      constraintName="fk_gm_catches_member" />
+    <createIndex tableName="tc_game_catches" indexName="idx_gm_catches_member">
+      <column name="gamesessionid" /><column name="memberid" /><column name="caughtat" />
+    </createIndex>
+
+    <createTable tableName="tc_game_speedhunts">
+      <column name="id" type="BIGINT" autoIncrement="true">
+        <constraints primaryKey="true" primaryKeyName="pk_gm_speedhunts" nullable="false" />
+      </column>
+      <column name="gamesessionid" type="BIGINT"><constraints nullable="false" /></column>
+      <column name="targetmemberid" type="BIGINT"><constraints nullable="false" /></column>
+      <column name="tohunters" type="BOOLEAN"><constraints nullable="false" /></column>
+      <column name="toplayers" type="BOOLEAN"><constraints nullable="false" /></column>
+      <column name="tosupporters" type="BOOLEAN"><constraints nullable="false" /></column>
+      <column name="startedat" type="DATETIME(3)"><constraints nullable="false" /></column>
+      <column name="endedat" type="DATETIME(3)" />
+      <column name="outcome" type="VARCHAR(16)" />
+      <column name="reason" type="VARCHAR(512)" />
+      <column name="startedby" type="VARCHAR(128)" />
+      <column name="requestid" type="BIGINT" />
+      <column name="reservationid" type="BIGINT" />
+      <column name="activememberid" type="BIGINT" />
+    </createTable>
+    <addUniqueConstraint tableName="tc_game_speedhunts" columnNames="gamesessionid,id"
+      constraintName="uq_gm_speedhunts_session_id" />
+    <addUniqueConstraint tableName="tc_game_speedhunts" columnNames="activememberid"
+      constraintName="uq_gm_speedhunts_active" />
+    <addForeignKeyConstraint baseTableName="tc_game_speedhunts" baseColumnNames="gamesessionid"
+      referencedTableName="tc_game_sessions" referencedColumnNames="id" constraintName="fk_gm_speedhunts_session" />
+    <addForeignKeyConstraint baseTableName="tc_game_speedhunts" baseColumnNames="gamesessionid,targetmemberid"
+      referencedTableName="tc_game_session_members" referencedColumnNames="gamesessionid,id"
+      constraintName="fk_gm_speedhunts_target" />
+    <addForeignKeyConstraint baseTableName="tc_game_speedhunts" baseColumnNames="gamesessionid,requestid"
+      referencedTableName="tc_game_requests" referencedColumnNames="gamesessionid,id"
+      constraintName="fk_gm_speedhunts_request" />
+    <addForeignKeyConstraint baseTableName="tc_game_speedhunts" baseColumnNames="gamesessionid,reservationid"
+      referencedTableName="tc_game_joker_reservations" referencedColumnNames="gamesessionid,id"
+      constraintName="fk_gm_speedhunts_reservation" />
+    <createIndex tableName="tc_game_speedhunts" indexName="idx_gm_speedhunts_target">
+      <column name="gamesessionid" /><column name="targetmemberid" /><column name="startedat" />
+    </createIndex>
+
+    <!-- One row per timetable fake or speedhunt fake; the reservation holds the joker. -->
+    <createTable tableName="tc_game_fake_ping_plans">
+      <column name="reservationid" type="BIGINT">
+        <constraints primaryKey="true" primaryKeyName="pk_gm_fake_ping_plans" nullable="false" />
+      </column>
+      <column name="gamesessionid" type="BIGINT"><constraints nullable="false" /></column>
+      <column name="memberid" type="BIGINT"><constraints nullable="false" /></column>
+      <column name="latitude" type="DOUBLE"><constraints nullable="false" /></column>
+      <column name="longitude" type="DOUBLE"><constraints nullable="false" /></column>
+      <column name="timetableentryid" type="BIGINT" />
+      <column name="pingnumber" type="INT" />
+      <column name="boundrunid" type="BIGINT" />
+      <column name="openentryid" type="BIGINT" />
+      <column name="unboundmemberid" type="BIGINT" />
+    </createTable>
+    <addUniqueConstraint tableName="tc_game_fake_ping_plans" columnNames="gamesessionid,reservationid"
+      constraintName="uq_gm_fake_plans_session_id" />
+    <addUniqueConstraint tableName="tc_game_fake_ping_plans" columnNames="openentryid"
+      constraintName="uq_gm_fake_plans_open_entry" />
+    <addUniqueConstraint tableName="tc_game_fake_ping_plans" columnNames="unboundmemberid"
+      constraintName="uq_gm_fake_plans_unbound" />
+    <addForeignKeyConstraint baseTableName="tc_game_fake_ping_plans" baseColumnNames="gamesessionid"
+      referencedTableName="tc_game_sessions" referencedColumnNames="id" constraintName="fk_gm_fake_plans_session" />
+    <addForeignKeyConstraint baseTableName="tc_game_fake_ping_plans" baseColumnNames="gamesessionid,reservationid"
+      referencedTableName="tc_game_joker_reservations" referencedColumnNames="gamesessionid,id"
+      constraintName="fk_gm_fake_plans_reservation" />
+    <addForeignKeyConstraint baseTableName="tc_game_fake_ping_plans" baseColumnNames="gamesessionid,memberid"
+      referencedTableName="tc_game_session_members" referencedColumnNames="gamesessionid,id"
+      constraintName="fk_gm_fake_plans_member" />
+    <addForeignKeyConstraint baseTableName="tc_game_fake_ping_plans" baseColumnNames="gamesessionid,timetableentryid"
+      referencedTableName="tc_game_timetable_entries" referencedColumnNames="gamesessionid,id"
+      constraintName="fk_gm_fake_plans_entry" />
+    <addForeignKeyConstraint baseTableName="tc_game_fake_ping_plans" baseColumnNames="gamesessionid,boundrunid"
+      referencedTableName="tc_game_speedhunts" referencedColumnNames="gamesessionid,id"
+      constraintName="fk_gm_fake_plans_run" />
+
+    <!-- A logical ping that reached its audiences; a live ping counts once, on its first delivered sample. -->
+    <createTable tableName="tc_game_speedhunt_pings">
+      <column name="id" type="BIGINT" autoIncrement="true">
+        <constraints primaryKey="true" primaryKeyName="pk_gm_speedhunt_pings" nullable="false" />
+      </column>
+      <column name="gamesessionid" type="BIGINT"><constraints nullable="false" /></column>
+      <column name="runid" type="BIGINT"><constraints nullable="false" /></column>
+      <column name="number" type="INT"><constraints nullable="false" /></column>
+      <column name="mode" type="VARCHAR(8)"><constraints nullable="false" /></column>
+      <column name="source" type="VARCHAR(16)"><constraints nullable="false" /></column>
+      <column name="sentat" type="DATETIME(3)"><constraints nullable="false" /></column>
+      <column name="requestid" type="BIGINT" />
+      <column name="fakeplanid" type="BIGINT" />
+    </createTable>
+    <addUniqueConstraint tableName="tc_game_speedhunt_pings" columnNames="gamesessionid,id"
+      constraintName="uq_gm_pings_session_id" />
+    <addUniqueConstraint tableName="tc_game_speedhunt_pings" columnNames="runid,number"
+      constraintName="uq_gm_pings_number" />
+    <addForeignKeyConstraint baseTableName="tc_game_speedhunt_pings" baseColumnNames="gamesessionid"
+      referencedTableName="tc_game_sessions" referencedColumnNames="id" constraintName="fk_gm_pings_session" />
+    <addForeignKeyConstraint baseTableName="tc_game_speedhunt_pings" baseColumnNames="gamesessionid,runid"
+      referencedTableName="tc_game_speedhunts" referencedColumnNames="gamesessionid,id"
+      constraintName="fk_gm_pings_run" />
+    <addForeignKeyConstraint baseTableName="tc_game_speedhunt_pings" baseColumnNames="gamesessionid,requestid"
+      referencedTableName="tc_game_requests" referencedColumnNames="gamesessionid,id"
+      constraintName="fk_gm_pings_request" />
+    <addForeignKeyConstraint baseTableName="tc_game_speedhunt_pings" baseColumnNames="gamesessionid,fakeplanid"
+      referencedTableName="tc_game_fake_ping_plans" referencedColumnNames="gamesessionid,reservationid"
+      constraintName="fk_gm_pings_fake_plan" />
+
+    <!-- Repeated uploads: live pings, manual and geofence live tracking, and live hunter relays. -->
+    <createTable tableName="tc_game_live_uploads">
+      <column name="id" type="BIGINT" autoIncrement="true">
+        <constraints primaryKey="true" primaryKeyName="pk_gm_live_uploads" nullable="false" />
+      </column>
+      <column name="gamesessionid" type="BIGINT"><constraints nullable="false" /></column>
+      <column name="purpose" type="VARCHAR(16)"><constraints nullable="false" /></column>
+      <column name="sourcememberid" type="BIGINT" />
+      <column name="recipientmemberid" type="BIGINT" />
+      <column name="pingid" type="BIGINT" />
+      <column name="tohunters" type="BOOLEAN"><constraints nullable="false" /></column>
+      <column name="toplayers" type="BOOLEAN"><constraints nullable="false" /></column>
+      <column name="tosupporters" type="BOOLEAN"><constraints nullable="false" /></column>
+      <column name="intervalseconds" type="INT"><constraints nullable="false" /></column>
+      <column name="startedat" type="DATETIME(3)"><constraints nullable="false" /></column>
+      <column name="deadline" type="DATETIME(3)" />
+      <column name="lastsampleat" type="DATETIME(3)" />
+      <column name="endedat" type="DATETIME(3)" />
+      <column name="state" type="VARCHAR(16)"><constraints nullable="false" /></column>
+      <column name="endreason" type="VARCHAR(64)" />
+      <column name="reason" type="VARCHAR(512)" />
+      <column name="controllerepoch" type="BIGINT"><constraints nullable="false" /></column>
+      <column name="requestid" type="BIGINT" />
+      <column name="reservationid" type="BIGINT" />
+    </createTable>
+    <addForeignKeyConstraint baseTableName="tc_game_live_uploads" baseColumnNames="gamesessionid"
+      referencedTableName="tc_game_sessions" referencedColumnNames="id" constraintName="fk_gm_live_uploads_session" />
+    <addForeignKeyConstraint baseTableName="tc_game_live_uploads" baseColumnNames="gamesessionid,sourcememberid"
+      referencedTableName="tc_game_session_members" referencedColumnNames="gamesessionid,id"
+      constraintName="fk_gm_live_uploads_source" />
+    <addForeignKeyConstraint baseTableName="tc_game_live_uploads" baseColumnNames="gamesessionid,recipientmemberid"
+      referencedTableName="tc_game_session_members" referencedColumnNames="gamesessionid,id"
+      constraintName="fk_gm_live_uploads_recipient" />
+    <addForeignKeyConstraint baseTableName="tc_game_live_uploads" baseColumnNames="gamesessionid,pingid"
+      referencedTableName="tc_game_speedhunt_pings" referencedColumnNames="gamesessionid,id"
+      constraintName="fk_gm_live_uploads_ping" />
+    <addForeignKeyConstraint baseTableName="tc_game_live_uploads" baseColumnNames="gamesessionid,requestid"
+      referencedTableName="tc_game_requests" referencedColumnNames="gamesessionid,id"
+      constraintName="fk_gm_live_uploads_request" />
+    <addForeignKeyConstraint baseTableName="tc_game_live_uploads" baseColumnNames="gamesessionid,reservationid"
+      referencedTableName="tc_game_joker_reservations" referencedColumnNames="gamesessionid,id"
+      constraintName="fk_gm_live_uploads_reservation" />
+    <createIndex tableName="tc_game_live_uploads" indexName="idx_gm_live_uploads_state">
+      <column name="gamesessionid" /><column name="state" />
+    </createIndex>
+
+    <createTable tableName="tc_game_breaks">
+      <column name="id" type="BIGINT" autoIncrement="true">
+        <constraints primaryKey="true" primaryKeyName="pk_gm_breaks" nullable="false" />
+      </column>
+      <column name="gamesessionid" type="BIGINT"><constraints nullable="false" /></column>
+      <column name="memberid" type="BIGINT"><constraints nullable="false" /></column>
+      <column name="state" type="VARCHAR(16)"><constraints nullable="false" /></column>
+      <column name="plannedstart" type="DATETIME(3)" />
+      <column name="startedat" type="DATETIME(3)" />
+      <column name="deadline" type="DATETIME(3)" />
+      <column name="endedat" type="DATETIME(3)" />
+      <column name="plannedby" type="VARCHAR(16)"><constraints nullable="false" /></column>
+      <column name="requestid" type="BIGINT" />
+      <column name="reservationid" type="BIGINT" />
+      <column name="activememberid" type="BIGINT" />
+    </createTable>
+    <addUniqueConstraint tableName="tc_game_breaks" columnNames="activememberid" constraintName="uq_gm_breaks_active" />
+    <addForeignKeyConstraint baseTableName="tc_game_breaks" baseColumnNames="gamesessionid"
+      referencedTableName="tc_game_sessions" referencedColumnNames="id" constraintName="fk_gm_breaks_session" />
+    <addForeignKeyConstraint baseTableName="tc_game_breaks" baseColumnNames="gamesessionid,memberid"
+      referencedTableName="tc_game_session_members" referencedColumnNames="gamesessionid,id"
+      constraintName="fk_gm_breaks_member" />
+    <addForeignKeyConstraint baseTableName="tc_game_breaks" baseColumnNames="gamesessionid,requestid"
+      referencedTableName="tc_game_requests" referencedColumnNames="gamesessionid,id"
+      constraintName="fk_gm_breaks_request" />
+    <addForeignKeyConstraint baseTableName="tc_game_breaks" baseColumnNames="gamesessionid,reservationid"
+      referencedTableName="tc_game_joker_reservations" referencedColumnNames="gamesessionid,id"
+      constraintName="fk_gm_breaks_reservation" />
+    <createIndex tableName="tc_game_breaks" indexName="idx_gm_breaks_due">
+      <column name="gamesessionid" /><column name="state" /><column name="plannedstart" />
+    </createIndex>
+  </changeSet>
+
+  <!-- Notifications, proximity, deliveries and the push outbox. -->
+  <changeSet author="traccar-tool" id="game-model-2-notifications">
+    <createTable tableName="tc_game_notification_state">
+      <column name="gamesessionid" type="BIGINT">
+        <constraints primaryKey="true" primaryKeyName="pk_gm_notification_state" nullable="false" />
+      </column>
+      <column name="generation" type="VARCHAR(36)"><constraints nullable="false" /></column>
+      <column name="resetat" type="DATETIME(3)" />
+      <column name="revision" type="BIGINT"><constraints nullable="false" /></column>
+    </createTable>
+    <addForeignKeyConstraint baseTableName="tc_game_notification_state" baseColumnNames="gamesessionid"
+      referencedTableName="tc_game_sessions" referencedColumnNames="id"
+      constraintName="fk_gm_notification_state_session" />
+
+    <createTable tableName="tc_game_notifications">
+      <column name="id" type="BIGINT" autoIncrement="true">
+        <constraints primaryKey="true" primaryKeyName="pk_gm_notifications" nullable="false" />
+      </column>
+      <column name="gamesessionid" type="BIGINT"><constraints nullable="false" /></column>
+      <column name="generation" type="VARCHAR(36)"><constraints nullable="false" /></column>
+      <column name="alertid" type="VARCHAR(64)"><constraints nullable="false" /></column>
+      <column name="type" type="VARCHAR(32)"><constraints nullable="false" /></column>
+      <column name="audience" type="VARCHAR(16)"><constraints nullable="false" /></column>
+      <column name="recipientmemberid" type="BIGINT" />
+      <column name="recipientlabel" type="VARCHAR(128)" />
+      <column name="sourcememberid" type="BIGINT" />
+      <column name="sourcelabel" type="VARCHAR(128)" />
+      <column name="occurredat" type="DATETIME(3)"><constraints nullable="false" /></column>
+      <column name="timezone" type="VARCHAR(64)"><constraints nullable="false" /></column>
+      <column name="message" type="TEXT"><constraints nullable="false" /></column>
+      <column name="createdat" type="DATETIME(3)"><constraints nullable="false" /></column>
+    </createTable>
+    <addUniqueConstraint tableName="tc_game_notifications" columnNames="gamesessionid,generation,alertid"
+      constraintName="uq_gm_notifications_alert" />
+    <addForeignKeyConstraint baseTableName="tc_game_notifications" baseColumnNames="gamesessionid"
+      referencedTableName="tc_game_sessions" referencedColumnNames="id" constraintName="fk_gm_notifications_session" />
+    <addForeignKeyConstraint baseTableName="tc_game_notifications" baseColumnNames="gamesessionid,recipientmemberid"
+      referencedTableName="tc_game_session_members" referencedColumnNames="gamesessionid,id"
+      constraintName="fk_gm_notifications_recipient" />
+    <addForeignKeyConstraint baseTableName="tc_game_notifications" baseColumnNames="gamesessionid,sourcememberid"
+      referencedTableName="tc_game_session_members" referencedColumnNames="gamesessionid,id"
+      constraintName="fk_gm_notifications_source" />
+    <createIndex tableName="tc_game_notifications" indexName="idx_gm_notifications_stream">
+      <column name="gamesessionid" /><column name="generation" /><column name="id" />
+    </createIndex>
+    <createIndex tableName="tc_game_notifications" indexName="idx_gm_notifications_recipient">
+      <column name="gamesessionid" /><column name="generation" /><column name="recipientmemberid" /><column name="id" />
+    </createIndex>
+
+    <createTable tableName="tc_game_proximity_state">
+      <column name="gamesessionid" type="BIGINT">
+        <constraints primaryKey="true" primaryKeyName="pk_gm_proximity_state" nullable="false" />
+      </column>
+      <column name="revision" type="BIGINT"><constraints nullable="false" /></column>
+      <column name="contenthash" type="VARCHAR(64)"><constraints nullable="false" /></column>
+      <column name="updatedat" type="DATETIME(3)"><constraints nullable="false" /></column>
+    </createTable>
+    <addForeignKeyConstraint baseTableName="tc_game_proximity_state" baseColumnNames="gamesessionid"
+      referencedTableName="tc_game_sessions" referencedColumnNames="id" constraintName="fk_gm_proximity_state_session" />
+
+    <!-- userid and deviceid are the access columns that the permission union in DatabaseStorage reads. -->
+    <createTable tableName="tc_game_proximity_grants">
+      <column name="gamesessionid" type="BIGINT"><constraints nullable="false" /></column>
+      <column name="recipientmemberid" type="BIGINT"><constraints nullable="false" /></column>
+      <column name="targetmemberid" type="BIGINT"><constraints nullable="false" /></column>
+      <column name="episodeid" type="VARCHAR(64)"><constraints nullable="false" /></column>
+      <column name="userid" type="INT"><constraints nullable="false" /></column>
+      <column name="deviceid" type="INT"><constraints nullable="false" /></column>
+      <column name="expiresat" type="DATETIME(3)"><constraints nullable="false" /></column>
+    </createTable>
+    <addPrimaryKey tableName="tc_game_proximity_grants" columnNames="gamesessionid,recipientmemberid,targetmemberid"
+      constraintName="pk_gm_proximity_grants" />
+    <addForeignKeyConstraint baseTableName="tc_game_proximity_grants" baseColumnNames="gamesessionid"
+      referencedTableName="tc_game_sessions" referencedColumnNames="id" constraintName="fk_gm_grants_session" />
+    <addForeignKeyConstraint baseTableName="tc_game_proximity_grants" baseColumnNames="gamesessionid,recipientmemberid"
+      referencedTableName="tc_game_session_members" referencedColumnNames="gamesessionid,id"
+      constraintName="fk_gm_grants_recipient" />
+    <addForeignKeyConstraint baseTableName="tc_game_proximity_grants" baseColumnNames="gamesessionid,targetmemberid"
+      referencedTableName="tc_game_session_members" referencedColumnNames="gamesessionid,id"
+      constraintName="fk_gm_grants_target" />
+    <addForeignKeyConstraint baseTableName="tc_game_proximity_grants" baseColumnNames="userid"
+      referencedTableName="tc_users" referencedColumnNames="id" constraintName="fk_gm_grants_user" onDelete="CASCADE" />
+    <addForeignKeyConstraint baseTableName="tc_game_proximity_grants" baseColumnNames="deviceid"
+      referencedTableName="tc_devices" referencedColumnNames="id" constraintName="fk_gm_grants_device"
+      onDelete="CASCADE" />
+    <createIndex tableName="tc_game_proximity_grants" indexName="idx_gm_grants_user_access">
+      <column name="userid" /><column name="expiresat" /><column name="deviceid" />
+    </createIndex>
+    <createIndex tableName="tc_game_proximity_grants" indexName="idx_gm_grants_device_access">
+      <column name="deviceid" /><column name="expiresat" /><column name="userid" />
+    </createIndex>
+
+    <createTable tableName="tc_game_proximity_circles">
+      <column name="gamesessionid" type="BIGINT"><constraints nullable="false" /></column>
+      <column name="circleid" type="VARCHAR(64)"><constraints nullable="false" /></column>
+      <column name="latitude" type="DOUBLE"><constraints nullable="false" /></column>
+      <column name="longitude" type="DOUBLE"><constraints nullable="false" /></column>
+      <column name="diametermeters" type="DOUBLE"><constraints nullable="false" /></column>
+      <column name="expiresat" type="DATETIME(3)"><constraints nullable="false" /></column>
+    </createTable>
+    <addPrimaryKey tableName="tc_game_proximity_circles" columnNames="gamesessionid,circleid"
+      constraintName="pk_gm_proximity_circles" />
+    <addForeignKeyConstraint baseTableName="tc_game_proximity_circles" baseColumnNames="gamesessionid"
+      referencedTableName="tc_game_sessions" referencedColumnNames="id" constraintName="fk_gm_circles_session" />
+
+    <createTable tableName="tc_game_proximity_circle_members">
+      <column name="gamesessionid" type="BIGINT"><constraints nullable="false" /></column>
+      <column name="circleid" type="VARCHAR(64)"><constraints nullable="false" /></column>
+      <column name="memberid" type="BIGINT"><constraints nullable="false" /></column>
+    </createTable>
+    <addPrimaryKey tableName="tc_game_proximity_circle_members" columnNames="gamesessionid,circleid,memberid"
+      constraintName="pk_gm_circle_members" />
+    <addForeignKeyConstraint baseTableName="tc_game_proximity_circle_members" baseColumnNames="gamesessionid,circleid"
+      referencedTableName="tc_game_proximity_circles" referencedColumnNames="gamesessionid,circleid"
+      constraintName="fk_gm_circle_members_circle" />
+    <addForeignKeyConstraint baseTableName="tc_game_proximity_circle_members" baseColumnNames="gamesessionid,memberid"
+      referencedTableName="tc_game_session_members" referencedColumnNames="gamesessionid,id"
+      constraintName="fk_gm_circle_members_member" />
+
+    <createTable tableName="tc_game_deliveries">
+      <column name="id" type="BIGINT" autoIncrement="true">
+        <constraints primaryKey="true" primaryKeyName="pk_gm_deliveries" nullable="false" />
+      </column>
+      <column name="gamesessionid" type="BIGINT"><constraints nullable="false" /></column>
+      <column name="deliveryid" type="VARCHAR(64)"><constraints nullable="false" /></column>
+      <column name="epoch" type="BIGINT"><constraints nullable="false" /></column>
+      <column name="requesthash" type="VARCHAR(64)"><constraints nullable="false" /></column>
+      <column name="outcome" type="CLOB"><constraints nullable="false" /></column>
+      <column name="createdat" type="DATETIME(3)"><constraints nullable="false" /></column>
+    </createTable>
+    <addUniqueConstraint tableName="tc_game_deliveries" columnNames="gamesessionid,id"
+      constraintName="uq_gm_deliveries_session_id" />
+    <addUniqueConstraint tableName="tc_game_deliveries" columnNames="deliveryid" constraintName="uq_gm_deliveries_delivery" />
+    <addForeignKeyConstraint baseTableName="tc_game_deliveries" baseColumnNames="gamesessionid"
+      referencedTableName="tc_game_sessions" referencedColumnNames="id" constraintName="fk_gm_deliveries_session" />
+
+    <createTable tableName="tc_game_push_outbox">
+      <column name="id" type="BIGINT" autoIncrement="true">
+        <constraints primaryKey="true" primaryKeyName="pk_gm_push_outbox" nullable="false" />
+      </column>
+      <column name="deliveryrowid" type="BIGINT"><constraints nullable="false" /></column>
+      <column name="gamesessionid" type="BIGINT"><constraints nullable="false" /></column>
+      <column name="recipientmemberid" type="BIGINT" />
+      <column name="userid" type="INT" />
+      <column name="recipientlabel" type="VARCHAR(128)" />
+      <column name="notificator" type="VARCHAR(64)"><constraints nullable="false" /></column>
+      <column name="subject" type="VARCHAR(512)"><constraints nullable="false" /></column>
+      <column name="message" type="VARCHAR(8192)"><constraints nullable="false" /></column>
+      <column name="status" type="VARCHAR(16)"><constraints nullable="false" /></column>
+      <column name="detail" type="VARCHAR(512)" />
+      <column name="createdat" type="DATETIME(3)"><constraints nullable="false" /></column>
+      <column name="attemptedat" type="DATETIME(3)" />
+      <column name="completedat" type="DATETIME(3)" />
+    </createTable>
+    <addForeignKeyConstraint baseTableName="tc_game_push_outbox" baseColumnNames="gamesessionid,deliveryrowid"
+      referencedTableName="tc_game_deliveries" referencedColumnNames="gamesessionid,id"
+      constraintName="fk_gm_outbox_delivery" />
+    <addForeignKeyConstraint baseTableName="tc_game_push_outbox" baseColumnNames="gamesessionid"
+      referencedTableName="tc_game_sessions" referencedColumnNames="id" constraintName="fk_gm_outbox_session" />
+    <addForeignKeyConstraint baseTableName="tc_game_push_outbox" baseColumnNames="gamesessionid,recipientmemberid"
+      referencedTableName="tc_game_session_members" referencedColumnNames="gamesessionid,id"
+      constraintName="fk_gm_outbox_recipient" />
+    <addForeignKeyConstraint baseTableName="tc_game_push_outbox" baseColumnNames="userid"
+      referencedTableName="tc_users" referencedColumnNames="id" constraintName="fk_gm_outbox_user" onDelete="SET NULL" />
+    <createIndex tableName="tc_game_push_outbox" indexName="idx_gm_outbox_status">
+      <column name="status" /><column name="id" />
+    </createIndex>
+  </changeSet>
+
+  <!--
+    Check constraints. MySQL (8.0.16 and later) and H2 enforce them. MySQL forbids them on a column that a
+    referential action uses, so none of these touches a column with ON DELETE SET NULL or CASCADE.
+    A CHECK fails only when its expression is FALSE, and a comparison with NULL is UNKNOWN, so every comparison
+    on a nullable column is guarded with IS NOT NULL.
+  -->
+  <changeSet author="traccar-tool" id="game-model-2-checks">
+    <sql>
+      ALTER TABLE tc_game_session_members ADD CONSTRAINT ck_gm_members_role
+        CHECK (role IN ('player', 'supporter', 'hunter', 'spectator'));
+      ALTER TABLE tc_game_session_members ADD CONSTRAINT ck_gm_members_number
+        CHECK (number >= 1 AND (role &lt;&gt; 'spectator' OR number = 1));
+      ALTER TABLE tc_game_session_members ADD CONSTRAINT ck_gm_members_state
+        CHECK ((state = 'active' AND retiredat IS NULL) OR (state = 'retired' AND retiredat IS NOT NULL));
+
+      ALTER TABLE tc_game_mirrors ADD CONSTRAINT ck_gm_mirrors_destination
+        CHECK ((destinationrole IS NOT NULL AND destinationrole IN ('player', 'supporter', 'hunter')
+            AND destinationmemberid IS NULL)
+          OR (destinationrole IS NULL AND destinationmemberid IS NOT NULL));
+      ALTER TABLE tc_game_mirrors ADD CONSTRAINT ck_gm_mirrors_state CHECK (state IN ('active', 'retiring'));
+      ALTER TABLE tc_game_session_groups ADD CONSTRAINT ck_gm_groups_state CHECK (state IN ('active', 'retiring'));
+      ALTER TABLE tc_game_session_geofences ADD CONSTRAINT ck_gm_geofences_state
+        CHECK (state IN ('active', 'retiring'));
+
+      ALTER TABLE tc_game_timetable_entries ADD CONSTRAINT ck_gm_entries_status
+        CHECK (status IN ('scheduled', 'sent', 'skipped', 'failed'));
+
+      ALTER TABLE tc_game_requests ADD CONSTRAINT ck_gm_requests_status
+        CHECK (status IN ('pending', 'approved', 'executing', 'succeeded', 'failed', 'rejected', 'expired',
+          'cancelled'));
+
+      ALTER TABLE tc_game_jokers ADD CONSTRAINT ck_gm_jokers_type
+        CHECK (type IN ('hunterPositions', 'fakePing', 'break'));
+      ALTER TABLE tc_game_jokers ADD CONSTRAINT ck_gm_jokers_quantities CHECK (granted >= 0 AND used >= 0);
+      ALTER TABLE tc_game_joker_pools ADD CONSTRAINT ck_gm_joker_pools_type CHECK (type IN ('speedhunt'));
+      ALTER TABLE tc_game_joker_pools ADD CONSTRAINT ck_gm_joker_pools_quantities CHECK (granted >= 0 AND used >= 0);
+      ALTER TABLE tc_game_joker_reservations ADD CONSTRAINT ck_gm_reservations_owner
+        CHECK ((type = 'speedhunt' AND memberid IS NULL)
+          OR (type IN ('hunterPositions', 'fakePing', 'break') AND memberid IS NOT NULL));
+      ALTER TABLE tc_game_joker_reservations ADD CONSTRAINT ck_gm_reservations_status
+        CHECK (status IN ('reserved', 'consumed', 'released'));
+      ALTER TABLE tc_game_joker_ledger ADD CONSTRAINT ck_gm_ledger_owner
+        CHECK ((type = 'speedhunt' AND memberid IS NULL)
+          OR (type IN ('hunterPositions', 'fakePing', 'break') AND memberid IS NOT NULL));
+
+      ALTER TABLE tc_game_catches ADD CONSTRAINT ck_gm_catches_active
+        CHECK ((releasedat IS NULL AND activememberid IS NOT NULL AND activememberid = memberid)
+          OR (releasedat IS NOT NULL AND activememberid IS NULL AND releasedat >= caughtat));
+
+      ALTER TABLE tc_game_speedhunts ADD CONSTRAINT ck_gm_speedhunts_active
+        CHECK ((endedat IS NULL AND outcome IS NULL AND activememberid IS NOT NULL
+            AND activememberid = targetmemberid)
+          OR (endedat IS NOT NULL AND outcome IS NOT NULL AND outcome IN ('completed', 'terminated')
+            AND activememberid IS NULL));
+
+      ALTER TABLE tc_game_fake_ping_plans ADD CONSTRAINT ck_gm_fake_plans_use
+        CHECK ((timetableentryid IS NOT NULL AND pingnumber IS NULL AND boundrunid IS NULL
+            AND unboundmemberid IS NULL AND (openentryid IS NULL OR openentryid = timetableentryid))
+          OR (timetableentryid IS NULL AND pingnumber IS NOT NULL AND pingnumber >= 1 AND openentryid IS NULL
+            AND (unboundmemberid IS NULL OR (unboundmemberid = memberid AND boundrunid IS NULL))));
+      ALTER TABLE tc_game_fake_ping_plans ADD CONSTRAINT ck_gm_fake_plans_position
+        CHECK (latitude BETWEEN -90 AND 90 AND longitude BETWEEN -180 AND 180);
+
+      ALTER TABLE tc_game_speedhunt_pings ADD CONSTRAINT ck_gm_pings_number CHECK (number >= 1);
+      ALTER TABLE tc_game_speedhunt_pings ADD CONSTRAINT ck_gm_pings_mode CHECK (mode IN ('static', 'live'));
+      ALTER TABLE tc_game_speedhunt_pings ADD CONSTRAINT ck_gm_pings_source
+        CHECK ((source = 'jokerFake' AND fakeplanid IS NOT NULL)
+          OR (source IN ('real', 'operatorFake') AND fakeplanid IS NULL));
+
+      ALTER TABLE tc_game_live_uploads ADD CONSTRAINT ck_gm_live_uploads_purpose
+        CHECK ((purpose IN ('speedhuntPing', 'manual', 'geofenceAuto') AND sourcememberid IS NOT NULL
+            AND recipientmemberid IS NULL AND (pingid IS NULL OR purpose = 'speedhuntPing'))
+          OR (purpose = 'hunterRelay' AND sourcememberid IS NULL AND recipientmemberid IS NOT NULL
+            AND pingid IS NULL));
+      ALTER TABLE tc_game_live_uploads ADD CONSTRAINT ck_gm_live_uploads_state
+        CHECK ((state = 'active' AND endedat IS NULL) OR (state = 'ended' AND endedat IS NOT NULL));
+      ALTER TABLE tc_game_live_uploads ADD CONSTRAINT ck_gm_live_uploads_interval CHECK (intervalseconds >= 1);
+
+      ALTER TABLE tc_game_breaks ADD CONSTRAINT ck_gm_breaks_state
+        CHECK ((state IN ('planned', 'waiting') AND plannedstart IS NOT NULL AND startedat IS NULL
+            AND activememberid IS NULL)
+          OR (state = 'active' AND startedat IS NOT NULL AND deadline IS NOT NULL AND endedat IS NULL
+            AND activememberid IS NOT NULL AND activememberid = memberid)
+          OR (state = 'ended' AND startedat IS NOT NULL AND deadline IS NOT NULL AND endedat IS NOT NULL
+            AND activememberid IS NULL)
+          OR (state IN ('cancelled', 'missed') AND startedat IS NULL AND endedat IS NOT NULL
+            AND activememberid IS NULL));
+      ALTER TABLE tc_game_breaks ADD CONSTRAINT ck_gm_breaks_planned_by
+        CHECK (plannedby IN ('participant', 'operator'));
+
+      ALTER TABLE tc_game_push_outbox ADD CONSTRAINT ck_gm_outbox_status
+        CHECK (status IN ('queued', 'attempting', 'sent', 'failed', 'uncertain'));
+    </sql>
+  </changeSet>
+
+  <!-- Alert IDs are opaque, case-sensitive ASCII tokens, as in model 1. -->
+  <changeSet author="traccar-tool" id="game-model-2-alert-collation" dbms="mysql,mariadb">
+    <sql>ALTER TABLE tc_game_notifications MODIFY alertid VARCHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL</sql>
+  </changeSet>
+
+</databaseChangeLog>

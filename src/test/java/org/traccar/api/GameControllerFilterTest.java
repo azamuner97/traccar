@@ -10,8 +10,8 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.traccar.api.security.UserPrincipal;
-import org.traccar.database.GameControllerService;
-import org.traccar.database.GameSessionService;
+import org.traccar.game.GameControllerService;
+import org.traccar.game.GameOwnershipService;
 
 import java.util.Arrays;
 import java.util.List;
@@ -25,7 +25,7 @@ import static org.mockito.Mockito.*;
 public class GameControllerFilterTest {
 
     private final GameControllerService controller = mock(GameControllerService.class);
-    private final GameSessionService sessions = mock(GameSessionService.class);
+    private final GameOwnershipService ownership = mock(GameOwnershipService.class);
     private GameControllerFilter filter;
 
     private static void inject(Object object, String name, Object value) throws Exception {
@@ -38,9 +38,9 @@ public class GameControllerFilterTest {
     void setup() throws Exception {
         filter = new GameControllerFilter();
         inject(filter, "controller", controller);
-        inject(filter, "sessions", sessions);
+        inject(filter, "ownership", ownership);
         // User 10 is a member of a stored session; a Tool holds the lease without being the caller.
-        when(sessions.owned()).thenReturn(new GameSessionService.Owned(Set.of(201L), Set.of(), Set.of(10L, 11L),
+        when(ownership.owned()).thenReturn(new GameOwnershipService.Owned(Set.of(201L), Set.of(), Set.of(10L, 11L),
                 Set.of()));
         when(controller.status()).thenReturn(new GameControllerService.Lease(3, "active", true, null, null,
                 null, null, null, "2026-05-01T10:00:00Z", 30, 5));
@@ -90,12 +90,12 @@ public class GameControllerFilterTest {
     @Test
     void gameWritesAlwaysNeedTheEpochAndReadsNever() throws Exception {
         when(controller.check(anyLong(), any())).thenThrow(GameControllerService.locked("lease required"));
-        var write = request(1, "PUT", "game-sessions/5/runtime");
+        var write = request(1, "PUT", "game-sessions/5/checkpoints/monitoring");
         filter.filter(write);
         assertEquals(423, abortStatus(write));
         verify(controller).unlockShared(1L);
 
-        var read = request(1, "GET", "game-sessions/5/runtime");
+        var read = request(1, "GET", "game-sessions/5/snapshot");
         filter.filter(read);
         assertNull(abortStatus(read));
     }

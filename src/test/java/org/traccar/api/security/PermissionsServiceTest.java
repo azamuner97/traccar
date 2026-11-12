@@ -72,26 +72,20 @@ public class PermissionsServiceTest {
     }
 
     @Test
-    public void testToolMarkersRequireAdministrator() throws Exception {
+    public void testModelOneMembershipMarkersAreOrdinaryAttributes() throws Exception {
+        // Membership is a member row of game data model 2; nothing reads these attributes any more, so they grant
+        // nothing and need no administrator.
         User currentUser = new User();
         currentUser.setId(1);
         User before = new User();
-        before.setId(2);
+        before.setId(1);
         User after = new User();
-        after.setId(2);
+        after.setId(1);
         after.getAttributes().put("traccarToolUserRole", "hunter");
         after.getAttributes().put("traccarToolSessionDeviceId", 7);
-
-        assertThrows(SecurityException.class, () -> service(currentUser).checkUserUpdate(1, before, after));
-
-        currentUser.setAdministrator(true);
-        assertDoesNotThrow(() -> service(currentUser).checkUserUpdate(1, before, after));
-
-        currentUser.setAdministrator(false);
-        before.getAttributes().put("traccarToolUserRole", "hunter");
-        before.getAttributes().put("traccarToolSessionDeviceId", 7);
         after.getAttributes().put("traccarToolAssignedDeviceId", 31);
-        assertThrows(SecurityException.class, () -> service(currentUser).checkUserUpdate(1, before, after));
+
+        assertDoesNotThrow(() -> service(currentUser).checkUserUpdate(1, before, after));
     }
 
 }

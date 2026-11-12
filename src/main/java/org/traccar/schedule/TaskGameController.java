@@ -9,20 +9,23 @@ package org.traccar.schedule;
 import jakarta.inject.Inject;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.traccar.api.resource.GameControllerResource;
-import org.traccar.api.resource.GameRequestResource;
-import org.traccar.api.resource.GameStatusResource;
-import org.traccar.database.GameControllerService;
-import org.traccar.database.GamePushOutbox;
-import org.traccar.database.GameRequestService;
-import org.traccar.session.ConnectionManager;
+import org.traccar.game.GameControllerService;
+import org.traccar.game.GamePushOutbox;
+import org.traccar.game.GameRequestService;
 
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 
 /**
- * Ends a controller lease that survived a server restart, recovers the push outbox, and records lease expiry
- * from the stored deadline.
+ * Game maintenance of data model 2, every second.
+ * <ul>
+ * <li>Once at startup: ends a controller lease that survived the restart, marks pushes whose attempt the restart
+ * interrupted as uncertain (never retried), and sends the pushes still queued.</li>
+ * <li>Records lease expiry from the stored deadline. The controller service then ends the open requests and
+ * announces the change.</li>
+ * <li>Expires requests awaiting approval or execution past their deadline
+ * ({@link GameRequestService#expire}); the request service publishes the change.</li>
+ * </ul>
  */
 public class TaskGameController implements ScheduleTask {
 
@@ -30,16 +33,13 @@ public class TaskGameController implements ScheduleTask {
 
     private final GameControllerService controller;
     private final GamePushOutbox outbox;
-    private final ConnectionManager connectionManager;
     private final GameRequestService requests;
     private boolean started;
 
     @Inject
-    public TaskGameController(GameControllerService controller, GamePushOutbox outbox,
-                              ConnectionManager connectionManager, GameRequestService requests) {
+    public TaskGameController(GameControllerService controller, GamePushOutbox outbox, GameRequestService requests) {
         this.controller = controller;
         this.outbox = outbox;
-        this.connectionManager = connectionManager;
         this.requests = requests;
     }
 
@@ -62,14 +62,8 @@ public class TaskGameController implements ScheduleTask {
                 outbox.dispatchQueued();
                 started = true;
             }
-            if (controller.recordExpiry()) {
-                connectionManager.updateGameAdmin(true, GameControllerResource.INVALIDATION);
-                connectionManager.updateGameMembers(true, null, GameRequestResource.INVALIDATION);
-                connectionManager.updateGameMembers(true, null, GameStatusResource.INVALIDATION);
-            }
-            for (long gameSessionId : requests.expire()) {
-                connectionManager.updateGameMembers(true, gameSessionId, GameRequestResource.INVALIDATION);
-            }
+            controller.recordExpiry();
+            requests.expire();
         } catch (Exception error) {
             LOGGER.warn("Game controller maintenance failed", error);
         }

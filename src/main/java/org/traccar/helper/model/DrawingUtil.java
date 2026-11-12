@@ -22,11 +22,21 @@ import org.traccar.model.User;
 import java.util.Set;
 import java.util.regex.Pattern;
 
+/**
+ * Validation and access rules of map drawings. Game sharing reads membership (game data model 2): the active member
+ * an account is bound to, given as a {@link Membership}. Only the sharing switch
+ * ({@value #ATTRIBUTE_SHARE_GROUP_DRAWINGS}) is an account attribute, which administrators set; no user attribute
+ * says who takes part in a game.
+ * <ul>
+ * <li>Owners see their drawings, and edit them while drawings are enabled for them.</li>
+ * <li>The spectator sees every drawing of its session and edits none.</li>
+ * <li>Players, supporters and hunters with sharing switched on see and edit the drawings of the members with the same
+ * role in the same session who also share, made while they were members of that session.</li>
+ * <li>Administrators see and delete every drawing.</li>
+ * </ul>
+ */
 public final class DrawingUtil {
 
-    public static final String ATTRIBUTE_USER_ROLE = "traccarToolUserRole";
-    public static final String ATTRIBUTE_SESSION_DEVICE_ID = "traccarToolSessionDeviceId";
-    public static final String ATTRIBUTE_ASSIGNED_DEVICE_ID = "traccarToolAssignedDeviceId";
     public static final String ATTRIBUTE_SHARE_GROUP_DRAWINGS = "traccarToolShareGroupDrawings";
     public static final String ROLE_SPECTATOR = "spectator";
 
@@ -40,82 +50,66 @@ public final class DrawingUtil {
     private static final Set<Integer> TEXT_SIZES = Set.of(12, 16, 24, 32);
     private static final Pattern COLOR_PATTERN = Pattern.compile("^#[0-9a-fA-F]{6}$");
 
+    /** The game membership of an account: its session and role, or none ({@code null}). */
+    public record Membership(long gameSessionId, String role) {
+    }
+
     private DrawingUtil() {
     }
 
-    public static String getRole(User user) {
-        Object value = user.getAttributes().get(ATTRIBUTE_USER_ROLE);
-        return value != null ? value.toString() : null;
+    public static boolean isSpectator(Membership membership) {
+        return membership != null && ROLE_SPECTATOR.equals(membership.role());
     }
 
-    public static Long getSessionDeviceId(User user) {
-        Object value = user.getAttributes().get(ATTRIBUTE_SESSION_DEVICE_ID);
-        if (value instanceof Number number) {
-            long parsed = number.longValue();
-            return parsed > 0 && number.doubleValue() == parsed ? parsed : null;
-        }
-        if (value != null) {
-            try {
-                long parsed = Long.parseLong(value.toString());
-                return parsed > 0 ? parsed : null;
-            } catch (NumberFormatException ignored) {
-                // Invalid protected marker fails closed.
-            }
-        }
-        return null;
+    public static boolean canCreateOrEdit(User user, Membership membership) {
+        return user.getAdministrator() || !user.getDisableDrawings() && !isSpectator(membership);
     }
 
-    public static boolean isSpectator(User user) {
-        return ROLE_SPECTATOR.equals(getRole(user));
-    }
-
-    public static boolean canCreateOrEdit(User user) {
-        return user.getAdministrator() || !user.getDisableDrawings() && !isSpectator(user);
-    }
-
-    public static boolean canView(User user, Drawing drawing) {
-        return canView(user, drawing, null);
-    }
-
-    public static boolean hasGroupSharing(User user) {
-        String role = getRole(user);
+    public static boolean hasGroupSharing(User user, Membership membership) {
         return !user.getAdministrator() && !user.getDisableDrawings()
-                && role != null && GROUP_ROLES.contains(role) && getSessionDeviceId(user) != null
+                && membership != null && GROUP_ROLES.contains(membership.role())
                 && Boolean.TRUE.equals(user.getAttributes().get(ATTRIBUTE_SHARE_GROUP_DRAWINGS));
     }
 
-    private static boolean shared(User user, Drawing drawing, User owner) {
+    private static boolean shared(User user, Membership membership, Drawing drawing,
+                                  User owner, Membership ownerMembership) {
         return owner != null && owner.getId() == drawing.getOwnerId()
-                && hasGroupSharing(user) && hasGroupSharing(owner)
-                && getRole(user).equals(getRole(owner))
-                && getSessionDeviceId(user).equals(getSessionDeviceId(owner))
-                && getSessionDeviceId(user).equals(drawing.getSessionDeviceId());
+                && hasGroupSharing(user, membership) && hasGroupSharing(owner, ownerMembership)
+                && membership.role().equals(ownerMembership.role())
+                && membership.gameSessionId() == ownerMembership.gameSessionId()
+                && Long.valueOf(membership.gameSessionId()).equals(drawing.getGameSessionId());
     }
 
-    public static boolean canView(User user, Drawing drawing, User owner) {
+    public static boolean canView(User user, Membership membership, Drawing drawing) {
+        return canView(user, membership, drawing, null, null);
+    }
+
+    public static boolean canView(User user, Membership membership, Drawing drawing,
+                                  User owner, Membership ownerMembership) {
         if (user.getAdministrator() || drawing.getOwnerId() == user.getId()) {
             return true;
         }
-        Long sessionDeviceId = getSessionDeviceId(user);
-        return isSpectator(user) && sessionDeviceId != null
-                && sessionDeviceId.equals(drawing.getSessionDeviceId()) || shared(user, drawing, owner);
+        return isSpectator(membership) && Long.valueOf(membership.gameSessionId()).equals(drawing.getGameSessionId())
+                || shared(user, membership, drawing, owner, ownerMembership);
     }
 
-    public static boolean canEdit(User user, Drawing drawing) {
-        return canEdit(user, drawing, null);
+    public static boolean canEdit(User user, Membership membership, Drawing drawing) {
+        return canEdit(user, membership, drawing, null, null);
     }
 
-    public static boolean canEdit(User user, Drawing drawing, User owner) {
-        return canCreateOrEdit(user)
-                && (drawing.getOwnerId() == user.getId() || shared(user, drawing, owner));
+    public static boolean canEdit(User user, Membership membership, Drawing drawing,
+                                  User owner, Membership ownerMembership) {
+        return canCreateOrEdit(user, membership)
+                && (drawing.getOwnerId() == user.getId() || shared(user, membership, drawing, owner, ownerMembership));
     }
 
-    public static boolean canDelete(User user, Drawing drawing) {
-        return canDelete(user, drawing, null);
+    public static boolean canDelete(User user, Membership membership, Drawing drawing) {
+        return canDelete(user, membership, drawing, null, null);
     }
 
-    public static boolean canDelete(User user, Drawing drawing, User owner) {
-        return user.getAdministrator() || canEdit(user, drawing, owner);
+    public static boolean canDelete(User user, Membership membership, Drawing drawing,
+                                    User owner, Membership ownerMembership) {
+        return user.getAdministrator() || canEdit(user, membership, drawing, owner, ownerMembership);
     }
 
     public static void validate(Drawing drawing) {
