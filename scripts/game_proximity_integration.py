@@ -359,8 +359,10 @@ def main(tool_source=None, skip_restart=False):
         if not skip_restart:
             api.request("PUT", endpoint, content(revision(), 2))
             fixtures.close_sockets()
+            stale = api.CONTROLLER["epoch"]
             api.restart_server()
-            api.acquire_controller()
+            assert api.request("GET", f"/game-sessions/{session_id}/state")["state"] == "running"
+            api.acquire_controller(resume=stale)
             api.execute(session_id)
             time.sleep(3)
             state = api.request("GET", endpoint)
@@ -368,6 +370,10 @@ def main(tool_source=None, skip_restart=False):
             assert first not in visible(credentials["second"])
         # Deleting the session ends every grant at once.
         api.request("PUT", endpoint, content(revision(), 3600))
+        assert first in visible(credentials["second"])
+        # A running game's session is not deleted; stopping the game keeps the grants until the deletion.
+        api.request("DELETE", f"/game-sessions/{session_id}", expected=409)
+        api.stop_game(session_id)
         assert first in visible(credentials["second"])
         api.request("DELETE", f"/game-sessions/{session_id}", expected=204)
         api.GAME_SESSION_IDS.remove(session_id)

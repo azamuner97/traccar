@@ -127,11 +127,13 @@ def refusal(method, path, body=None, *, expected=409, **kwargs):
     raise AssertionError("unreachable")
 
 
-def acquire_controller():
-    """Acquire the lease (never by force) and keep renewing it in the background."""
+def acquire_controller(resume=None):
+    """Acquire the lease (never by force; with ``resume`` as the epoch held before) and keep renewing it."""
+    body = {"instanceId": CONTROLLER["instance"], "label": PREFIX}
+    if resume is not None:
+        body["resumeEpoch"] = resume
     try:
-        result = request("POST", "/game-controller/acquire",
-                         {"instanceId": CONTROLLER["instance"], "label": PREFIX}, epoch=False)
+        result = request("POST", "/game-controller/acquire", body, epoch=False)
     except AssertionError as error:
         raise RuntimeError("Another Tool instance controls the development server. Release control in "
                            "Tool (start window) before running the audit.") from error
@@ -195,7 +197,7 @@ GAME_SESSION_IDS = []
 
 
 def create_game_session(label, game_settings=None):
-    """A stored game session of model 2 (API version 5) with its settings; deleted by ``delete_game_sessions``."""
+    """A stored game session of model 2 (API version 6) with its settings; deleted by ``delete_game_sessions``."""
     session = request("POST", "/game-sessions", {
         "name": PREFIX + "-" + label, "schemaVersion": SCHEMA_VERSION,
         "config": {"game_settings": game_settings or {}}})
@@ -205,13 +207,33 @@ def create_game_session(label, game_settings=None):
 
 def delete_game_sessions():
     while GAME_SESSION_IDS:
-        request("DELETE", f"/game-sessions/{GAME_SESSION_IDS.pop()}", expected=204)
+        session_id = GAME_SESSION_IDS.pop()
+        try:
+            stop_game(session_id)
+        except AssertionError:
+            # Without the lease (an audit that failed meanwhile), an administrator still stops it while no
+            # lease is active.
+            request("PUT", f"/game-sessions/{session_id}/state", {"state": "stopped"}, epoch=False)
+        request("DELETE", f"/game-sessions/{session_id}", expected=204)
 
 
 def execute(session_id):
-    """Makes the session the one the controller executes (requests and status need it)."""
-    result = request("PUT", "/game-controller/session", {"gameSessionId": session_id})
-    assert result["gameSessionId"] == session_id, result
+    """Starts the session's game (requests and status need it); the audit's previous game stops first."""
+    running = sql("SELECT gamesessionid FROM tc_game_session_state WHERE runningkey = 1")
+    if running and int(running) != session_id:
+        if int(running) not in GAME_SESSION_IDS:
+            raise RuntimeError("Another game is running on the development server. Stop it in Tool before "
+                               "running the audit.")
+        stop_game(int(running))
+    result = request("PUT", f"/game-sessions/{session_id}/state", {"state": "running"})
+    assert result["state"] == "running" and result["gameSessionId"] == session_id, result
+    return result
+
+
+def stop_game(session_id):
+    """Stops the session's game (fenced with the audit's epoch); stopping a stopped game changes nothing."""
+    result = request("PUT", f"/game-sessions/{session_id}/state", {"state": "stopped"})
+    assert result["state"] == "stopped", result
     return result
 
 
@@ -756,11 +778,13 @@ def main(tool_source=None):
             socket.close()
         fixtures.sockets.clear()
         restart_server()
-        # A server restart ends the lease; the old epoch is refused until control is resumed.
+        # A server restart ends the lease, not the game; the old epoch is refused until control is resumed,
+        # which needs no takeover since nobody acquired control meanwhile.
         stale = CONTROLLER["epoch"]
+        assert request("GET", f"/game-sessions/{session_id}/state")["state"] == "running"
         request("PUT", f"/game-sessions/{session_id}/members/{members['player']['id']}/name",
                 {"displayName": "stale"}, epoch=stale, expected=423)
-        assert acquire_controller()["lease"]["epoch"] == stale + 1
+        assert acquire_controller(resume=stale)["lease"]["epoch"] == stale + 1
         execute(session_id)
         recovered = page(session_id, credentials["player"], generation=generation, limit=500)
         assert recovered["generation"] == generation and len(recovered["items"]) == player_count
@@ -799,6 +823,8 @@ def main(tool_source=None):
         assert [item["id"] for item in history["items"]] == ["live"]
         request("GET", "/game-notifications/history?gameSessionId=" + str(session_id), credentials=credentials["spectator"],
                 expected=403)
+        request("DELETE", f"/game-sessions/{session_id}", expected=409)
+        stop_game(session_id)
         request("DELETE", f"/game-sessions/{session_id}", expected=204)
         GAME_SESSION_IDS.remove(session_id)
         assert sql(f"SELECT COUNT(*) FROM tc_game_notifications WHERE gamesessionid={session_id}") == "0"

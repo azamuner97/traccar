@@ -1,0 +1,183 @@
+"""Phase-0 outage drill of game execution (Claude outputs/game-execution-plan.md), automated with the Tool's code.
+
+A Tool (the Tool's own ``ControllerLease``, ``GameSessionApi`` and ``GameExecutionGateway``) controls a running game
+with an open request and a hunter circle. Its network then drops for 60 seconds: it stops renewing, so the lease
+expires. During the gap a member submits another request and an administrator writes a test event. After the gap
+the Tool reconnects and is expected to
+
+- find the game still running,
+- re-acquire control on its own (``resumeEpoch``, no takeover),
+- find every open request untouched (nothing expired or ended),
+- find the hunter circle still published (120 s lifetime),
+- show the test event exactly once in its upload log, from the catch-up by event ID and a duplicate socket push.
+
+It also checks that ``gameEvents`` reach administrators only. Run against the full Docker profile with Python that
+has ``websocket-client`` and ``requests``, for example Traccar Tool's virtual environment::
+
+    python scripts/game_outage_drill.py --tool-source ../Traccar-Tool/src
+
+Creates and removes only its own fixtures; never resets volumes. ``--gap`` shortens the drop (at least 35 s, so the
+30 s lease expires).
+"""
+
+import argparse
+import json
+import sys
+import time
+from types import SimpleNamespace
+from zoneinfo import ZoneInfo
+
+import game_notification_integration as api
+
+
+def game_events(socket, seconds):
+    """The execution events a socket received within the given time."""
+    events = []
+    deadline = time.monotonic() + seconds
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return events
+        socket.settimeout(remaining)
+        try:
+            message = socket.recv()
+        except Exception:
+            return events
+        try:
+            data = json.loads(message)
+        except (TypeError, ValueError):
+            continue
+        events.extend(data.get("gameEvents") or ())
+
+
+def main(tool_source, gap):
+    sys.path.insert(0, tool_source)
+    from traccar_game_manager.infrastructure.traccar.controller_lease import CONTROLLING, LOST, ControllerLease
+    from traccar_game_manager.infrastructure.traccar.game_execution import GameExecutionGateway
+    from traccar_game_manager.infrastructure.traccar.game_sessions import GameSessionApi
+    from traccar_game_manager.infrastructure.traccar.transport import RequestsTransport
+    from traccar_game_manager.ui.live_session.game_state import LiveGameStateController
+
+    api.wait_for_server()
+    admin_id = api.create_admin()
+    fixtures = api.Fixtures()
+    tool = GameSessionApi(api.BASE, api.EMAIL, api.PASSWORD, transport=RequestsTransport())
+    lease = ControllerLease(tool, instance_id="drill-" + api.PREFIX[-24:], label="Outage drill", start=False)
+    tool.epoch_provider = lease.epoch_for_requests
+    session_id = None
+    try:
+        running = api.sql("SELECT gamesessionid FROM tc_game_session_state WHERE runningkey = 1")
+        if running:
+            raise RuntimeError("A game is running on the development server; stop it in Tool before the drill.")
+        snapshot = lease.acquire()
+        if snapshot.state != CONTROLLING:
+            raise RuntimeError("Another Tool controls the development server; release control before the drill.")
+        api.CONTROLLER["epoch"] = snapshot.epoch
+        session_id = api.create_game_session("drill")
+        members, credentials = {}, {}
+        for key, role in (("anna", "player"), ("ben", "player"), ("hunter", "hunter")):
+            members[key] = api.plan(session_id, role, key)
+            user, credentials[key] = fixtures.account("d-" + api.PREFIX[-16:] + "-" + key, readonly=True)
+            api.bind_account(session_id, members[key]["id"], user["id"])
+            tracker = fixtures.device(api.PREFIX + "-" + key)
+            members[key] = api.bind_tracker(session_id, members[key]["id"], tracker["id"])
+
+        gateway = GameExecutionGateway(tool, session_id)
+        assert gateway.start()["state"] == "running"
+        admin_socket = fixtures.socket((api.EMAIL, api.PASSWORD))
+        member_socket = fixtures.socket(credentials["hunter"])
+
+        def revision(key):
+            status = api.request("GET", "/game-status", credentials=credentials["hunter"])
+            return next(item for item in status["status"]["participants"]
+                        if item["memberId"] == members[key]["id"])["speedhunt"]["revision"]
+
+        waiting = api.request("POST", "/game-requests", {"type": "speedhuntTerminate",
+                                                         "targetMemberId": members["anna"]["id"],
+                                                         "baseRevision": revision("anna")},
+                              credentials=credentials["hunter"])
+        assert waiting["status"] == "pending", waiting
+        circle = {"expectedRevision": 0, "grants": [], "circles": [{
+            "id": "drill-circle", "latitude": 47, "longitude": 8, "diameterMeters": 500,
+            "expiresAt": api.iso(seconds=120), "memberIds": [members["anna"]["id"], members["ben"]["id"]]}]}
+        api.request("PUT", f"/game-proximity/session/{session_id}", circle)
+        before = gateway.events_after()
+        last_shown = before[-1]["id"]
+        game_events(admin_socket, 0.5)
+        game_events(member_socket, 0.5)
+
+        # The drop: no renewal from now on. The lease expires after 30 s; the game keeps running.
+        dropped = time.monotonic()
+        api.CONTROLLER["epoch"] = None
+        time.sleep(32)
+        assert api.request("GET", "/game-controller")["active"] is False
+        assert api.request("GET", f"/game-sessions/{session_id}/state")["state"] == "running"
+        second = api.request("POST", "/game-requests", {"type": "speedhuntTerminate",
+                                                        "targetMemberId": members["ben"]["id"],
+                                                        "baseRevision": revision("ben")},
+                             credentials=credentials["hunter"])
+        test = api.request("POST", f"/game-sessions/{session_id}/events/test", {"message": "Outage drill"},
+                           epoch=False)
+        pushed = game_events(admin_socket, 3)
+        assert [item["id"] for item in pushed] == [test["id"]], pushed
+        assert game_events(member_socket, 1) == [], "members never receive execution events"
+        time.sleep(max(0.0, gap - (time.monotonic() - dropped)))
+
+        # Reconnect: the heartbeat finds the lease gone and re-acquires it without a takeover.
+        lost = lease.tick()
+        assert lost.state == LOST and lost.resume_epoch == snapshot.epoch, lost
+        resumed = lease.tick()
+        assert resumed.state == CONTROLLING and resumed.epoch == snapshot.epoch + 1 and resumed.resumed == 1, \
+            resumed
+        api.CONTROLLER["epoch"] = resumed.epoch
+        history = [item["event"] for item in api.request("GET", "/game-controller/history?limit=5")["items"]]
+        assert "takeover" not in history[:2], history
+
+        assert gateway.state()["state"] == "running"
+        open_requests = {item["id"]: item["status"] for item in
+                         api.request("GET", f"/game-sessions/{session_id}/requests")}
+        assert open_requests == {waiting["id"]: "pending", second["id"]: "pending"}, open_requests
+        circles = api.request("GET", f"/game-proximity/session/{session_id}")["circles"]
+        assert [item["id"] for item in circles] == ["drill-circle"], circles
+
+        # The upload log: the catch-up by ID and a duplicate socket push show the test event once.
+        shown = []
+        owner = SimpleNamespace(
+            local_tz=ZoneInfo("Europe/Zurich"), root=None,
+            controller=SimpleNamespace(controller_snapshot=lease.snapshot),
+            coordinator=SimpleNamespace(show_server_log=lambda category, line, moment: None),
+            _append_main_log_line=lambda category, text, timestamp=None: shown.append(text),
+        )
+        window = LiveGameStateController(owner)
+        window.attach(gateway, gateway.state(), last_event_id=last_shown)
+        window.on_events([], reconnected=True)
+        window.on_events(pushed, reconnected=False)
+        assert shown == ["Server test event: Outage drill (sent by " + test["data"]["sentBy"] + ")."], shown
+        print(f"Outage drill passed ({round(time.monotonic() - dropped)} s without the Tool): the game kept "
+              "running, control was re-acquired automatically with a new epoch, both requests stayed open (one "
+              "submitted during the gap), the hunter circle survived, and the test event written during the gap "
+              "appeared in the upload log exactly once; execution events reached administrators only.")
+    finally:
+        fixtures.close_sockets()
+        if session_id is not None:
+            try:
+                if lease.snapshot().state == CONTROLLING:
+                    api.CONTROLLER["epoch"] = lease.snapshot().epoch
+                    tool.set_game_state(session_id, "stopped")
+                else:
+                    api.request("PUT", f"/game-sessions/{session_id}/state", {"state": "stopped"}, epoch=False)
+            except Exception as error:  # noqa: BLE001 - cleanup continues
+                print(f"Stopping the drill game failed: {error}")
+        fixtures.remove()
+        api.delete_game_sessions()
+        lease.release()
+        api.CONTROLLER["epoch"] = None
+        api.delete_admin(admin_id)
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--tool-source", required=True, help="Traccar Tool src directory")
+    parser.add_argument("--gap", type=float, default=60.0, help="Seconds without the Tool (at least 35)")
+    arguments = parser.parse_args()
+    main(arguments.tool_source, max(35.0, arguments.gap))

@@ -211,7 +211,8 @@ def game_flow(connection, clients, session, name, session_id, accounts, profile,
     from traccar_game_manager.infrastructure.traccar.game_sessions import GameControllerLockedError
     from traccar_game_manager.infrastructure.traccar.transport import RequestsTransport
 
-    connection.controller.set_executing(session_id)
+    started = connection.api.set_game_state(session_id, "running")
+    assert started["state"] == "running", started
     client = clients.from_session(session)
     requests = connection.requests_for(name)
     state = client.load_game_state()
@@ -290,8 +291,9 @@ def game_flow(connection, clients, session, name, session_id, accounts, profile,
     own = api.request("GET", "/game-jokers", credentials=accounts[("player", 1)])
     assert next(item for item in own["inventories"] if item["type"] == "hunterPositions")["used"] == 1
 
-    # A server restart ends the lease: the Tool loses control, resumes with a new epoch, and the game state
-    # (catch history, the run with its live ping, live uploads, jokers) is unchanged.
+    # A server restart ends the lease, not the game: the Tool loses control, re-acquires it with a new epoch
+    # (nobody acquired control meanwhile), and the game state (running; catch history, the run with its live
+    # ping, live uploads, jokers) is unchanged.
     before = api.request("GET", f"/game-sessions/{session_id}/snapshot")["state"]
     epoch = connection.controller.snapshot().epoch
     api.restart_server()
@@ -301,10 +303,12 @@ def game_flow(connection, clients, session, name, session_id, accounts, profile,
         lost = False
     except Exception:
         lost = True
-    resumed = connection.controller.resume()
-    assert resumed.controlling and resumed.epoch == epoch + 1, resumed
+    assert connection.api.game_state(session_id)["state"] == "running"
+    resumed = connection.controller.tick()
+    if not resumed.controlling:
+        resumed = connection.controller.tick()
+    assert resumed.controlling and resumed.epoch == epoch + 1 and resumed.resumed >= 1, resumed
     api.CONTROLLER["epoch"] = resumed.epoch
-    connection.controller.set_executing(session_id)
     after = api.request("GET", f"/game-sessions/{session_id}/snapshot")["state"]
     for key in ("catches", "runs", "liveUploads", "breaks", "statistics"):
         assert before[key] == after[key], (key, before[key], after[key])
@@ -333,13 +337,14 @@ def game_flow(connection, clients, session, name, session_id, accounts, profile,
         back = connection.controller.take_over()
         assert back.controlling and back.epoch == taken.epoch + 1, back
         api.CONTROLLER["epoch"] = back.epoch
-        connection.controller.set_executing(session_id)
+        assert connection.api.game_state(session_id)["state"] == "running"
     finally:
         other.close(5)
     print("Tool game flow passed: catch and release by member, a Live Ping as a live upload starting a run with "
           "a pool joker, live samples and history, manual live tracking with the reason for hunters only, a "
-          "hunter relay using the participant's joker, a server restart (control lost%s, resumed with a new "
-          "epoch, game state unchanged), and a controller handover with the previous holder refused."
+          "hunter relay using the participant's joker, a server restart (control lost%s, re-acquired "
+          "automatically with a new epoch, game still running, game state unchanged), and a controller handover "
+          "with the previous holder refused while the game keeps running."
           % (" and writes refused" if lost else ""))
 
 

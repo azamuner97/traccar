@@ -1,4 +1,4 @@
-"""Local MySQL/HTTP audit of game data model 2 (game-session API version 5) with isolated fixtures.
+"""Local MySQL/HTTP audit of game data model 2 (game-session API version 6) with isolated fixtures.
 
 Creates a temporary administrator and temporary members' accounts, exercises the game-session, controller, member,
 request, joker, timetable and status endpoints directly and, with ``--tool-source``, through Traccar Tool's model-2
@@ -130,7 +130,7 @@ def audit_http(fixtures, user_credentials):
     """Admin-only access, revisions, encryption at rest, timetable identity by member, logs, cascading deletion."""
     api.request("GET", "/game-sessions", credentials=user_credentials, expected=403)
     api.request("GET", "/game-sessions/capabilities", credentials=user_credentials, expected=403)
-    assert api.request("GET", "/game-sessions/capabilities") == {"apiVersion": 5}
+    assert api.request("GET", "/game-sessions/capabilities") == {"apiVersion": 6}
     session_id = api.create_game_session("http", {"pings_per_speedhunt": 4})
     api.request("POST", "/game-sessions", {"name": api.PREFIX + "-http", "schemaVersion": 5, "config": {}},
                 expected=409)
@@ -208,7 +208,7 @@ def audit_controller(fixtures, user_id, user_credentials):
     session_id = api.create_game_session("controller")
     real = fixtures.device(api.PREFIX + "-ctl-real")
     mirror = fixtures.device(api.PREFIX + "-ctl-mirror", attributes={"traccarToolMirror": True})
-    # Member and resource writes always need the epoch; configuration of a non-executing session does not.
+    # Member and resource writes always need the epoch; configuration of a session that is not running does not.
     api.request("POST", f"/game-sessions/{session_id}/members", {"role": "player", "displayName": "Anna"},
                 epoch=False, expected=423)
     anna = api.plan(session_id, "player", "Anna")
@@ -253,7 +253,7 @@ def audit_controller(fixtures, user_id, user_credentials):
     assert updated["attributes"]["auditPreference"] == "kept"
     # A request carrying a wrong epoch is refused whatever it changes.
     api.request("POST", "/groups", {"name": api.PREFIX + "-stale"}, epoch=epoch + 1000, expected=423)
-    # Pushes that reach members of the executing session, also sends without userId.
+    # Pushes that reach members of the running session, also sends without userId.
     message = {"subject": "Audit", "digest": "Audit", "body": "Audit", "priority": False}
     api.request("POST", f"/notifications/send/traccar?userId={user_id}", message, epoch=False, expected=423)
     api.request("POST", "/notifications/send/traccar", message, epoch=False, expected=423)
@@ -292,23 +292,35 @@ def audit_controller(fixtures, user_id, user_credentials):
     api.request("POST", f"/game-sessions/{session_id}/effects", {**delivery, "deliveryId": "audit-" + uuid4().hex},
                 epoch=False, expected=423)
 
-    # Takeover: the previous holder's delayed requests are refused.
-    api.request("PUT", "/game-controller/session", {"gameSessionId": None})
+    # Takeover: the previous holder's delayed requests are refused; the game keeps running.
     takeover = api.request("POST", "/game-controller/takeover", {"instanceId": other, "label": "Other PC"},
                            epoch=False)
     assert takeover["lease"]["epoch"] == epoch + 1
+    assert api.request("GET", f"/game-sessions/{session_id}/state")["state"] == "running"
     api.request("PUT", f"/game-sessions/{session_id}/members/{anna['id']}/name", {"displayName": "Late"},
                 epoch=epoch, expected=423)
     api.request("POST", "/game-controller/renew", {"instanceId": api.CONTROLLER["instance"]},
                 epoch=epoch, expected=423)
+    # Resuming the old epoch is refused: another Tool acquired control since.
+    api.request("POST", "/game-controller/acquire", {"instanceId": api.CONTROLLER["instance"], "label": "Audit",
+                                                     "resumeEpoch": epoch}, epoch=False, expected=423)
+    # Stopping the game without the epoch is refused while a lease is active.
+    api.request("PUT", f"/game-sessions/{session_id}/state", {"state": "stopped"}, epoch=False, expected=423)
     api.request("POST", "/game-controller/release", {}, epoch=epoch + 1)
+    api.request("POST", "/game-controller/acquire", {"instanceId": api.CONTROLLER["instance"], "label": "Audit",
+                                                     "resumeEpoch": epoch}, epoch=False, expected=409)
 
-    # Without a lease administrators may edit game resources; the next acquisition reports it.
+    # Without a lease administrators may edit game resources and stop the game; the next acquisition reports it.
     api.request("PUT", f"/devices/{mirror['id']}", {**renamed, "name": mirror["name"]}, epoch=False)
+    stopped = api.request("PUT", f"/game-sessions/{session_id}/state", {"state": "stopped"}, epoch=False)
+    assert stopped["state"] == "stopped", stopped
     acquired = api.acquire_controller()
     assert acquired["lease"]["epoch"] == epoch + 2
     assert any(item["detail"] == f"PUT /api/devices/{mirror['id']}" for item in acquired["drift"]), \
         acquired["drift"]
+    assert any(item["event"] == "gameStopped" for item in acquired["drift"]), acquired["drift"]
+    events = api.request("GET", f"/game-sessions/{session_id}/logs?events=true")["items"]
+    assert [item["data"]["type"] for item in events] == ["gameStarted", "gameStopped"], events
 
     # Expiry from the stored deadline: stop renewing, wait, and the epoch is refused.
     stop, api.CONTROLLER["stop"] = api.CONTROLLER["stop"], None
@@ -318,10 +330,11 @@ def audit_controller(fixtures, user_id, user_credentials):
     assert api.request("GET", "/game-controller")["state"] == "expired"
     api.request("PUT", f"/game-sessions/{session_id}/members/{anna['id']}/name", {"displayName": "Late"},
                 epoch=expiring, expected=423)
-    assert api.acquire_controller()["lease"]["epoch"] == expiring + 1
+    # Nobody acquired control since: the expired epoch is resumed without a takeover.
+    assert api.acquire_controller(resume=expiring)["lease"]["epoch"] == expiring + 1
     events = [item["event"] for item in api.request("GET", "/game-controller/history?limit=20")["items"]]
-    for event in ("expired", "acquired", "takeover", "takenOver", "released", "executing",
-                  "stoppedExecuting", "unfencedEdit"):
+    for event in ("expired", "acquired", "takeover", "takenOver", "released", "gameStarted",
+                  "gameStopped", "unfencedEdit"):
         assert event in events, (event, events)
     # Deleting the session leaves the Traccar resources it managed.
     api.request("DELETE", f"/game-sessions/{session_id}", expected=204)
@@ -335,7 +348,7 @@ def audit_requests(game, tool_source):
     """Hunters' requests: membership, role-filtered status, revisions, approval, claim, outcome, privacy."""
     api.execute(game.id)
     hunter_view = game.status("hunter")
-    assert hunter_view["controllerActive"] and hunter_view["role"] == "hunter", hunter_view
+    assert hunter_view["running"] and hunter_view["role"] == "hunter", hunter_view
     revision = game.revision("anna")
     player_view = game.status("anna")
     assert player_view["status"]["speedhunt"] == {"active": False}, player_view
@@ -814,6 +827,42 @@ def audit_retired_target(game):
     game.reconcile()
 
 
+def audit_control_changes(game):
+    """A change of control ends no request; an executing one returns to approved; stopping the game ends them."""
+    waiting = game.submit("hunter", {"type": "speedhuntTerminate", "targetMemberId": game.member_id("ben"),
+                                     "baseRevision": game.revision("ben")}, expected=200)
+    claimed = game.claim(waiting["id"])
+    assert claimed["status"] == "executing", claimed
+    epoch = api.CONTROLLER["epoch"]
+    other = "audit-req-" + uuid4().hex[:16]
+    api.request("POST", "/game-controller/takeover", {"instanceId": other, "label": "Other PC"}, epoch=False)
+    returned = game.operator_request(waiting["id"])
+    assert returned["status"] == "approved" and returned["epoch"] is None, returned
+    assert game.status("hunter")["running"]
+    # A recorded delivery is found under any epoch; an unknown one is 404.
+    delivery = "audit-lookup-" + uuid4().hex
+    api.request("GET", f"/game-sessions/{game.id}/effects/{delivery}", expected=404)
+    api.request("POST", "/game-controller/release", {}, epoch=epoch + 1)
+    api.acquire_controller()
+    api.request("POST", f"/game-sessions/{game.id}/effects", {"deliveryId": delivery, "logs": [
+        {"category": "audit", "occurredAt": api.iso(), "message": "lookup"}]})
+    assert api.request("GET", f"/game-sessions/{game.id}/effects/{delivery}")["replayed"]
+    # A test event reaches the log as an execution event.
+    event = api.request("POST", f"/game-sessions/{game.id}/events/test", {"message": "Audit drill"}, epoch=False)
+    assert event["category"] == "game" and event["data"]["type"] == "test", event
+    after = api.request("GET", f"/game-sessions/{game.id}/logs?events=true&after={event['id'] - 1}")["items"]
+    assert [item["id"] for item in after] == [event["id"]], after
+    # Stopping the game ends the open requests; members cannot submit until it runs again.
+    api.stop_game(game.id)
+    ended = game.operator_request(waiting["id"])
+    assert ended["status"] == "cancelled" and ended["message"] == "The game was stopped", ended
+    assert not game.status("hunter")["running"]
+    game.submit("hunter", {"type": "speedhuntTerminate", "targetMemberId": game.member_id("ben"),
+                           "baseRevision": game.revision("ben")}, expected=409)
+    api.execute(game.id)
+    game.reconcile()
+
+
 def audit_participant_privacy(fixtures):
     """Leakage between participants: own data only, nobody acts for another, nothing reveals a speedhunt target.
 
@@ -1188,26 +1237,18 @@ def main(tool_source=None):
         audit_timetable_fakes(game)
         audit_speedhunt_fakes(game)
         audit_retired_target(game)
-        # A change of control ends open requests: waiting ones expire.
-        waiting = game.submit("hunter", {"type": "speedhuntTerminate", "targetMemberId": game.member_id("ben"),
-                                         "baseRevision": game.revision("ben")}, expected=200)
-        epoch = api.CONTROLLER["epoch"]
-        api.request("POST", "/game-controller/takeover", {"instanceId": "audit-req-" + uuid4().hex[:16],
-                                                          "label": "Other PC"}, epoch=False)
-        expired = game.operator_request(waiting["id"])
-        assert expired["status"] == "expired" and "Control of the game changed" in expired["message"], expired
-        api.request("POST", "/game-controller/release", {}, epoch=epoch + 1)
-        api.acquire_controller()
-        assert not game.status("hunter")["controllerActive"]
+        audit_control_changes(game)
         audit_participant_privacy(fixtures)
         if tool_source:
             audit_tool(tool_source)
-        print("MySQL/HTTP game-session audit passed: admin-only access, API version 5, revision conflicts and "
+        print("MySQL/HTTP game-session audit passed: admin-only access, API version 6, revision conflicts and "
               "idempotent retries, credential encryption at rest, timetable entries keyed by member, logs, "
               "cascading deletion, controller lease with fenced game and standard endpoints (path and body IDs, "
-              "Jersey path numbers, permission keys as the resource reads them), push fencing and the outbox, drift reporting, takeover, expiry, idempotent effects with latest-position and online "
-              "status, hunters' requests with role-filtered status, stale revisions, approval, claim, outcome and "
-              "expiry on takeover, ping numbering and private sources, hunter positions, speedhunt pool and break "
+              "Jersey path numbers, permission keys as the resource reads them), push fencing and the outbox, "
+              "drift reporting, takeover, expiry and resume, the game state (start, stop without control, one "
+              "running game), execution events, idempotent effects with latest-position and online status and "
+              "their lookup, hunters' requests with role-filtered status, stale revisions, approval, claim, "
+              "outcome, requests that survive a change of control and end when the game stops, ping numbering and private sources, hunter positions, speedhunt pool and break "
               "jokers, catch and release, planned, waiting, started and cancelled breaks, mirror-only hunter "
               "access for permissions, group and device moves and bindings, timetable fakes (used, released, "
               "cancelled) with guarded positions, speedhunt fakes bound at a run's first ping and applied to the "
