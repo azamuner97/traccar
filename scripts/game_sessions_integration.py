@@ -1,4 +1,4 @@
-"""Local MySQL/HTTP audit of game data model 2 (game-session API version 6) with isolated fixtures.
+"""Local MySQL/HTTP audit of game data model 2 (game-session API version 7) with isolated fixtures.
 
 Creates a temporary administrator and temporary members' accounts, exercises the game-session, controller, member,
 request, joker, timetable and status endpoints directly and, with ``--tool-source``, through Traccar Tool's model-2
@@ -9,11 +9,14 @@ notificator sends nothing.
 """
 
 import argparse
+import base64
 from datetime import datetime, timedelta, timezone
 import json
 import secrets
 import sys
 import time
+import urllib.error
+import urllib.request
 from uuid import uuid4
 
 import game_notification_integration as api
@@ -30,6 +33,46 @@ def _iso(moment):
 def refusal(path, body, credentials=(api.EMAIL, api.PASSWORD), expected=409):
     """The message of a refused POST (409 by default)."""
     return api.refusal("POST", path, body, credentials=credentials, expected=expected).split(": ", 1)[-1].strip()
+
+
+def timetable_changes(session_id, changes, expected=200, change_id=None, base=None):
+    """Applies a timetable changeset based on the current revision; returns its result (or the 422 body)."""
+    path = f"/game-sessions/{session_id}/timetable"
+    body = {"changeId": change_id or "audit-" + uuid4().hex,
+            "baseRevision": api.request("GET", path)["revision"] if base is None else base, "changes": changes}
+    if expected == 422:
+        return rejection("POST", path + "/changes", body)
+    return api.request("POST", path + "/changes", body, expected=expected)
+
+
+def rejection(method, path, body):
+    """The JSON body of a 422 answer (the timetable's list of failing changes)."""
+    headers = {"Content-Type": "application/json",
+               "Authorization": "Basic " + base64.b64encode(f"{api.EMAIL}:{api.PASSWORD}".encode()).decode()}
+    if api.CONTROLLER["epoch"] is not None:
+        headers[api.EPOCH_HEADER] = str(api.CONTROLLER["epoch"])
+    message = urllib.request.Request(api.BASE + "/api" + path, data=json.dumps(body).encode(), headers=headers,
+                                     method=method)
+    try:
+        urllib.request.urlopen(message, timeout=15)
+    except urllib.error.HTTPError as error:
+        assert error.code == 422, f"{method} {path} returned {error.code}, expected 422"
+        return json.loads(error.read())
+    raise AssertionError(f"{method} {path} was accepted, expected 422")
+
+
+def columns(session_id, *member_ids):
+    """addParticipant changes for the members that are not timetable columns yet."""
+    listed = {item["memberId"] for item in api.request("GET", f"/game-sessions/{session_id}/timetable")[
+        "participants"]}
+    return [{"type": "addParticipant", "memberId": member} for member in member_ids if member not in listed]
+
+
+def timetable_entries(session_id):
+    """(memberId, content) -> entry ID of every present cell, and the slot of each entry."""
+    read = api.request("GET", f"/game-sessions/{session_id}/timetable")
+    return {(entry["memberId"], entry["content"]): entry["id"] for slot in read["slots"]
+            for entry in slot["entries"]}
 
 
 class Game:
@@ -130,7 +173,7 @@ def audit_http(fixtures, user_credentials):
     """Admin-only access, revisions, encryption at rest, timetable identity by member, logs, cascading deletion."""
     api.request("GET", "/game-sessions", credentials=user_credentials, expected=403)
     api.request("GET", "/game-sessions/capabilities", credentials=user_credentials, expected=403)
-    assert api.request("GET", "/game-sessions/capabilities") == {"apiVersion": 6}
+    assert api.request("GET", "/game-sessions/capabilities") == {"apiVersion": 7}
     session_id = api.create_game_session("http", {"pings_per_speedhunt": 4})
     api.request("POST", "/game-sessions", {"name": api.PREFIX + "-http", "schemaVersion": 5, "config": {}},
                 expected=409)
@@ -150,41 +193,63 @@ def audit_http(fixtures, user_credentials):
     assert api.request("GET", f"/game-sessions/{session_id}/credentials")["document"]["user_passwords"][
         "player"] == secret
 
-    # Timetable entries are keyed by time and member: a rename never moves them, and content edits keep IDs.
+    # The server timetable: cells keyed by slot and member, so a rename never moves them and edits keep IDs.
     anna = api.plan(session_id, "player", "Anna")
-    api.plan(session_id, "player", "Ben")
-    columns = ["Time", "Anna", "Ben"]
-    entries = [{"scheduledAt": "2026-05-01T10:00:00Z", "participant": "Anna", "content": ""},
-               {"scheduledAt": "2026-05-01T10:00:00Z", "participant": "Ben", "content": "b"}]
+    ben = api.plan(session_id, "player", "Ben")
+    hunter = api.plan(session_id, "hunter", "Hugo")
     timetable = f"/game-sessions/{session_id}/timetable"
-    first = api.request("PUT", timetable, {"expectedRevision": 0, "columns": columns, "source": {},
-                                           "entries": entries})
-    assert {entry["memberId"] for entry in first["entries"]} >= {anna["id"]}
-    entries[0]["content"] = "47.1,8.5|2H"
-    second = api.request("PUT", timetable, {"expectedRevision": 1, "columns": columns, "source": {},
-                                            "entries": entries})
-    assert [entry["id"] for entry in first["entries"]] == [entry["id"] for entry in second["entries"]]
-    assert not second["structureChanged"]
+    at = _iso((datetime.now(timezone.utc) + timedelta(hours=1)).replace(microsecond=0))
+    changes = columns(session_id, anna["id"], ben["id"]) + [
+        {"type": "addSlot", "key": "ten", "scheduledAt": at, "cells": {str(anna["id"]): " ", str(ben["id"]): "b"}}]
+    first = timetable_changes(session_id, changes, change_id="audit-http-timetable-1", base=0)
+    slot = first["slots"]["ten"]
+    read = api.request("GET", timetable)
+    assert read["revision"] == first["revision"] == 1 and read["execution"]["gameState"] == "stopped", read
+    assert [item["memberId"] for item in read["participants"]] == [anna["id"], ben["id"]], read
+    ids = [entry["id"] for entry in read["slots"][0]["entries"]]
+    assert [entry["content"] for entry in read["slots"][0]["entries"]] == ["", "b"], read
+    # A retried changeset answers its recorded result; a stale base revision conflicts.
+    assert timetable_changes(session_id, changes, change_id="audit-http-timetable-1", base=0)["replayed"]
+    timetable_changes(session_id, changes[:1], change_id="audit-http-timetable-1", base=0, expected=409)
+    timetable_changes(session_id, [], base=0, expected=409)
+    second = timetable_changes(session_id, [{"type": "setCell", "slotId": slot, "memberId": anna["id"],
+                                             "content": "47.1,8.5|2h"}])
     api.request("PUT", f"/game-sessions/{session_id}/members/{anna['id']}/name", {"displayName": "Anna B."})
-    renamed = api.request("PUT", timetable, {"expectedRevision": 2, "columns": ["Time", "Anna B.", "Ben"],
-                                             "source": {}, "entries": [{**entries[0], "participant": "Anna B."},
-                                                                       entries[1]]})
-    assert [entry["id"] for entry in renamed["entries"]] == [entry["id"] for entry in first["entries"]]
-    api.request("PUT", timetable, {"expectedRevision": 3, "columns": columns, "source": {},
-                                   "entries": [{**entries[0], "participant": "Nobody"}]}, expected=400)
+    read = api.request("GET", timetable)
+    assert [entry["id"] for entry in read["slots"][0]["entries"]] == ids, read
+    assert read["slots"][0]["entries"][0]["content"] == "47.1,8.5|2H", read
+    assert read["participants"][0]["displayName"] == "Anna B." and read["revision"] == second["revision"], read
+    # A rejection lists every failing change and applies none.
+    text = timetable_changes(session_id, [
+        {"type": "setCell", "slotId": slot, "memberId": hunter["id"], "content": ""},
+        {"type": "setCell", "slotId": slot, "memberId": ben["id"], "content": "2Q"},
+        {"type": "addSlot", "key": "soon", "scheduledAt": api.iso(seconds=5), "cells": {}}], expected=422)
+    assert [error["code"] for error in text["errors"]] == ["inactiveMember", "invalidInstruction", "frozen"], text
+    assert text["errors"][1]["index"] == 1 and text["errors"][1]["slotId"] == slot, text
+    assert api.request("GET", timetable)["revision"] == second["revision"]
+    api.request("PUT", f"{timetable}/execution", {"enabled": True})
+    assert api.request("GET", timetable)["execution"]["enabled"]
+    api.request("PUT", timetable, {"expectedRevision": 0, "columns": [], "entries": []}, expected=405)
+    api.request("PUT", f"{timetable}/progress", {"entries": []}, expected=404)
 
     logs = f"/game-sessions/{session_id}/logs"
     api.request("POST", logs, {"entries": [{"category": "operation", "occurredAt": api.iso(),
                                        "message": "[10:00:00] audit"}]},
                 expected=204)
-    assert [item["message"] for item in api.request("GET", logs)["items"]] == ["[10:00:00] audit"]
+    assert [item["message"] for item in api.request("GET", logs + "?category=operation")["items"]] \
+        == ["[10:00:00] audit"]
+    # The toggle above wrote a timetable execution event; events list only rows with data.
+    events = api.request("GET", logs + "?events=true")["items"]
+    assert [(item["category"], item["data"]["type"], item["data"]["state"]) for item in events] \
+        == [("timetable", "execution", "on")], events
     generation = api.request("POST", f"/game-notifications/session/{session_id}", {})["generation"]
     api.request("POST", "/game-notifications", {"gameSessionId": session_id, "generation": generation, "alert": {
         "id": "audit-1", "type": "notificationTest", "audience": "session", "occurredAt": api.iso(),
         "timeZone": "UTC", "message": "Audit"}})
     api.request("DELETE", f"/game-sessions/{session_id}", expected=204)
     api.GAME_SESSION_IDS.remove(session_id)
-    for table in ("tc_game_notifications", "tc_game_timetable_entries", "tc_game_session_members",
+    for table in ("tc_game_notifications", "tc_game_timetable_entries", "tc_game_timetable_slots",
+                  "tc_game_timetable_participants", "tc_game_timetables", "tc_game_session_members",
                   "tc_game_session_logs", "tc_game_session_credentials", "tc_game_session_settings"):
         assert api.sql(f"SELECT COUNT(*) FROM {table} WHERE gamesessionid={session_id};") == "0", table
     api.request("GET", f"/game-sessions/{session_id}", expected=404)
@@ -674,19 +739,19 @@ def audit_mirror_only_access(game):
 
 
 def audit_timetable_fakes(game):
-    """Timetable fakes: eligible pings, plans private to their owner, used with the hunters' delivery, else released."""
-    game.change("anna", "fakePing", 2)
+    """Timetable fakes: eligible pings, plans private to their owner, released when their ping moves, no longer
+    reaches the hunters or is cancelled, and by their owner."""
+    game.change("anna", "fakePing", 3)
     base = (datetime.now(timezone.utc) + timedelta(hours=1)).replace(second=0, microsecond=0)
-    names = {key: game.members[key]["displayName"] for key in ("anna", "ben")}
-    cells = {"anna": ["", "2H", "b", "47.1,8.5|2H", "2P2H"], "ben": ["", "2H"]}
+    anna, ben = game.member_id("anna"), game.member_id("ben")
+    cells = {anna: ["", "2H", "b", "47.1,8.5|2H", "2P2H"], ben: ["", "2H"]}
     timetable = f"/game-sessions/{game.id}/timetable"
-    published = api.request("PUT", timetable, {
-        "expectedRevision": api.request("GET", timetable)["revision"],
-        "columns": ["Time", names["anna"], names["ben"]], "source": {},
-        "entries": [{"scheduledAt": _iso(base + timedelta(minutes=10 * index)), "participant": names[key],
-                     "content": cell} for key, row in cells.items() for index, cell in enumerate(row)]})
-    ids = {(entry["memberId"], entry["content"]): entry["id"] for entry in published["entries"]}
-    anna = game.member_id("anna")
+    changes = columns(game.id, anna, ben)
+    for index in range(5):
+        changes.append({"type": "addSlot", "key": f"row{index}", "scheduledAt": _iso(base + timedelta(minutes=10 * index)),
+                        "cells": {str(member): row[index] for member, row in cells.items() if index < len(row)}})
+    slots = timetable_changes(game.id, changes)["slots"]
+    ids = timetable_entries(game.id)
 
     def arm(entry_id, expected=200):
         request = game.submit("anna", {"type": "jokerFakePing", "parameters": {
@@ -703,51 +768,115 @@ def audit_timetable_fakes(game):
     assert {item["entryId"] for item in own} == {ids[(anna, "")], ids[(anna, "2H")], ids[(anna, "2P2H")]}, own
     game.submit("anna", {"type": "jokerFakePing", "parameters": {"entryId": ids[(anna, "47.1,8.5|2H")],
                                                                   "latitude": 47, "longitude": 8}}, expected=409)
-    assert "is too close" not in json.dumps(own)
     game.submit("anna", {"type": "jokerFakePing", "parameters": {"entryId": ids[(anna, "b")],
                                                                   "latitude": 47, "longitude": 8}}, expected=409)
-    game.submit("anna", {"type": "jokerFakePing", "parameters": {"entryId": ids[(game.member_id("ben"), "")],
+    game.submit("anna", {"type": "jokerFakePing", "parameters": {"entryId": ids[(ben, "")],
                                                                   "latitude": 47, "longitude": 8}}, expected=400)
     first = arm(ids[(anna, "")])
     game.submit("anna", {"type": "jokerFakePing", "parameters": {"entryId": ids[(anna, "")],
                                                                   "latitude": 47, "longitude": 8}}, expected=409)
-    # Spectators hold no jokers (403); the others read their own.
+    # Spectators hold no jokers (403); the others read their own; the operators' timetable names the fake.
     api.request("GET", "/game-jokers", credentials=game.credentials["spectator"], expected=403)
     for key in ("ben", "hunter", "spectator"):
         text = json.dumps([game.status(key), game.own_jokers(key) if key != "spectator" else None,
                            game.requests(key), api.request("GET", "/game-timetable",
                                                            credentials=game.credentials[key])])
         assert str(PRIVATE_LATITUDE) not in text, f"Anna's fake plan leaked to {key}"
-    # The Tool delivers the fake with the hunters' ping (fakeUsed) and the real coordinate as a guarded fallback.
-    mirror = game.mirrors["anna"]
-    used = game.effects(operations=[{"type": "fakeUsed", "reservationId": first}], positions=[
-        {"deviceId": mirror["id"], "latitude": PRIVATE_LATITUDE, "longitude": 8.5, "fakeReservationId": first,
-         "fallbackLatitude": 47.0, "fallbackLongitude": 8.0}])
-    position = api.request("GET", f"/positions?id={used['positions'][0]['positionId']}")[0]
-    assert position["latitude"] == PRIVATE_LATITUDE, position
-    assert game.inventory("anna", "fakePing")["used"] == 1
-    # A fake whose ping is skipped or no longer reaches the hunters is released with the real position.
+    armed = [entry for slot in api.request("GET", timetable)["slots"] for entry in slot["entries"]
+             if entry.get("fakeReservationId")]
+    assert [(entry["id"], entry["fakeReservationId"]) for entry in armed] == [(ids[(anna, "")], first)], armed
+    # A move releases the fake; so does content that no longer reaches the hunters, and the owner's cancellation.
+    timetable_changes(game.id, [{"type": "moveSlot", "slotId": slots["row0"],
+                                 "scheduledAt": _iso(base + timedelta(minutes=5))}])
     second = arm(ids[(anna, "2H")])
-    released = game.effects(operations=[{"type": "fakeReleased", "reservationId": second, "detail": "skipped"}],
-                            positions=[{"deviceId": mirror["id"], "latitude": 47.2, "longitude": 8.2}])
-    assert released["fakes"] == [{"reservationId": second, "status": "released"}], released
-    inventory = game.inventory("anna", "fakePing")
-    assert inventory["used"] == 1 and inventory["reserved"] == 0 and inventory["available"] == 1, inventory
-    # The owner cancels an unused fake while the Tool delivers it: the fake is skipped and the guarded position
-    # carries the real coordinate, so a cancellation never races the delivery.
+    timetable_changes(game.id, [{"type": "setCell", "slotId": slots["row1"], "memberId": anna, "content": "b"}])
     third = arm(ids[(anna, "2P2H")])
     assert api.request("POST", f"/game-jokers/reservations/{third}/cancel", {},
                        credentials=game.credentials["anna"])["status"] == "released"
-    raced = game.effects(operations=[{"type": "fakeUsed", "reservationId": third}], positions=[
-        {"deviceId": mirror["id"], "latitude": PRIVATE_LATITUDE, "longitude": 8.5, "fakeReservationId": third,
-         "fallbackLatitude": 47.3, "fallbackLongitude": 8.3}])
-    assert raced["fakes"] == [{"reservationId": third, "status": "skipped"}], raced
-    position = api.request("GET", f"/positions?id={raced['positions'][0]['positionId']}")[0]
-    assert position["latitude"] == 47.3, position
-    assert game.inventory("anna", "fakePing")["used"] == 1
-    # A guarded position without its fake's settlement in the same delivery is refused.
-    game.effects(positions=[{"deviceId": mirror["id"], "latitude": 1, "longitude": 1, "fakeReservationId": third,
+    ledger = api.request("GET", f"/game-sessions/{game.id}/jokers/ledger")
+    released = {entry["reservationId"] for entry in ledger if entry["kind"] == "release"}
+    assert {first, second, third} <= released, ledger
+    inventory = game.inventory("anna", "fakePing")
+    assert inventory["used"] == 0 and inventory["reserved"] == 0 and inventory["available"] == 3, inventory
+    # The guarded positions and fake operations of the Tool-run timetable are gone.
+    mirror = game.mirrors["anna"]
+    game.effects(operations=[{"type": "fakeUsed", "reservationId": first}], expected=400)
+    game.effects(positions=[{"deviceId": mirror["id"], "latitude": 1, "longitude": 1, "fakeReservationId": first,
                              "fallbackLatitude": 47.3, "fallbackLongitude": 8.3}], expected=400)
+    timetable_changes(game.id, [{"type": "removeSlot", "slotId": slot} for slot in slots.values()])
+    game.reconcile()
+
+
+def wait_until(moment):
+    delay = (moment - datetime.now(timezone.utc)).total_seconds()
+    if delay > 0:
+        time.sleep(delay)
+
+
+def audit_timetable_execution(game):
+    """The server runs the timetable: a slot due while no Tool holds the lease is executed on time, the armed fake
+    reaches the hunters' mirror and is used, every outcome is an execution event the Tool catches up on by ID, and
+    the timetable switches itself off when no slot is left."""
+    state = api.request("GET", f"/game-sessions/{game.id}/state")
+    assert state["state"] == "running", state
+    anna, ben, sue = game.member_id("anna"), game.member_id("ben"), game.member_id("sue")
+    timetable = f"/game-sessions/{game.id}/timetable"
+    game.change("anna", "fakePing", 1)
+    used = game.inventory("anna", "fakePing")["used"]
+    due = datetime.now(timezone.utc).replace(microsecond=0) + timedelta(seconds=40)
+    stale = [{"type": "removeSlot", "slotId": slot["id"]} for slot in api.request("GET", timetable)["slots"]
+             if slot["state"] == "scheduled"]
+    result = timetable_changes(game.id, stale + columns(game.id, anna, ben, sue) + [
+        {"type": "addSlot", "key": "due", "scheduledAt": _iso(due),
+         "cells": {str(anna): "2H", str(ben): "2h", str(sue): "x"}}])
+    slot_id = result["slots"]["due"]
+    entry = next(item for slot in api.request("GET", timetable)["slots"] if slot["id"] == slot_id
+                 for item in slot["entries"] if item["memberId"] == anna)
+    request = game.submit("anna", {"type": "jokerFakePing", "parameters": {
+        "entryId": entry["id"], "latitude": PRIVATE_LATITUDE, "longitude": 8.5}})
+    game.claim(request["id"])
+    game.succeed(request["id"], "Your fake ping is armed.")
+    last = api.request("GET", timetable)["execution"]["lastEventId"]
+    assert not api.request("GET", timetable)["execution"]["enabled"]
+    assert api.request("PUT", f"{timetable}/execution", {"enabled": True})["enabled"]
+
+    # The Tool drops out before the slot is due: no lease is held while it runs.
+    epoch = api.CONTROLLER["epoch"]
+    api.release_controller()
+    try:
+        assert not api.request("GET", "/game-controller")["active"]
+        wait_until(due - timedelta(seconds=15))
+        for key, latitude in (("anna", 46.95), ("ben", 46.96)):
+            api.upload(game.trackers[key]["uniqueId"], latitude, 7.45)
+        deadline = time.time() + 75
+        while time.time() < deadline:
+            read = api.request("GET", timetable)
+            if not read["execution"]["enabled"]:
+                break
+            time.sleep(1)
+        slot = next(item for item in read["slots"] if item["id"] == slot_id)
+        assert slot["state"] == "done", slot
+        outcomes = {item["memberId"]: (item["status"], item.get("reason")) for item in slot["entries"]}
+        assert outcomes == {anna: ("sent", None), ben: ("sent", None), sue: ("skipped", "skip")}, outcomes
+        # The hunters received Anna's fake, never her real position; Ben's real position.
+        hunters = api.request("GET", f"/positions?deviceId={game.mirrors['anna']['id']}")
+        assert [item["latitude"] for item in hunters] == [PRIVATE_LATITUDE], hunters
+        assert api.request("GET", f"/positions?deviceId={game.mirrors['ben']['id']}")[0]["latitude"] == 46.96
+        events = api.request("GET", f"/game-sessions/{game.id}/logs?events=true&after={last}")["items"]
+        timetable_events = [item for item in events if item["category"] == "timetable"]
+        assert [item["data"]["type"] for item in timetable_events] == [
+            "execution", "slotStarted", "ping", "ping", "ping", "slotFinished", "execution"], timetable_events
+        assert [item["data"].get("state") for item in timetable_events if item["data"]["type"] == "execution"] \
+            == ["on", "completed"], timetable_events
+        pings = {item["data"]["memberId"]: item["data"] for item in timetable_events
+                 if item["data"]["type"] == "ping"}
+        assert pings[anna]["fake"]["status"] == "consumed" and pings[anna]["delaySeconds"] < 10, pings[anna]
+        assert pings[ben]["content"] == "2H" and not pings[ben]["position"]["stale"], pings[ben]
+        assert read["execution"]["lastEventId"] == events[-1]["id"], read["execution"]
+    finally:
+        api.acquire_controller(resume=epoch)
+    assert api.CONTROLLER["epoch"] == epoch + 1
+    assert game.inventory("anna", "fakePing")["used"] == used + 1
     game.reconcile()
 
 
@@ -964,23 +1093,21 @@ def audit_timetable_privacy(game, sockets):
     spectators, without cell content, so an operator coordinate or a fake looks exactly like a real ping."""
     game.change("anna", "fakePing", 1)
     base = (datetime.now(timezone.utc) + timedelta(hours=1)).replace(second=0, microsecond=0)
-    names = {key: game.members[key]["displayName"] for key in ("anna", "ben")}
-    cells = {"anna": ["", "2H", "b", "x", "47.1,8.5|2H", "2P2S"], "ben": ["", "2H"]}
-    timetable = f"/game-sessions/{game.id}/timetable"
-    published = api.request("PUT", timetable, {
-        "expectedRevision": api.request("GET", timetable)["revision"],
-        "columns": ["Time", names["anna"], names["ben"]], "source": {},
-        "entries": [{"scheduledAt": _iso(base + timedelta(minutes=10 * index)), "participant": names[key],
-                     "content": cell} for key, row in cells.items() for index, cell in enumerate(row)]})
-    ids = {(entry["participant"], entry["content"]): entry["id"] for entry in published["entries"]}
-    faked = ids[(names["anna"], "")]
+    anna, ben = game.member_id("anna"), game.member_id("ben")
+    cells = {anna: ["", "2H", "b", "x", "47.1,8.5|2H", "2P2S"], ben: ["", "2H"]}
+    changes = columns(game.id, anna, ben)
+    for index in range(6):
+        changes.append({"type": "addSlot", "key": f"row{index}", "scheduledAt": _iso(base + timedelta(minutes=10 * index)),
+                        "cells": {str(member): row[index] for member, row in cells.items() if index < len(row)}})
+    timetable_changes(game.id, changes)
+    ids = timetable_entries(game.id)
+    faked = ids[(anna, "")]
     request = game.submit("anna", {"type": "jokerFakePing", "parameters": {
         "entryId": faked, "latitude": PRIVATE_LATITUDE, "longitude": 8.5}})
     game.claim(request["id"])
     game.succeed(request["id"], "Your fake ping is armed.")
 
-    hunter_facing = {ids[(names["anna"], cell)] for cell in ("", "2H", "47.1,8.5|2H")} \
-        | {ids[(names["ben"], cell)] for cell in ("", "2H")}
+    hunter_facing = {ids[(anna, cell)] for cell in ("", "2H", "47.1,8.5|2H")} | {ids[(ben, cell)] for cell in ("", "2H")}
     # Hunters see only the distinct times of the pings that reach them: no entry, participant or state.
     hunter_pings = api.request("GET", "/game-timetable", credentials=game.credentials["hunter"])
     facing_times = sorted({_iso(base + timedelta(minutes=10 * index)) for index in (0, 1, 4)})
@@ -994,30 +1121,22 @@ def audit_timetable_privacy(game, sockets):
     text = json.dumps([hunter_pings, spectator_pings])
     assert "47.1" not in text and str(PRIVATE_LATITUDE) not in text and "content" not in text, text
     assert all(sorted(item) == sorted(spectator_pings[0]) and item.get("fakeAllowed") is None
-               and item["state"] == "scheduled" and item.get("stateAt") is None for item in spectator_pings), \
-        spectator_pings
-    for key, expected in (("anna", [(ids[(names["anna"], "")], False), (ids[(names["anna"], "2H")], True)]),
-                          ("ben", [(ids[(names["ben"], "")], True), (ids[(names["ben"], "2H")], True)])):
+               and item["state"] == "scheduled" for item in spectator_pings), spectator_pings
+    for key, expected in (("anna", [(ids[(anna, "")], False), (ids[(anna, "2H")], True)]),
+                          ("ben", [(ids[(ben, "")], True), (ids[(ben, "2H")], True)])):
         own = api.request("GET", "/game-timetable", credentials=game.credentials[key])
         assert [(item["entryId"], item["fakeAllowed"]) for item in own] == expected, own
         assert {item["memberId"] for item in own} == {game.member_id(key)}, own
 
-    # Progress is announced to every member alike; the faked ping is recorded like any other.
+    # A timetable change is announced to every member alike, whoever's cells it touched.
     sockets.append(game.fixtures.socket(game.credentials["hunter"]))
     for socket in sockets:
         api.drain(socket, 0.5)
-    api.effects(game.id, operations=[{"type": "fakeUsed", "reservationId": next(
-        item["reservationId"] for item in game.status("anna")["status"]["fakes"] if item.get("entryId") == faked)}])
-    for socket in sockets:
-        api.drain(socket, 0.5)
-    api.request("PUT", f"{timetable}/progress", {"entries": [
-        {"id": faked, "status": "sent"}, {"id": ids[(names["ben"], "")], "status": "sent"}]}, expected=204)
+    slot = next(item["id"] for item in api.request("GET", f"/game-sessions/{game.id}/timetable")["slots"]
+                if any(entry["id"] == ids[(ben, "2H")] for entry in item["entries"]))
+    timetable_changes(game.id, [{"type": "setCell", "slotId": slot, "memberId": ben, "content": ""}])
     announced = [sorted(set(api.invalidations(socket))) for socket in sockets]
     assert all(item == announced[0] for item in announced) and "game-timetable" in announced[0], announced
-    sent = {item["entryId"]: item for item in api.request("GET", "/game-timetable",
-                                                          credentials=game.credentials["spectator"])}
-    anna_sent, ben_sent = sent[faked], sent[ids[(names["ben"], "")]]
-    assert anna_sent["state"] == ben_sent["state"] == "sent" and anna_sent["stateAt"] == ben_sent["stateAt"]
 
 
 # Traccar Tool against the server ------------------------------------------------------------------------------
@@ -1235,14 +1354,16 @@ def main(tool_source=None):
         audit_breaks(game, tool_source)
         audit_mirror_only_access(game)
         audit_timetable_fakes(game)
+        audit_timetable_execution(game)
         audit_speedhunt_fakes(game)
         audit_retired_target(game)
         audit_control_changes(game)
         audit_participant_privacy(fixtures)
         if tool_source:
             audit_tool(tool_source)
-        print("MySQL/HTTP game-session audit passed: admin-only access, API version 6, revision conflicts and "
-              "idempotent retries, credential encryption at rest, timetable entries keyed by member, logs, "
+        print("MySQL/HTTP game-session audit passed: admin-only access, API version 7, revision conflicts and "
+              "idempotent retries, credential encryption at rest, timetable changesets (cells keyed by slot and "
+              "member, canonical content, 422 rejections, retries), logs, "
               "cascading deletion, controller lease with fenced game and standard endpoints (path and body IDs, "
               "Jersey path numbers, permission keys as the resource reads them), push fencing and the outbox, "
               "drift reporting, takeover, expiry and resume, the game state (start, stop without control, one "
@@ -1250,8 +1371,9 @@ def main(tool_source=None):
               "their lookup, hunters' requests with role-filtered status, stale revisions, approval, claim, "
               "outcome, requests that survive a change of control and end when the game stops, ping numbering and private sources, hunter positions, speedhunt pool and break "
               "jokers, catch and release, planned, waiting, started and cancelled breaks, mirror-only hunter "
-              "access for permissions, group and device moves and bindings, timetable fakes (used, released, "
-              "cancelled) with guarded positions, speedhunt fakes bound at a run's first ping and applied to the "
+              "access for permissions, group and device moves and bindings, timetable fakes (released on moves, "
+              "ineligible content and cancellation), a timetable slot the server executes while no lease is held "
+              "(fake used, events caught up by ID, completion), speedhunt fakes bound at a run's first ping and applied to the "
               "hunters' mirror, a retired speedhunt target ending its run, requests and live uploads, participant privacy (identical status, hash, refusals and announcements for a "
               "speedhunt's target), and timetable pings without cell content"
               + (", plus the Tool's request processor, break service and repository round trip." if tool_source
