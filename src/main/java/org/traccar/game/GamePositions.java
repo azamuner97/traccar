@@ -1,0 +1,182 @@
+/*
+ * Copyright 2026 Traccar Tool contributors
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy at http://www.apache.org/licenses/LICENSE-2.0
+ */
+package org.traccar.game;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.traccar.model.AttributeMap;
+import org.traccar.model.Position;
+
+import java.sql.SQLException;
+import java.sql.Timestamp;
+import java.time.Instant;
+import java.time.format.DateTimeParseException;
+import java.time.temporal.ChronoUnit;
+import java.util.ArrayList;
+import java.util.Date;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
+
+/**
+ * The one insertion path of mirror positions, shared by effects deliveries and the ping engine: the uniform payload
+ * the Tool has always uploaded, whole-second fix times, the same column conversions as Traccar's storage, and the
+ * device's {@code positionid} moved to the newest fix. Positions are published after commit through a
+ * {@link Written} collector. It also reads a tracker's latest real position like {@code /api/positions}.
+ */
+public final class GamePositions {
+
+    public static final String PROTOCOL = "osmand";
+    static final int MAX_ATTRIBUTES = 64;
+
+    /** A tracker's position as the engine uses it: coordinate and fix time. */
+    public record Fix(double latitude, double longitude, Instant fixTime) {
+
+        static Fix of(Position position) {
+            Date time = position.getFixTime() != null ? position.getFixTime() : position.getDeviceTime();
+            return new Fix(position.getLatitude(), position.getLongitude(),
+                    time == null ? null : time.toInstant());
+        }
+    }
+
+    /** One mirror position written by a transaction. */
+    public record Written(long deviceId, long positionId, boolean latest, String fixTime) {
+    }
+
+    /** What a transaction wrote, published to caches and WebSocket after commit. */
+    public static final class Collector {
+        private final Set<Long> devices = new LinkedHashSet<>();
+        private final List<Position> latest = new ArrayList<>();
+
+        public boolean isEmpty() {
+            return devices.isEmpty();
+        }
+
+        /** Registers the publication after commit, once per transaction. */
+        public void publish(GameTransaction transaction, GamePublisher publisher) {
+            if (!devices.isEmpty()) {
+                Set<Long> received = java.util.Collections.unmodifiableSet(new LinkedHashSet<>(devices));
+                List<Position> positions = List.copyOf(latest);
+                transaction.afterCommit(() -> publisher.positions(received, positions));
+            }
+        }
+    }
+
+    private GamePositions() {
+    }
+
+    static void checkCoordinates(Double latitude, Double longitude) {
+        if (latitude == null || longitude == null || latitude.isNaN() || longitude.isNaN()
+                || Math.abs(latitude) > 90 || Math.abs(longitude) > 180) {
+            throw GameErrors.invalid("Invalid position coordinates");
+        }
+    }
+
+    /**
+     * The fix time to store, in whole seconds. MySQL keeps {@code tc_positions.fixtime} to the second and rounds
+     * fractions, so a millisecond fix time would be compared against a different stored value.
+     */
+    static Instant fixTime(String value, Instant now) {
+        if (value == null) {
+            return now.truncatedTo(ChronoUnit.SECONDS);
+        }
+        try {
+            return fixTime(Instant.parse(value), now);
+        } catch (DateTimeParseException error) {
+            throw GameErrors.invalid("Invalid position fix time");
+        }
+    }
+
+    static Instant fixTime(Instant value, Instant now) {
+        Instant parsed = value.truncatedTo(ChronoUnit.SECONDS);
+        if (parsed.isAfter(now.plusSeconds(60)) || parsed.isBefore(GameTime.MIN)) {
+            throw GameErrors.invalid("Position fix time is out of range");
+        }
+        return parsed;
+    }
+
+    /** The uniform mirror payload the Tool has always uploaded, plus the caller's scalar extras. */
+    static Map<String, Object> attributes(Map<String, Object> extras) {
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put(Position.KEY_EVENT, "location");
+        result.put(Position.KEY_MOTION, false);
+        result.put(Position.KEY_ODOMETER, 0);
+        result.put("activity", "still");
+        result.put(Position.KEY_BATTERY_LEVEL, 100);
+        if (extras != null) {
+            if (extras.size() > MAX_ATTRIBUTES) {
+                throw GameErrors.invalid("Too many position attributes");
+            }
+            for (var entry : extras.entrySet()) {
+                Object value = entry.getValue();
+                if (entry.getKey() == null || !entry.getKey().matches("[A-Za-z0-9_.-]{1,64}")
+                        || !(value instanceof String || value instanceof Number || value instanceof Boolean)
+                        || value instanceof String text && text.length() > 2048) {
+                    throw GameErrors.invalid("Invalid position attribute");
+                }
+                result.put(entry.getKey(), value);
+            }
+        }
+        return result;
+    }
+
+    /** The fix time of a device's latest position (locking the device row), in whole seconds; null without one. */
+    private static Instant latestFix(GameTransaction transaction, long deviceId) throws SQLException {
+        long positionId = transaction.first("SELECT positionid FROM tc_devices WHERE id = ? FOR UPDATE",
+                rows -> rows.getLong(1), deviceId)
+                .orElseThrow(() -> GameErrors.invalid("Position destination not found"));
+        if (positionId <= 0) {
+            return null;
+        }
+        // Whole seconds like the new fix time, also for rows stored with fractions (H2).
+        return transaction.first("SELECT fixtime FROM tc_positions WHERE id = ?",
+                rows -> rows.getTimestamp(1).toInstant().truncatedTo(ChronoUnit.SECONDS), positionId).orElse(null);
+    }
+
+    /**
+     * Writes one mirror position with the uniform payload, moves the device's latest position when this fix is not
+     * older, and collects it for publication after commit.
+     */
+    static Written write(GameTransaction transaction, ObjectMapper objectMapper, long deviceId, double latitude,
+                         double longitude, Instant fix, Map<String, Object> extras, Collector collector)
+            throws Exception {
+        Instant previous = latestFix(transaction, deviceId);
+        Position position = new Position(PROTOCOL);
+        position.setDeviceId(deviceId);
+        Date fixDate = Date.from(fix);
+        position.setServerTime(Date.from(transaction.now()));
+        position.setDeviceTime(fixDate);
+        position.setFixTime(fixDate);
+        position.setValid(true);
+        position.setLatitude(latitude);
+        position.setLongitude(longitude);
+        position.setAttributes(new AttributeMap(attributes(extras)));
+        position.setId(transaction.insert("INSERT INTO tc_positions (protocol, deviceid, servertime, devicetime,"
+                + " fixtime, valid, latitude, longitude, altitude, speed, course, address, attributes, accuracy,"
+                + " network, geofenceids) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, NULL, ?, 0, NULL, NULL)",
+                PROTOCOL, deviceId, new Timestamp(position.getServerTime().getTime()),
+                new Timestamp(fixDate.getTime()), new Timestamp(fixDate.getTime()), true, latitude, longitude,
+                objectMapper.writeValueAsString(position.getAttributes())));
+        boolean latest = previous == null || !fix.truncatedTo(ChronoUnit.SECONDS).isBefore(previous);
+        if (latest) {
+            transaction.update("UPDATE tc_devices SET positionid = ? WHERE id = ?", position.getId(), deviceId);
+            collector.latest.add(position);
+        }
+        collector.devices.add(deviceId);
+        return new Written(deviceId, position.getId(), latest, fix.toString());
+    }
+
+    /** A tracker's latest stored position, read like {@code /api/positions} (through {@code tc_devices}). */
+    public static Optional<Fix> latest(GameTransaction transaction, long deviceId) throws SQLException {
+        return transaction.first("SELECT p.latitude, p.longitude, p.fixtime FROM tc_positions p"
+                + " JOIN tc_devices d ON d.positionid = p.id WHERE d.id = ?",
+                rows -> new Fix(rows.getDouble(1), rows.getDouble(2), rows.getTimestamp(3).toInstant()), deviceId);
+    }
+
+}

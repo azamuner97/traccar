@@ -8,6 +8,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.Set;
+import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -496,28 +497,24 @@ public abstract class GameJokerTest extends GameTestBase {
     // Timetable fakes ---------------------------------------------------------------------------------------
 
     @Test
-    void timetableFakesAreArmedUsedReleasedAndStayPrivate() throws Exception {
+    void timetableFakesAreArmedReleasedAndStayPrivate() throws Exception {
         long session = running(SETTINGS);
         GameMember anna = bound(session, "player");
         GameMember ben = bound(session, "player");
         GameMember hunter = bound(session, "hunter");
         Instant now = clock.instant();
-        timetables.publish(session, 0, json("[\"Time\",\"" + anna.displayName() + "\",\"" + ben.displayName()
-                + "\"]"), null, List.of(
-                        new GameTimetableService.EntryInput(now.plusSeconds(600).toString(), anna.displayName(), ""),
-                        new GameTimetableService.EntryInput(now.plusSeconds(600).toString(), ben.displayName(), ""),
-                        new GameTimetableService.EntryInput(now.plusSeconds(700).toString(), anna.displayName(), "b"),
-                        new GameTimetableService.EntryInput(now.plusSeconds(30).toString(), anna.displayName(), "2H"),
-                        new GameTimetableService.EntryInput(now.plusSeconds(900).toString(), anna.displayName(),
-                                "2P2S2H")));
-        var entries = timetables.get(session).entries();
-        long annaPing = entry(entries, anna, now.plusSeconds(600));
-        long benPing = entry(entries, ben, now.plusSeconds(600));
-        long breakCell = entry(entries, anna, now.plusSeconds(700));
-        long tooClose = entry(entries, anna, now.plusSeconds(30));
-        long later = entry(entries, anna, now.plusSeconds(900));
+        List<Long> slots = timetable(timetables, session, List.of(anna, ben),
+                row(now.plusSeconds(600), anna, "", ben, ""), row(now.plusSeconds(700), anna, "b"),
+                row(now.plusSeconds(60), anna, "2H"), row(now.plusSeconds(900), anna, "2P2S2H"));
+        long annaPing = entry(timetables, session, slots.get(0), anna.id()).id();
+        long benPing = entry(timetables, session, slots.get(0), ben.id()).id();
+        long breakCell = entry(timetables, session, slots.get(1), anna.id()).id();
+        long tooClose = entry(timetables, session, slots.get(2), anna.id()).id();
+        long later = entry(timetables, session, slots.get(3), anna.id()).id();
         grant(session, anna, GameJokerRepository.FAKE_PING, 3);
         grant(session, ben, GameJokerRepository.FAKE_PING, 1);
+        // The 2H ping is now within the 15 s cutoff.
+        clock.set(now.plusSeconds(46));
         publisher.clear();
 
         assertStatus(400, () -> submit(anna, GameRequest.FAKE_PING, fake(benPing)));
@@ -537,23 +534,19 @@ public abstract class GameJokerTest extends GameTestBase {
         assertEquals(GameJokerService.USE_TIMETABLE, armed.use());
         assertEquals(47.1, armed.fake().latitude());
         assertEquals(now.plusSeconds(600), armed.fake().scheduledAt());
+        assertEquals(armed.id(), entry(timetables, session, slots.get(0), anna.id()).fakeReservationId());
         assertEquals("This ping already has a fake", message(() -> submit(anna, GameRequest.FAKE_PING,
                 fake(annaPing))));
 
-        // The ping reached the hunters with the fake: the joker is used. A second report is skipped.
-        deliver(session, List.of(), new GameOperation.FakeUsed(armed.id()));
-        assertEquals(1, inventory(anna, GameJokerRepository.FAKE_PING).used());
-        deliver(session, List.of(), new GameOperation.FakeReleased(armed.id(), "late"));
-        assertEquals(1, inventory(anna, GameJokerRepository.FAKE_PING).used());
-        assertEquals(0, inventory(anna, GameJokerRepository.FAKE_PING).reserved());
-
-        // A republished timetable releases fakes on pings that disappeared or no longer reach hunters.
+        // A cell that no longer reaches the hunters releases its fake; only the owner is told.
         long second = submit(anna, GameRequest.FAKE_PING, fake(later)).id();
         succeed(session, second);
+        assertEquals(2, inventory(anna, GameJokerRepository.FAKE_PING).reserved());
         publisher.clear();
-        timetables.publish(session, 1, json("[\"Time\",\"" + anna.displayName() + "\"]"), null, List.of(
-                new GameTimetableService.EntryInput(now.plusSeconds(900).toString(), anna.displayName(), "b")));
-        assertEquals(0, inventory(anna, GameJokerRepository.FAKE_PING).reserved());
+        timetables.changes(session, new GameTimetableService.ChangeSet("change-" + UUID.randomUUID(),
+                timetables.get(session).revision(), List.of(new GameTimetableService.Change(
+                        GameTimetableService.SET_CELL, null, slots.get(3), null, null, anna.id(), "b", null, null))));
+        assertEquals(1, inventory(anna, GameJokerRepository.FAKE_PING).reserved());
         assertEquals(Set.of(anna.id()), publisher.topic(GamePublisher.JOKERS).getFirst().members());
 
         // Hunters never see joker requests or plans, and fakes leave no trace in their views.
@@ -569,25 +562,24 @@ public abstract class GameJokerTest extends GameTestBase {
         long session = running(SETTINGS);
         GameMember anna = bound(session, "player");
         Instant now = clock.instant();
-        String columns = "[\"Time\",\"" + anna.displayName() + "\"]";
-        timetables.publish(session, 0, json(columns), null, List.of(
-                new GameTimetableService.EntryInput(now.plusSeconds(300).toString(), anna.displayName(), ""),
-                new GameTimetableService.EntryInput(now.plusSeconds(3600).toString(), anna.displayName(), "")));
-        var entries = timetables.get(session).entries();
+        List<Long> slots = timetable(timetables, session, List.of(anna), row(now.plusSeconds(300), anna, ""),
+                row(now.plusSeconds(3600), anna, ""));
         grant(session, anna, GameJokerRepository.FAKE_PING, 2);
         grant(session, anna, GameJokerRepository.BREAK, 1);
 
-        long request = submit(anna, GameRequest.FAKE_PING, fake(entries.get(1).id())).id();
-        timetables.publish(session, 1, json(columns), null, List.of(
-                new GameTimetableService.EntryInput(now.plusSeconds(300).toString(), anna.displayName(), ""),
-                new GameTimetableService.EntryInput(now.plusSeconds(3600).toString(), anna.displayName(), "x")));
+        long request = submit(anna, GameRequest.FAKE_PING, fake(entry(timetables, session, slots.get(1),
+                anna.id()).id())).id();
+        timetables.changes(session, new GameTimetableService.ChangeSet("change-" + UUID.randomUUID(),
+                timetables.get(session).revision(), List.of(new GameTimetableService.Change(
+                        GameTimetableService.SET_CELL, null, slots.get(1), null, null, anna.id(), "x", null, null))));
         requests.claim(session, request, EPOCH);
         assertStatus(400, () -> deliver(session, List.of(new GameRequestService.Completion(request,
                 GameRequest.SUCCEEDED, null, null))));
         deliver(session, List.of(new GameRequestService.Completion(request, GameRequest.FAILED, "Changed", null)));
         assertEquals(0, inventory(anna, GameJokerRepository.FAKE_PING).reserved());
 
-        long armed = submit(anna, GameRequest.FAKE_PING, fake(entries.get(0).id())).id();
+        long armed = submit(anna, GameRequest.FAKE_PING, fake(entry(timetables, session, slots.get(0),
+                anna.id()).id())).id();
         succeed(session, armed);
         var breakRequest = submit(anna, GameRequest.BREAK, null);
         succeed(session, breakRequest.id(), new GameOperation.BreakStarted(null, breakRequest.id(), null));
@@ -596,11 +588,6 @@ public abstract class GameJokerTest extends GameTestBase {
         assertTrue(message(() -> submit(anna, GameRequest.FAKE_PING, "{\"pingNumber\": 9, \"latitude\": 1,"
                 + " \"longitude\": 2}")).contains("4 pings"));
         assertReconciled(session);
-    }
-
-    private static long entry(List<GameTimetableService.Entry> entries, GameMember member, Instant time) {
-        return entries.stream().filter(item -> item.memberId() == member.id() && item.scheduledAt().equals(time))
-                .findFirst().orElseThrow().id();
     }
 
     private static String fake(long entryId) {

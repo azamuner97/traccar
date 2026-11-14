@@ -82,7 +82,7 @@ public class GameSnapshotService {
                     GameRequestRepository.open(transaction, sessionId),
                     GameJokerService.overview(transaction, sessionId),
                     GameJokerRepository.plans(transaction, sessionId, "r.status = ?", GameJokerRepository.RESERVED),
-                    GameTimetableService.read(transaction, objectMapper, sessionId),
+                    GameTimetableService.read(transaction, sessionId),
                     GameDocumentService.geofencePlans(transaction, objectMapper, sessionId),
                     GameDocumentService.checkpoints(transaction, objectMapper, sessionId),
                     GameNotificationService.state(transaction, sessionId).orElse(null),

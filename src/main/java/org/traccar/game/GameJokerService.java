@@ -275,7 +275,7 @@ public class GameJokerService {
             List<FakeEntry> entries = new ArrayList<>();
             for (var entry : GameTimetableRepository.upcoming(transaction, sessionId, owner.id(),
                     transaction.now().plusSeconds(GameTimetableService.FAKE_CUTOFF_SECONDS))) {
-                if (GameTimetableService.fakeEligible(entry.content())) {
+                if (TimetableInstruction.fakeEligible(entry.content())) {
                     entries.add(new FakeEntry(entry.id(), entry.scheduledAt(), taken.contains(entry.id())));
                 }
             }

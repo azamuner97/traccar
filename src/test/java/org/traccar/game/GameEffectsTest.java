@@ -27,7 +27,6 @@ public abstract class GameEffectsTest extends GameTestBase {
     private GameRequestService requests;
     private GameJokerService jokers;
     private GameStateService state;
-    private GameTimetableService timetables;
     private GameNotificationService notifications;
     private final List<String> sent = new ArrayList<>();
     private final List<Long> failing = new ArrayList<>();
@@ -40,11 +39,10 @@ public abstract class GameEffectsTest extends GameTestBase {
 
     @Override
     protected void createServices() {
-        effects = new GameEffectsService(transactions, mapper, publisher);
+        effects = effectsService();
         requests = new GameRequestService(transactions, mapper, publisher);
         jokers = new GameJokerService(transactions, publisher);
         state = new GameStateService(transactions, mapper, publisher);
-        timetables = new GameTimetableService(transactions, mapper, publisher);
         notifications = new GameNotificationService(transactions, publisher);
         outbox = new GamePushOutbox(transactions, (userId, notificator, subject, message) -> {
             if (failing.contains(userId)) {
@@ -83,12 +81,12 @@ public abstract class GameEffectsTest extends GameTestBase {
     }
 
     private static GameEffectsService.PositionInput position(long device, double latitude) {
-        return new GameEffectsService.PositionInput(device, null, latitude, 8.5, null, null, null, null, null);
+        return new GameEffectsService.PositionInput(device, null, latitude, 8.5, null, null);
     }
 
     private static GameEffectsService.Delivery delivery(String id, List<GameEffectsService.PositionInput> positions,
                                                         GameOperation... operations) {
-        return new GameEffectsService.Delivery(id, positions, List.of(operations), null, null, null, null, null);
+        return new GameEffectsService.Delivery(id, positions, List.of(operations), null, null, null, null, null, null);
     }
 
     private GameEffectsService.Outcome deliver(long session, GameEffectsService.Delivery delivery) throws Exception {
@@ -122,7 +120,7 @@ public abstract class GameEffectsTest extends GameTestBase {
         publisher.clear();
         String id = id();
         var delivery = new GameEffectsService.Delivery(id, List.of(position(game.annaToHunters(), 47.1),
-                position(game.annaToPlayers(), 47.1)), List.of(ping(game.anna(), 1, GameState.STATIC, null)), null,
+                position(game.annaToPlayers(), 47.1)), List.of(ping(game.anna(), 1, GameState.STATIC, null)), null, null,
                 null, List.of(new GameLogService.LogInput(GameLogService.SPEEDHUNT, T0.toString(),
                         "Speedhunt started")), null, null);
         long before = revision(game.session());
@@ -170,13 +168,13 @@ public abstract class GameEffectsTest extends GameTestBase {
         var use = List.of(new GameJokerService.Use(game.anna().id(), GameJokerRepository.HUNTER_POSITIONS, false,
                 "Manual relay"));
         var broken = new GameEffectsService.Delivery(id, List.of(position(game.annaToPlayers(), 47.1),
-                position(game.annaToPlayers(), 95)), List.of(), null, null, null, null, use);
+                position(game.annaToPlayers(), 95)), List.of(), null, null, null, null, null, use);
         assertStatus(400, () -> deliver(game.session(), broken));
         assertEquals(0, number("SELECT COUNT(*) FROM tc_positions WHERE deviceid = ?", game.annaToPlayers()));
         assertEquals(0, number("SELECT COUNT(*) FROM tc_game_deliveries WHERE deliveryid = ?", id));
         assertTrue(publisher.invalidations.isEmpty() && publisher.positions.isEmpty());
 
-        var fixed = new GameEffectsService.Delivery(id, List.of(position(game.annaToPlayers(), 47.1)), List.of(),
+        var fixed = new GameEffectsService.Delivery(id, List.of(position(game.annaToPlayers(), 47.1)), List.of(), null,
                 null, null, null, null, use);
         var outcome = deliver(game.session(), fixed);
         assertFalse(outcome.jokers().getFirst().overAllocated());
@@ -186,13 +184,13 @@ public abstract class GameEffectsTest extends GameTestBase {
         assertEquals(1, inventory.used());
         assertEquals(Set.of(game.anna().id()), publisher.topic(GamePublisher.JOKERS).getFirst().members());
         // Without an available joker, a relay needs the operator's confirmation and counts beyond the allocation.
-        assertStatus(409, () -> deliver(game.session(), new GameEffectsService.Delivery(id(), List.of(), List.of(),
+        assertStatus(409, () -> deliver(game.session(), new GameEffectsService.Delivery(id(), List.of(), List.of(), null,
                 null, null, null, null, use)));
-        var over = deliver(game.session(), new GameEffectsService.Delivery(id(), List.of(), List.of(), null, null,
+        var over = deliver(game.session(), new GameEffectsService.Delivery(id(), List.of(), List.of(), null, null, null,
                 null, null, List.of(new GameJokerService.Use(game.anna().id(), GameJokerRepository.HUNTER_POSITIONS,
                         true, null))));
         assertTrue(over.jokers().getFirst().overAllocated());
-        assertStatus(400, () -> deliver(game.session(), new GameEffectsService.Delivery(id(), List.of(), List.of(),
+        assertStatus(400, () -> deliver(game.session(), new GameEffectsService.Delivery(id(), List.of(), List.of(), null,
                 null, null, null, null, List.of(new GameJokerService.Use(game.anna().id(),
                         GameJokerRepository.BREAK, true, null)))));
         assertEquals(List.of(), jokers.reconcile(game.session()));
@@ -205,9 +203,9 @@ public abstract class GameEffectsTest extends GameTestBase {
         Game game = game();
         long device = game.annaToPlayers();
         var first = deliver(game.session(), delivery(id(), List.of(new GameEffectsService.PositionInput(device, null,
-                47.1, 8.5, T0.minusSeconds(10).toString(), Map.of("source", "relay"), null, null, null))));
+                47.1, 8.5, T0.minusSeconds(10).toString(), Map.of("source", "relay")))));
         var older = deliver(game.session(), delivery(id(), List.of(new GameEffectsService.PositionInput(device, null,
-                47.2, 8.5, T0.minusSeconds(20).toString(), null, null, null, null))));
+                47.2, 8.5, T0.minusSeconds(20).toString(), null))));
         assertFalse(older.positions().getFirst().latest());
         assertEquals(first.positions().getFirst().positionId(), latestPosition(device));
         assertTrue(attributes(first.positions().getFirst().positionId()).contains("\"source\":\"relay\""));
@@ -219,9 +217,9 @@ public abstract class GameEffectsTest extends GameTestBase {
             assertEquals(outcome.positions().getFirst().positionId(), latestPosition(device));
         }
         assertStatus(400, () -> deliver(game.session(), delivery(id(), List.of(new GameEffectsService.PositionInput(
-                device, null, 47.1, 8.5, T0.plusSeconds(120).toString(), null, null, null, null)))));
+                device, null, 47.1, 8.5, T0.plusSeconds(120).toString(), null)))));
         assertStatus(400, () -> deliver(game.session(), delivery(id(), List.of(new GameEffectsService.PositionInput(
-                device, null, 47.1, 8.5, null, Map.of("bad key!", 1), null, null, null)))));
+                device, null, 47.1, 8.5, null, Map.of("bad key!", 1))))));
     }
 
     @Test
@@ -239,73 +237,109 @@ public abstract class GameEffectsTest extends GameTestBase {
         assertStatus(400, () -> deliver(game.session(), delivery(id(), List.of(position(game.benToHunters(), 47.1)))));
         String uniqueId = text("SELECT uniqueid FROM tc_devices WHERE id = ?", game.annaToPlayers());
         assertEquals(game.annaToPlayers(), deliver(game.session(), delivery(id(), List.of(
-                new GameEffectsService.PositionInput(null, uniqueId, 47.1, 8.5, null, null, null, null, null))))
+                new GameEffectsService.PositionInput(null, uniqueId, 47.1, 8.5, null, null))))
                 .positions().getFirst().deviceId());
         assertStatus(400, () -> deliver(game.session(), delivery(id(), List.of(new GameEffectsService.PositionInput(
-                null, "unknown-" + UUID.randomUUID(), 47.1, 8.5, null, null, null, null, null)))));
+                null, "unknown-" + UUID.randomUUID(), 47.1, 8.5, null, null)))));
     }
 
     // Fakes -------------------------------------------------------------------------------------------------
 
+    private static GameEffectsService.Delivery pings(String id, GameEffectsService.PositionInput position,
+                                                     GameRequestService.Completion completion,
+                                                     GamePingEngine.Intent... intents) {
+        return new GameEffectsService.Delivery(id, position == null ? List.of() : List.of(position), List.of(),
+                List.of(intents), null, null, null, completion == null ? null : List.of(completion), null);
+    }
+
+    private static GamePingEngine.Intent intent(GameMember source, List<String> audiences,
+                                                GamePingEngine.Effects delivered,
+                                                GamePingEngine.Effects notDelivered) {
+        return new GamePingEngine.Intent(GamePingEngine.MANUAL, source.id(), null, audiences, null, null, null,
+                delivered, notDelivered);
+    }
+
     @Test
-    void guardedPositionsUseTheFakeOnlyWhenTheDeliveryUsesIt() throws Exception {
+    void pingIntentsAreDecidedInTheDeliveryWithOneOutcomeEach() throws Exception {
         Game game = game();
-        Instant now = clock.instant();
-        timetables.publish(game.session(), 0, json("[\"Time\",\"" + game.anna().displayName() + "\"]"), null,
-                List.of(new GameTimetableService.EntryInput(now.plusSeconds(600).toString(),
-                                game.anna().displayName(), ""),
-                        new GameTimetableService.EntryInput(now.plusSeconds(1200).toString(),
-                                game.anna().displayName(), "")));
-        var entries = timetables.get(game.session()).entries();
-        jokers.change(game.session(), new GameJokerService.Change(game.anna().id(), GameJokerRepository.FAKE_PING,
-                2, null), "Operator");
-        long[] reservations = new long[2];
-        for (int i = 0; i < 2; i++) {
-            var request = requests.submit(game.anna(), new GameRequestService.Submission(GameRequest.FAKE_PING,
-                    null, null, json("{\"entryId\": " + entries.get(i).id() + ", \"latitude\": 46.9,"
-                            + " \"longitude\": 7.4}")));
-            requests.claim(game.session(), request.id(), EPOCH);
-            deliver(game.session(), new GameEffectsService.Delivery(id(), List.of(), List.of(), null, null, null,
-                    List.of(new GameRequestService.Completion(request.id(), GameRequest.SUCCEEDED, null, null)),
-                    null));
-            reservations[i] = jokers.own(game.anna()).reservations().getLast().id();
-        }
+        long tracker = members.get(game.session(), game.anna().id()).trackerId();
+        trackerPosition(tracker, 46.95, 7.44, T0.minusSeconds(5));
+        jokers.change(game.session(), new GameJokerService.Change(null, GameJokerRepository.SPEEDHUNT, 1, null),
+                "Operator");
         publisher.clear();
+        // A speedhunt ping whose operations depend on the outcome: delivered → pingDelivered, else pingFailed.
+        var delivered = new GamePingEngine.Effects(List.of(ping(game.anna(), 1, GameState.STATIC, null)), null,
+                null);
+        var notDelivered = new GamePingEngine.Effects(List.of(new GameOperation.PingFailed(game.anna().id(),
+                "no position")), null, null);
+        String id = id();
+        var delivery = pings(id, null, null, new GamePingEngine.Intent(GamePingEngine.SPEEDHUNT,
+                game.anna().id(), null, List.of("hunters", "players"), null, null, null, delivered, notDelivered),
+                intent(game.ben(), List.of("hunters"), null, null));
+        var outcome = deliver(game.session(), delivery);
+        assertEquals(2, outcome.pings().size());
+        var anna = outcome.pings().getFirst();
+        assertEquals(GamePingEngine.SENT, anna.status());
+        // Anna is the only player: the players audience has no recipient and is dropped.
+        assertEquals(List.of("hunters"), anna.delivered());
+        assertEquals("pingDelivered", anna.operations().getFirst().operation());
+        assertEquals(46.95, latitude(latestPosition(game.annaToHunters())));
+        assertTrue(latestPosition(game.annaToPlayers()) <= 0);
+        // Ben has no position yet: nothing is written for him.
+        var ben = outcome.pings().get(1);
+        assertEquals(GamePingEngine.FAILED, ben.status());
+        assertEquals(GamePingEngine.NO_POSITION, ben.reason());
+        assertTrue(latestPosition(game.benToHunters()) <= 0);
+        assertEquals(List.of(game.annaToHunters()), publisher.devices);
+        assertFalse(publisher.devices.contains(game.benToHunters()));
+        // A replay answers the recorded outcomes and writes nothing.
+        long positions = number("SELECT COUNT(*) FROM tc_positions");
+        var replay = deliver(game.session(), delivery);
+        assertTrue(replay.replayed());
+        assertEquals(outcome.pings(), replay.pings());
+        assertEquals(positions, number("SELECT COUNT(*) FROM tc_positions"));
+        assertEquals(outcome.pings(), effects.lookup(game.session(), id).pings());
 
-        var used = deliver(game.session(), delivery(id(), List.of(guarded(game.annaToHunters(), reservations[0]),
-                position(game.annaToPlayers(), 47.1)), new GameOperation.FakeUsed(reservations[0])));
-        assertEquals(46.9, latitude(used.positions().get(0).positionId()));
-        assertEquals(47.1, latitude(used.positions().get(1).positionId()));
-        assertEquals(List.of(new GameOperations.FakeOutcome(reservations[0], GameJokerRepository.CONSUMED)),
-                used.fakes());
-        // Fake and real positions carry the same payload.
-        assertEquals(attributes(used.positions().get(1).positionId()),
-                attributes(used.positions().get(0).positionId()));
-        // Only the owner (and the operators) learn that the joker was used.
-        assertEquals(Set.of(game.anna().id()), publisher.topic(GamePublisher.JOKERS).getFirst().members());
-        assertTrue(publisher.topic(GamePublisher.STATUS).isEmpty());
+        // A caught source sends nothing; its onNotDelivered applies in the same transaction.
+        deliver(game.session(), delivery(id(), List.of(), new GameOperation.RunEnded(game.anna().id(),
+                GameState.TERMINATED, null)));
+        deliver(game.session(), delivery(id(), List.of(), new GameOperation.Catch(game.anna().id(), "Hunter")));
+        var caught = deliver(game.session(), pings(id(), null, null, intent(game.anna(), List.of("hunters"),
+                null, new GamePingEngine.Effects(List.of(new GameOperation.PingFailed(game.anna().id(), "caught")),
+                        null, null))));
+        assertEquals(GamePingEngine.SKIPPED, caught.pings().getFirst().status());
+        assertEquals(GamePingEngine.CAUGHT, caught.pings().getFirst().reason());
+        assertEquals("pingFailed", caught.pings().getFirst().operations().getFirst().operation());
 
-        // The owner cancelled before the delivery: the hunters receive the real fallback.
-        jokers.cancel(game.anna(), reservations[1]);
-        var cancelled = deliver(game.session(), delivery(id(), List.of(guarded(game.annaToHunters(),
-                reservations[1])), new GameOperation.FakeUsed(reservations[1])));
-        assertEquals(47.0, latitude(cancelled.positions().getFirst().positionId()));
-        assertEquals(GameOperations.SKIPPED, cancelled.fakes().getFirst().status());
-        // A cancelled fake with an invalid coordinate still sends its fallback.
-        var invalid = deliver(game.session(), delivery(id(), List.of(new GameEffectsService.PositionInput(
-                game.annaToHunters(), null, 95.0, 8.5, null, null, reservations[1], 47.0, 8.5)),
-                new GameOperation.FakeUsed(reservations[1])));
-        assertEquals(47.0, latitude(invalid.positions().getFirst().positionId()));
-        assertStatus(400, () -> deliver(game.session(), delivery(id(), List.of(guarded(game.annaToHunters(),
-                reservations[1])))));
-        assertStatus(400, () -> deliver(game.session(), delivery(id(), List.of(new GameEffectsService.PositionInput(
-                game.annaToHunters(), null, 46.9, 7.4, null, null, reservations[1], null, null)),
-                new GameOperation.FakeUsed(reservations[1]))));
+        // Intents of a delivery never wait, and are checked before any transaction.
+        assertStatus(400, () -> deliver(game.session(), pings(id(), null, null, new GamePingEngine.Intent(
+                GamePingEngine.MANUAL, game.ben().id(), null, List.of("hunters"), null,
+                new GamePingEngine.Freshness(T0.toString(), 10), null, null, null))));
+        assertStatus(400, () -> deliver(game.session(), pings(id(), null, null, new GamePingEngine.Intent(
+                GamePingEngine.MANUAL, game.ben().id(), null, List.of("hunters"),
+                new GamePingEngine.Fake(46.0, 7.0, List.of("hunters")), null, null, null, null))));
+        assertStatus(400, () -> deliver(game.session(), pings(id(), null, null, new GamePingEngine.Intent(
+                "teleport", game.ben().id(), null, List.of("hunters"), null, null, null, null, null))));
+        assertStatus(400, () -> deliver(game.session(), pings(id(), null, null, intent(game.ben(), List.of(), null,
+                null))));
         assertEquals(List.of(), jokers.reconcile(game.session()));
     }
 
-    private static GameEffectsService.PositionInput guarded(long device, long reservation) {
-        return new GameEffectsService.PositionInput(device, null, 46.9, 7.4, null, null, reservation, 47.0, 8.5);
+    @Test
+    void theRemovedFakeOperationsAndGuardedFieldsAreRejected() throws Exception {
+        Game game = game();
+        for (String body : List.of("{\"deliveryId\": \"" + id() + "\", \"operations\": [{\"type\": \"fakeUsed\","
+                + " \"reservationId\": 1}]}", "{\"deliveryId\": \"" + id() + "\", \"operations\": [{\"type\":"
+                + " \"fakeReleased\", \"reservationId\": 1}]}")) {
+            assertThrows(Exception.class, () -> mapper.readValue(body, GameEffectsService.Delivery.class));
+        }
+        var lenient = mapper.copy().configure(
+                com.fasterxml.jackson.databind.DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
+        var position = lenient.readValue("{\"deviceId\": " + game.annaToHunters() + ", \"latitude\": 47,"
+                + " \"longitude\": 8, \"fakeReservationId\": 3, \"fallbackLatitude\": 46}",
+                GameEffectsService.PositionInput.class);
+        assertEquals(new GameEffectsService.PositionInput(game.annaToHunters(), null, 47.0, 8.0, null, null),
+                position);
     }
 
     @Test
@@ -317,7 +351,7 @@ public abstract class GameEffectsTest extends GameTestBase {
             var request = requests.submit(owner, new GameRequestService.Submission(GameRequest.FAKE_PING, null,
                     null, json("{\"pingNumber\": 1, \"latitude\": 46.5, \"longitude\": 7.0}")));
             requests.claim(game.session(), request.id(), EPOCH);
-            deliver(game.session(), new GameEffectsService.Delivery(id(), List.of(), List.of(), null, null, null,
+            deliver(game.session(), new GameEffectsService.Delivery(id(), List.of(), List.of(), null, null, null, null,
                     List.of(new GameRequestService.Completion(request.id(), GameRequest.SUCCEEDED, null, null)),
                     null));
         }
@@ -388,14 +422,14 @@ public abstract class GameEffectsTest extends GameTestBase {
         var completion = List.of(new GameRequestService.Completion(request.id(), GameRequest.SUCCEEDED, "Started",
                 null));
         // A break that starts now starts with its request's outcome.
-        assertStatus(400, () -> deliver(game.session(), new GameEffectsService.Delivery(id(), List.of(), List.of(),
+        assertStatus(400, () -> deliver(game.session(), new GameEffectsService.Delivery(id(), List.of(), List.of(), null,
                 null, null, null, completion, null)));
         publisher.clear();
         var alert = new GameNotificationService.Alert("break-" + request.id(), "geofenceExit", "user",
                 T0.toString(), "UTC", "Your break started", game.ben().id(), game.ben().id());
         String id = id();
         var delivery = new GameEffectsService.Delivery(id, List.of(),
-                List.of(new GameOperation.BreakStarted(null, request.id(), null)),
+                List.of(new GameOperation.BreakStarted(null, request.id(), null)), null,
                 new GameEffectsService.NotificationInput(generation, List.of(alert)),
                 List.of(new GameEffectsService.PushInput(game.ben().id(), "Break", "Your break started", null,
                                 alert.id()),
@@ -425,7 +459,7 @@ public abstract class GameEffectsTest extends GameTestBase {
                 game.session()));
 
         // A push whose alert was archived before is not queued again.
-        var again = deliver(game.session(), new GameEffectsService.Delivery(id(), List.of(), List.of(),
+        var again = deliver(game.session(), new GameEffectsService.Delivery(id(), List.of(), List.of(), null,
                 new GameEffectsService.NotificationInput(generation, List.of(alert)),
                 List.of(new GameEffectsService.PushInput(game.ben().id(), null, "Again", null, alert.id())), null,
                 null, null));
@@ -433,7 +467,7 @@ public abstract class GameEffectsTest extends GameTestBase {
         assertEquals(GamePushOutbox.SKIPPED, again.pushes().getFirst().status());
 
         // An attempt interrupted by a restart is uncertain and never retried.
-        var interrupted = deliver(game.session(), new GameEffectsService.Delivery(id(), List.of(), List.of(), null,
+        var interrupted = deliver(game.session(), new GameEffectsService.Delivery(id(), List.of(), List.of(), null, null,
                 List.of(new GameEffectsService.PushInput(game.ben().id(), null, "Lost", null, null)), null, null,
                 null));
         long row = interrupted.pushes().getFirst().id();
@@ -441,10 +475,10 @@ public abstract class GameEffectsTest extends GameTestBase {
         assertEquals(1, outbox.markInterrupted());
         assertEquals(0, outbox.sendQueued());
         assertEquals(GamePushOutbox.UNCERTAIN, text("SELECT status FROM tc_game_push_outbox WHERE id = ?", row));
-        assertStatus(400, () -> deliver(game.session(), new GameEffectsService.Delivery(id(), List.of(), List.of(),
+        assertStatus(400, () -> deliver(game.session(), new GameEffectsService.Delivery(id(), List.of(), List.of(), null,
                 null, List.of(new GameEffectsService.PushInput(game.ben().id(), null, " ", null, null)), null, null,
                 null)));
-        assertStatus(409, () -> deliver(game.session(), new GameEffectsService.Delivery(id(), List.of(), List.of(),
+        assertStatus(409, () -> deliver(game.session(), new GameEffectsService.Delivery(id(), List.of(), List.of(), null,
                 new GameEffectsService.NotificationInput(UUID.randomUUID().toString(), List.of(alert)), null, null,
                 null, null)));
         assertEquals(List.of(), jokers.reconcile(game.session()));

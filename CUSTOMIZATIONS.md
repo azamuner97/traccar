@@ -36,7 +36,7 @@ managed values and preserves unrelated attributes.
 
 Traccar's database is the single store of game sessions and game state
 (`schema/changelog-game-model-2.xml`, included last in `changelog-master.xml`).
-The game-session API version is **5**; `GET /api/game-sessions/capabilities`
+The game-session API version is **7**; `GET /api/game-sessions/capabilities`
 answers it, and a Tool built for another version stops at connection.
 
 - **Members.** Each participant is a member with a stable ID
@@ -126,7 +126,7 @@ are administrators in this version.
 | Generated-account passwords | `tc_game_session_credentials` (AES-GCM) | operator |
 | Geofence planner document | `tc_game_geofence_plans` | Tool |
 | Recovery checkpoints (monitoring cursors, relay counters) | `tc_game_session_checkpoints` | Tool (`…/checkpoints/*`) |
-| Published timetable and per-entry progress | `tc_game_timetables`, `tc_game_timetable_entries` | Tool |
+| Timetable plan, toggle, columns, slots and cells (execution progress on the cells) | `tc_game_timetables`, `tc_game_timetable_participants`, `tc_game_timetable_slots`, `tc_game_timetable_entries`, `tc_game_timetable_changes` | Tool edits (`…/timetable/changes`, `…/timetable/execution`), the server executes |
 | Session log (including speedhunt events) | `tc_game_session_logs` | Tool |
 
 Every revisioned write names the revision it was based on; a stale revision
@@ -172,8 +172,9 @@ Each session has a game state (`tc_game_session_state`): `running` or
 (`PUT /api/game-sessions/{id}/state`) and never by the lease, so a dropped,
 closed or crashed Tool leaves the game running. At most one session runs per
 server (a unique `runningkey`). While it runs, members may submit requests and
-see "running"; the server will execute timetables, live uploads and break
-timers for it (later phases of `Claude outputs/game-execution-plan.md`).
+see "running"; the server executes its timetable (when the timetable toggle is
+on) and will execute live uploads and break timers for it (later phases of
+`Claude outputs/game-execution-plan.md`).
 Changing the state is fenced, except that any administrator may stop a game
 without an epoch while no lease is active. Stopping ends the open requests
 (waiting ones are cancelled, executing ones fail; their jokers return) and the
@@ -196,11 +197,12 @@ again under a new epoch.
 Fenced requests carry the epoch in `X-Game-Controller-Epoch` and are refused
 with HTTP 423 otherwise (`GameControllerFilter`):
 
-- for any session: effects, timetable progress, `members/*`, `resources/*`,
-  `checkpoints/*`, `requests/*` and `jokers/*`; every write of the running
-  session and the game state (except the administrator stop described above).
-  Configuration of a session that is not running (name, settings, credentials,
-  geofence plans, timetable, logs) needs only its revision check;
+- for any session: effects, `members/*`, `resources/*`, `checkpoints/*`,
+  `requests/*` and `jokers/*`; every write of the running session (also its
+  timetable changes and execution toggle) and the game state (except the
+  administrator stop described above). Configuration of a session that is not
+  running (name, settings, credentials, geofence plans, timetable, logs) needs
+  only its revision check;
 - writes to `/api/game-notifications` and `/api/game-proximity`;
 - while a lease is held, standard mutations (devices, groups, users,
   permissions, geofences, `DELETE /api/positions`) of the Traccar resources any
@@ -442,13 +444,41 @@ already filter for the signed-in member:
   spectators see every ping that reaches hunters (blank cells, target codes
   with hunters and operator coordinates). The cell content is never included,
   so an operator coordinate or a fake looks exactly like a real ping. Members
-  receive `{"invalidate": ["game-timetable"]}` when a timetable is published
-  or its progress changes.
+  receive `{"invalidate": ["game-timetable"]}` when the timetable changes or
+  an entry gets its outcome.
 
-The Tool records each entry's progress from what became of that
-participant's ping: `sent`, `skipped` (an `x` cell, an overdue row, the
-participant out, or a break that withheld the hunters) or `failed` (no
-position, an upload error or no recipient).
+### Server-run timetable and ping engine
+
+The timetable is stored and executed by the server
+(`Claude outputs/game-execution-plan.md`, phase 1). Operators read it with
+`GET /api/game-sessions/{id}/timetable` (revision, server time and the 15 s
+freeze horizon, execution state with the latest event ID, columns, slots and
+cells) and edit it with all-or-nothing changesets
+(`POST …/timetable/changes`: `addSlot`, `moveSlot`, `removeSlot`, `setCell`,
+`clearCell`, `addParticipant`, `removeParticipant`, `orderParticipants`;
+409 for a stale `baseRevision`, the recorded result for a retried `changeId`,
+422 listing every failing change). Cells follow the Tool's grammar
+(`TimetableInstruction`: `x`, blank, `b`, target codes, `lat,lon[|code]`) and
+are stored canonical. `PUT …/timetable/execution {enabled}` switches execution
+on and off; it runs only while the toggle is on and the game runs, whatever the
+lease does, and switches itself off when no slot is left.
+
+`TaskGameExecution` ticks every second on its own thread (`GameScheduler`).
+The timetable runner claims a due slot (a slot more than 30 s late is missed),
+and every cell becomes one intent of the ping engine (`GamePingEngine`), which
+holds the rules the Tool applied: retired or untracked sources, catches,
+breaks (hunters withheld), recipients, mirrors, positions, the timetable
+fake-ping joker (used only when the hunters receive it) and operator
+coordinates. A cell waits up to the fresh-fix wait (setting
+`timetable_fresh_fix_wait_seconds`, default 30 s) for a fix no older than the
+freshness window before its slot (`timetable_freshness_window_seconds`,
+default 20 s), reacting to arriving positions (`ConnectionManager` position
+observer), and is otherwise sent with the last known position. Each outcome
+commits with its positions and is a `timetable` execution event (`slotStarted`,
+`ping`, `slotFinished`, `slotMissed`, `execution`). Effects deliveries carry
+ping intents too (`pings`, one outcome each); the guarded fake positions and
+the `fakeUsed`/`fakeReleased` operations are gone. Timetable fakes are offered
+and armed up to 15 s before their ping.
 
 Hunters see every player and supporter with the speedhunt state (open,
 running with its ping count, live until when), who is protected by a break and
@@ -622,7 +652,7 @@ repository-safety contract.
 3. Deploy the combined server and web build. Its migration drops the model-1
    game tables and their data; it keeps Traccar users, devices, ordinary
    drawings and the controller epoch.
-4. Release the matching Traccar Tool (game-session API version 6) and run
+4. Release the matching Traccar Tool (game-session API version 7) and run
    Device Setup for every new session: it plans members before it creates
    devices and accounts.
 5. Confirm managed devices have category `person`, integer

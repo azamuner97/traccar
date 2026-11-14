@@ -1,0 +1,459 @@
+{
+  "description": "Timetable cell grammar (plan 1.2). Run by the server's TimetableInstructionTest and by the Tool's tests/domain/test_shared_vectors.py against parse_timetable_instruction. 'audiences' receive the real position, 'fakeAudiences' the coordinate. 'tool' overrides the expectation where the Tool's parser differs (it rejects lowercase target codes).",
+  "cases": [
+    {
+      "input": "x",
+      "kind": "skip",
+      "canonical": "x",
+      "fakeEligible": false,
+      "hunterFacing": false
+    },
+    {
+      "input": " X ",
+      "kind": "skip",
+      "canonical": "x",
+      "fakeEligible": false,
+      "hunterFacing": false
+    },
+    {
+      "input": "",
+      "kind": "real",
+      "canonical": "",
+      "audiences": [
+        "hunters",
+        "players",
+        "supporters"
+      ],
+      "fakeEligible": true,
+      "hunterFacing": true
+    },
+    {
+      "input": "   ",
+      "kind": "real",
+      "canonical": "",
+      "audiences": [
+        "hunters",
+        "players",
+        "supporters"
+      ],
+      "fakeEligible": true,
+      "hunterFacing": true,
+      "note": "Whitespace is blank: a real ping, not an absent cell"
+    },
+    {
+      "input": "b",
+      "kind": "real",
+      "canonical": "b",
+      "audiences": [
+        "players",
+        "supporters"
+      ],
+      "fakeEligible": false,
+      "hunterFacing": false
+    },
+    {
+      "input": "B",
+      "kind": "real",
+      "canonical": "b",
+      "audiences": [
+        "players",
+        "supporters"
+      ],
+      "fakeEligible": false,
+      "hunterFacing": false
+    },
+    {
+      "input": "2H",
+      "kind": "real",
+      "canonical": "2H",
+      "audiences": [
+        "hunters"
+      ],
+      "fakeEligible": true,
+      "hunterFacing": true
+    },
+    {
+      "input": "2S",
+      "kind": "real",
+      "canonical": "2S",
+      "audiences": [
+        "supporters"
+      ],
+      "fakeEligible": false,
+      "hunterFacing": false
+    },
+    {
+      "input": "2S2H",
+      "kind": "real",
+      "canonical": "2S2H",
+      "audiences": [
+        "hunters",
+        "supporters"
+      ],
+      "fakeEligible": true,
+      "hunterFacing": true
+    },
+    {
+      "input": "2P",
+      "kind": "real",
+      "canonical": "2P",
+      "audiences": [
+        "players"
+      ],
+      "fakeEligible": false,
+      "hunterFacing": false
+    },
+    {
+      "input": "2P2H",
+      "kind": "real",
+      "canonical": "2P2H",
+      "audiences": [
+        "hunters",
+        "players"
+      ],
+      "fakeEligible": true,
+      "hunterFacing": true
+    },
+    {
+      "input": "2P2S",
+      "kind": "real",
+      "canonical": "2P2S",
+      "audiences": [
+        "players",
+        "supporters"
+      ],
+      "fakeEligible": false,
+      "hunterFacing": false
+    },
+    {
+      "input": "2P2S2H",
+      "kind": "real",
+      "canonical": "2P2S2H",
+      "audiences": [
+        "hunters",
+        "players",
+        "supporters"
+      ],
+      "fakeEligible": true,
+      "hunterFacing": true
+    },
+    {
+      "input": " 2P2S2H ",
+      "kind": "real",
+      "canonical": "2P2S2H",
+      "audiences": [
+        "hunters",
+        "players",
+        "supporters"
+      ],
+      "fakeEligible": true,
+      "hunterFacing": true
+    },
+    {
+      "input": "2h",
+      "kind": "real",
+      "canonical": "2H",
+      "audiences": [
+        "hunters"
+      ],
+      "fakeEligible": true,
+      "hunterFacing": true,
+      "tool": {
+        "kind": "invalid"
+      },
+      "note": "The server accepts target codes in any letter case"
+    },
+    {
+      "input": "2p2s",
+      "kind": "real",
+      "canonical": "2P2S",
+      "audiences": [
+        "players",
+        "supporters"
+      ],
+      "fakeEligible": false,
+      "hunterFacing": false,
+      "tool": {
+        "kind": "invalid"
+      },
+      "note": "The server accepts target codes in any letter case"
+    },
+    {
+      "input": "2H2P",
+      "kind": "invalid",
+      "error": "is not supported",
+      "fakeEligible": false,
+      "hunterFacing": false
+    },
+    {
+      "input": "2X",
+      "kind": "invalid",
+      "error": "is not supported",
+      "fakeEligible": false,
+      "hunterFacing": false
+    },
+    {
+      "input": "hello",
+      "kind": "invalid",
+      "error": "is not supported",
+      "fakeEligible": false,
+      "hunterFacing": false
+    },
+    {
+      "input": "3H",
+      "kind": "invalid",
+      "error": "is not supported",
+      "fakeEligible": false,
+      "hunterFacing": false
+    },
+    {
+      "input": "47.1,8.5",
+      "kind": "coordinate",
+      "canonical": "47.1,8.5",
+      "coordinate": [
+        47.1,
+        8.5
+      ],
+      "fakeAudiences": [
+        "hunters"
+      ],
+      "audiences": [
+        "players",
+        "supporters"
+      ],
+      "fakeEligible": false,
+      "hunterFacing": true
+    },
+    {
+      "input": " 47.1 , 8.5 ",
+      "kind": "coordinate",
+      "canonical": "47.1,8.5",
+      "coordinate": [
+        47.1,
+        8.5
+      ],
+      "fakeAudiences": [
+        "hunters"
+      ],
+      "audiences": [
+        "players",
+        "supporters"
+      ],
+      "fakeEligible": false,
+      "hunterFacing": true
+    },
+    {
+      "input": "47.1,8.5|2H",
+      "kind": "coordinate",
+      "canonical": "47.1,8.5|2H",
+      "coordinate": [
+        47.1,
+        8.5
+      ],
+      "fakeAudiences": [
+        "hunters"
+      ],
+      "audiences": [
+        "players",
+        "supporters"
+      ],
+      "fakeEligible": false,
+      "hunterFacing": true
+    },
+    {
+      "input": "47.1,8.5|2P",
+      "kind": "coordinate",
+      "canonical": "47.1,8.5|2P",
+      "coordinate": [
+        47.1,
+        8.5
+      ],
+      "fakeAudiences": [
+        "players"
+      ],
+      "audiences": [
+        "hunters",
+        "supporters"
+      ],
+      "fakeEligible": false,
+      "hunterFacing": true
+    },
+    {
+      "input": "47.1,8.5 | 2P2S2H",
+      "kind": "coordinate",
+      "canonical": "47.1,8.5|2P2S2H",
+      "coordinate": [
+        47.1,
+        8.5
+      ],
+      "fakeAudiences": [
+        "hunters",
+        "players",
+        "supporters"
+      ],
+      "audiences": [],
+      "fakeEligible": false,
+      "hunterFacing": true
+    },
+    {
+      "input": "-33.5,-70.25|2S",
+      "kind": "coordinate",
+      "canonical": "-33.5,-70.25|2S",
+      "coordinate": [
+        -33.5,
+        -70.25
+      ],
+      "fakeAudiences": [
+        "supporters"
+      ],
+      "audiences": [
+        "hunters",
+        "players"
+      ],
+      "fakeEligible": false,
+      "hunterFacing": true
+    },
+    {
+      "input": "+1.,.5",
+      "kind": "coordinate",
+      "canonical": "+1.,.5",
+      "coordinate": [
+        1.0,
+        0.5
+      ],
+      "fakeAudiences": [
+        "hunters"
+      ],
+      "audiences": [
+        "players",
+        "supporters"
+      ],
+      "fakeEligible": false,
+      "hunterFacing": true
+    },
+    {
+      "input": "90,180",
+      "kind": "coordinate",
+      "canonical": "90,180",
+      "coordinate": [
+        90.0,
+        180.0
+      ],
+      "fakeAudiences": [
+        "hunters"
+      ],
+      "audiences": [
+        "players",
+        "supporters"
+      ],
+      "fakeEligible": false,
+      "hunterFacing": true
+    },
+    {
+      "input": "47.1,8.5|2p",
+      "kind": "coordinate",
+      "canonical": "47.1,8.5|2P",
+      "coordinate": [
+        47.1,
+        8.5
+      ],
+      "fakeAudiences": [
+        "players"
+      ],
+      "audiences": [
+        "hunters",
+        "supporters"
+      ],
+      "fakeEligible": false,
+      "hunterFacing": true,
+      "tool": {
+        "kind": "invalid"
+      },
+      "note": "The server accepts target codes in any letter case"
+    },
+    {
+      "input": "47.1,8.5|2P|2H",
+      "kind": "invalid",
+      "error": "use at most one '|' target separator",
+      "fakeEligible": false,
+      "hunterFacing": false
+    },
+    {
+      "input": "47.1,8.5|",
+      "kind": "invalid",
+      "error": "the target code after '|' is empty",
+      "fakeEligible": false,
+      "hunterFacing": false
+    },
+    {
+      "input": "47.1,8.5|x",
+      "kind": "invalid",
+      "error": "'x' cannot be used as a coordinate target",
+      "fakeEligible": false,
+      "hunterFacing": false
+    },
+    {
+      "input": "47.1,8.5|B",
+      "kind": "invalid",
+      "error": "break mode 'b' cannot be used as a coordinate target",
+      "fakeEligible": false,
+      "hunterFacing": false
+    },
+    {
+      "input": "47.1,8.5,3",
+      "kind": "invalid",
+      "error": "use latitude,longitude with exactly one comma",
+      "fakeEligible": false,
+      "hunterFacing": false
+    },
+    {
+      "input": "47.1,",
+      "kind": "invalid",
+      "error": "use latitude,longitude with exactly one comma",
+      "fakeEligible": false,
+      "hunterFacing": false
+    },
+    {
+      "input": "47,1;8,5",
+      "kind": "invalid",
+      "error": "use latitude,longitude with exactly one comma",
+      "fakeEligible": false,
+      "hunterFacing": false
+    },
+    {
+      "input": "1e3,5",
+      "kind": "invalid",
+      "error": "latitude and longitude must be decimal numbers using '.'",
+      "fakeEligible": false,
+      "hunterFacing": false
+    },
+    {
+      "input": "abc,def",
+      "kind": "invalid",
+      "error": "latitude and longitude must be decimal numbers using '.'",
+      "fakeEligible": false,
+      "hunterFacing": false
+    },
+    {
+      "input": "90.5,8",
+      "kind": "invalid",
+      "error": "latitude must be between -90 and 90",
+      "fakeEligible": false,
+      "hunterFacing": false
+    },
+    {
+      "input": "47,180.01",
+      "kind": "invalid",
+      "error": "longitude must be between -180 and 180",
+      "fakeEligible": false,
+      "hunterFacing": false
+    },
+    {
+      "input": "47.1,8.5|2Q",
+      "kind": "invalid",
+      "error": "target code '2Q' is not supported",
+      "fakeEligible": false,
+      "hunterFacing": false
+    }
+  ]
+}

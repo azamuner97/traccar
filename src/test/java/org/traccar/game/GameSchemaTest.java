@@ -31,7 +31,9 @@ public abstract class GameSchemaTest {
             "tc_game_sessions", "tc_game_session_settings", "tc_game_session_credentials",
             "tc_game_session_checkpoints", "tc_game_session_logs", "tc_game_controller_history",
             "tc_game_session_members", "tc_game_mirrors", "tc_game_session_groups", "tc_game_geofence_plans",
-            "tc_game_session_geofences", "tc_game_timetables", "tc_game_timetable_entries", "tc_game_requests",
+            "tc_game_session_geofences", "tc_game_timetables", "tc_game_timetable_entries",
+            "tc_game_timetable_slots", "tc_game_timetable_participants", "tc_game_timetable_changes",
+            "tc_game_requests",
             "tc_game_jokers", "tc_game_joker_pools", "tc_game_joker_reservations", "tc_game_joker_ledger",
             "tc_game_member_state", "tc_game_catches", "tc_game_speedhunts", "tc_game_fake_ping_plans",
             "tc_game_speedhunt_pings", "tc_game_live_uploads", "tc_game_breaks", "tc_game_notification_state",
@@ -138,9 +140,12 @@ public abstract class GameSchemaTest {
     private static final String RESERVATION = "INSERT INTO tc_game_joker_reservations"
             + " (gamesessionid, memberid, type, status, overallocated, createdat, updatedat)"
             + " VALUES (?, ?, ?, 'reserved', FALSE, ?, ?)";
+    private static final String SLOT = "INSERT INTO tc_game_timetable_slots"
+            + " (gamesessionid, scheduledat, state, activeat) VALUES (?, ?, ?, ?)";
     private static final String ENTRY = "INSERT INTO tc_game_timetable_entries"
-            + " (gamesessionid, memberid, scheduledat, content, active, revision, status)"
-            + " VALUES (?, ?, ?, '', TRUE, 1, 'scheduled')";
+            + " (gamesessionid, slotid, memberid, content, status) VALUES (?, ?, ?, '', ?)";
+    private static final String PARTICIPANT = "INSERT INTO tc_game_timetable_participants"
+            + " (gamesessionid, memberid, ordinal) VALUES (?, ?, ?)";
     private static final String FAKE_PLAN = "INSERT INTO tc_game_fake_ping_plans (reservationid, gamesessionid,"
             + " memberid, latitude, longitude, timetableentryid, pingnumber, boundrunid, openentryid, unboundmemberid)"
             + " VALUES (?, ?, ?, 47.0, 8.0, ?, ?, ?, ?, ?)";
@@ -349,7 +354,8 @@ public abstract class GameSchemaTest {
         try (Connection connection = source.getConnection()) {
             long session = session(connection);
             long member = player(connection, session, 1);
-            long entry = insert(connection, ENTRY, session, member, T0);
+            long slot = insert(connection, SLOT, session, T0, "scheduled", T0);
+            long entry = insert(connection, ENTRY, session, slot, member, "scheduled");
             long first = reservation(connection, session, member, "fakePing");
             long second = reservation(connection, session, member, "fakePing");
             long third = reservation(connection, session, member, "fakePing");
@@ -368,6 +374,104 @@ public abstract class GameSchemaTest {
             insert(connection, FAKE_PLAN, third, session, member, null, 1, null, null, member);
             insert(connection, PING, session, run, 2, "static", "jokerFake", T0, second);
             rejected(connection, PING, session, run, 3, "static", "real", T0, second);
+        }
+    }
+
+    @Test
+    void timetableSlotsHaveOneLiveTimeAndCellsOnePerMember() throws Exception {
+        try (Connection connection = source.getConnection()) {
+            long session = session(connection);
+            long other = session(connection);
+            long anna = player(connection, session, 1);
+            long ben = player(connection, session, 2);
+            long stranger = player(connection, other, 1);
+            long slot = insert(connection, SLOT, session, T0, "scheduled", T0);
+            // One live slot per time; removed slots keep their time but no marker.
+            rejected(connection, SLOT, session, T0, "claimed", T0);
+            rejected(connection, SLOT, session, T0.plusSeconds(60), "scheduled", T0.plusSeconds(30));
+            rejected(connection, SLOT, session, T0.plusSeconds(60), "scheduled", null);
+            rejected(connection, SLOT, session, T0.plusSeconds(60), "removed", T0.plusSeconds(60));
+            rejected(connection, SLOT, session, T0.plusSeconds(60), "paused", T0.plusSeconds(60));
+            insert(connection, SLOT, session, T0, "removed", null);
+            insert(connection, SLOT, session, T0, "removed", null);
+            insert(connection, SLOT, other, T0, "scheduled", T0);
+            for (String state : List.of("claimed", "done")) {
+                insert(connection, SLOT, session, T0.plusSeconds(state.length()), state, T0.plusSeconds(state.length()));
+            }
+            // One cell per member and slot, of this session's members; a known status.
+            long entry = insert(connection, ENTRY, session, slot, anna, "scheduled");
+            rejected(connection, ENTRY, session, slot, anna, "sent");
+            rejected(connection, ENTRY, session, slot, ben, "done");
+            rejected(connection, ENTRY, session, slot, stranger, "scheduled");
+            for (String status : List.of("sent", "skipped", "failed", "cancelled", "scheduled")) {
+                execute(connection, "UPDATE tc_game_timetable_entries SET status = ? WHERE id = ?", status, entry);
+            }
+            insert(connection, ENTRY, session, slot, ben, "cancelled");
+            // Columns: one per member, of this session, at a non-negative position.
+            insert(connection, PARTICIPANT, session, anna, 0);
+            rejected(connection, PARTICIPANT, session, anna, 1);
+            rejected(connection, PARTICIPANT, session, ben, -1);
+            rejected(connection, PARTICIPANT, session, stranger, 1);
+            insert(connection, PARTICIPANT, session, ben, 1);
+            insert(connection, "INSERT INTO tc_game_timetable_changes (gamesessionid, changeid, requesthash, result,"
+                    + " createdat) VALUES (?, 'change-1', 'hash', '{}', ?)", session, T0);
+            rejected(connection, "INSERT INTO tc_game_timetable_changes (gamesessionid, changeid, requesthash, result,"
+                    + " createdat) VALUES (?, 'change-1', 'other', '{}', ?)", session, T0);
+        }
+    }
+
+    @Test
+    void theServerTimetableReplacesThePublishedOneAndReturnsItsFakes() throws Exception {
+        DataSource database = database(false);
+        GameSchemaFixture.executionBefore(database, "game-execution-2-");
+        long session;
+        long armed;
+        long requested;
+        long request;
+        try (Connection connection = database.getConnection()) {
+            session = session(connection);
+            long member = player(connection, session, 1);
+            execute(connection, "INSERT INTO tc_game_timetables (gamesessionid, revision, headers, source, updatedat)"
+                    + " VALUES (?, 1, '{}', '{}', ?)", session, T0);
+            String entry = "INSERT INTO tc_game_timetable_entries (gamesessionid, memberid, scheduledat, content,"
+                    + " active, revision, status) VALUES (?, ?, ?, '', TRUE, 1, 'scheduled')";
+            long first = insert(connection, entry, session, member, T0);
+            long second = insert(connection, entry, session, member, T0.plusSeconds(60));
+            armed = reservation(connection, session, member, "fakePing");
+            insert(connection, FAKE_PLAN, armed, session, member, first, null, null, first, null);
+            request = insert(connection, "INSERT INTO tc_game_requests (gamesessionid, type, requestermemberid,"
+                    + " requesterrole, targetmemberid, parameters, status, createdat, updatedat)"
+                    + " VALUES (?, 'jokerFakePing', ?, 'player', ?, '{}', 'pending', ?, ?)",
+                    session, member, member, T0, T0);
+            requested = insert(connection, "INSERT INTO tc_game_joker_reservations (gamesessionid, memberid, type,"
+                    + " requestid, status, overallocated, createdat, updatedat)"
+                    + " VALUES (?, ?, 'fakePing', ?, 'reserved', FALSE, ?, ?)", session, member, request, T0, T0);
+            insert(connection, FAKE_PLAN, requested, session, member, second, null, null, second, null);
+        }
+        GameSchemaFixture.apply(database, GameSchemaFixture.MASTER);
+        try (Connection connection = database.getConnection()) {
+            assertEquals(0, number(connection, "SELECT COUNT(*) FROM tc_game_fake_ping_plans"));
+            for (long reservation : List.of(armed, requested)) {
+                assertEquals(1, number(connection, "SELECT COUNT(*) FROM tc_game_joker_reservations"
+                        + " WHERE id = ? AND status = 'released'", reservation));
+                assertEquals(1, number(connection, "SELECT COUNT(*) FROM tc_game_joker_ledger"
+                        + " WHERE reservationid = ? AND kind = 'release'", reservation));
+            }
+            assertEquals(1, number(connection, "SELECT COUNT(*) FROM tc_game_requests WHERE id = ?"
+                    + " AND status = 'cancelled' AND completedat IS NOT NULL", request));
+            for (String table : List.of("tc_game_timetables", "tc_game_timetable_entries", "tc_game_timetable_slots",
+                    "tc_game_timetable_participants", "tc_game_timetable_changes")) {
+                assertEquals(0, number(connection, "SELECT COUNT(*) FROM " + table), table);
+            }
+            assertThrows(SQLException.class, () -> number(connection, "SELECT COUNT(headers) FROM tc_game_timetables"));
+            // The new cells take fake plans again.
+            long member = player(connection, session, 2);
+            long slot = insert(connection, SLOT, session, T0, "scheduled", T0);
+            long entry = insert(connection, ENTRY, session, slot, member, "scheduled");
+            long reservation = reservation(connection, session, member, "fakePing");
+            insert(connection, FAKE_PLAN, reservation, session, member, entry, null, null, entry, null);
+            rejected(connection, FAKE_PLAN, reservation(connection, session, member, "fakePing"), session, member,
+                    entry + 1000, null, null, null, null);
         }
     }
 

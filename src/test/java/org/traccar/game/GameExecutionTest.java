@@ -37,7 +37,7 @@ public abstract class GameExecutionTest extends GameTestBase {
         state = new GameStateService(transactions, mapper, publisher);
         jokers = new GameJokerService(transactions, publisher);
         logs = new GameLogService(transactions);
-        effects = new GameEffectsService(transactions, mapper, publisher);
+        effects = effectsService();
         alice = user();
         bob = user();
     }
@@ -264,7 +264,7 @@ public abstract class GameExecutionTest extends GameTestBase {
         GameMember anna = bound(session, "player");
         long epoch = acquire(alice, A);
         var delivery = new GameEffectsService.Delivery("delivery-lookup-1", null,
-                List.of(new GameOperation.Catch(anna.id(), "Operator")), null, null, null, null, null);
+                List.of(new GameOperation.Catch(anna.id(), "Operator")), null, null, null, null, null, null);
         var outcome = effects.apply(session, epoch, delivery);
         assertFalse(outcome.replayed());
 

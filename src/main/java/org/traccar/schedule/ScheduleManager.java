@@ -22,6 +22,7 @@ import jakarta.inject.Inject;
 import jakarta.inject.Singleton;
 import org.traccar.config.Config;
 import org.traccar.config.Keys;
+import org.traccar.game.GameScheduler;
 
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -51,6 +52,7 @@ public class ScheduleManager implements LifecycleObject {
                 TaskReports.class,
                 TaskGameProximity.class,
                 TaskGameController.class,
+                TaskGameExecution.class,
                 TaskDeviceInactivityCheck.class,
                 TaskSessionTimeout.class,
                 TaskWebSocketKeepalive.class)
@@ -68,6 +70,7 @@ public class ScheduleManager implements LifecycleObject {
             executor.shutdown();
             executor = null;
         }
+        injector.getInstance(GameScheduler.class).shutdown();
     }
 
 }

@@ -51,7 +51,7 @@ public abstract class GameStatusTest extends GameTestBase {
         requests = new GameRequestService(transactions, mapper, publisher);
         jokers = new GameJokerService(transactions, publisher);
         state = new GameStateService(transactions, mapper, publisher);
-        effects = new GameEffectsService(transactions, mapper, publisher);
+        effects = effectsService();
     }
 
     @AfterEach
@@ -85,7 +85,7 @@ public abstract class GameStatusTest extends GameTestBase {
     private GameEffectsService.Outcome deliver(long session, List<GameRequestService.Completion> completions,
                                                GameOperation... operations) throws Exception {
         return effects.apply(session, EPOCH, new GameEffectsService.Delivery("delivery-" + ++deliveries, null,
-                List.of(operations), null, null, null, completions, null));
+                List.of(operations), null, null, null, null, completions, null));
     }
 
     private void succeed(long session, long requestId, GameOperation... operations) throws Exception {

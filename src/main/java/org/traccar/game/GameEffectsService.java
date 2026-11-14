@@ -10,18 +10,12 @@ import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.inject.Inject;
 import jakarta.inject.Singleton;
-import org.traccar.model.AttributeMap;
-import org.traccar.model.Position;
 
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.sql.SQLException;
-import java.sql.Timestamp;
 import java.time.Instant;
-import java.time.format.DateTimeParseException;
-import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
-import java.util.Date;
 import java.util.HashMap;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
@@ -34,8 +28,9 @@ import java.util.concurrent.ThreadLocalRandom;
 
 /**
  * Fenced, idempotent effects deliveries of data model 2 (plan §3.1–3.2). One delivery is one game operation of the
- * controlling Tool: mirror positions, the typed state operations, request outcomes, operator joker uses, archived
- * notifications, queued pushes, logs and checkpoints, committed in one transaction under a durable delivery ID.
+ * controlling Tool: mirror positions, the typed state operations, ping intents (decided by {@link GamePingEngine},
+ * one outcome each), request outcomes, operator joker uses, archived notifications, queued pushes, logs and
+ * checkpoints, committed in one transaction under a durable delivery ID.
  *
  * <p>The order is the effects transaction's: validate, lock the session and then the touched member states in
  * ascending order, apply, advance the member and session revisions, commit, and only then publish positions,
@@ -50,22 +45,16 @@ import java.util.concurrent.ThreadLocalRandom;
 @Singleton
 public class GameEffectsService {
 
-    public static final String PROTOCOL = "osmand";
+    public static final String PROTOCOL = GamePositions.PROTOCOL;
     public static final int MAX_POSITIONS = 200;
     public static final int MAX_OPERATIONS = 200;
     public static final int MAX_ALERTS = 100;
     public static final int MAX_PUSHES = 500;
-    private static final int MAX_ATTRIBUTES = 64;
 
-    /**
-     * A mirror position. A position guarded by a timetable fake ({@code fakeReservationId}) carries the fake
-     * coordinate and the real one as fallback: it delivers the fake only if the same delivery uses that fake
-     * ({@code fakeUsed}), and the fallback otherwise, so an owner's cancellation never races the delivery.
-     */
+    /** A raw mirror position (until phase 4 moves every ping to intents). */
     @JsonInclude(JsonInclude.Include.NON_NULL)
     public record PositionInput(Long deviceId, String uniqueId, Double latitude, Double longitude, String fixTime,
-                                Map<String, Object> attributes, Long fakeReservationId, Double fallbackLatitude,
-                                Double fallbackLongitude) {
+                                Map<String, Object> attributes) {
     }
 
     public record NotificationInput(String generation, List<GameNotificationService.Alert> alerts) {
@@ -75,10 +64,15 @@ public class GameEffectsService {
     public record PushInput(Long memberId, String subject, String message, String notificator, String alertId) {
     }
 
+    /**
+     * One delivery. {@code pings} are ping intents ({@link GamePingEngine}): each is decided by the server's rules
+     * in this transaction, after the operations, and answers one outcome; it applies its {@code onDelivered} or
+     * {@code onNotDelivered} effects. Intents of a delivery never wait for a fresh fix.
+     */
     public record Delivery(String deliveryId, List<PositionInput> positions, List<GameOperation> operations,
-                           NotificationInput notifications, List<PushInput> pushes,
-                           List<GameLogService.LogInput> logs, List<GameRequestService.Completion> requests,
-                           List<GameJokerService.Use> jokers) {
+                           List<GamePingEngine.Intent> pings, NotificationInput notifications,
+                           List<PushInput> pushes, List<GameLogService.LogInput> logs,
+                           List<GameRequestService.Completion> requests, List<GameJokerService.Use> jokers) {
     }
 
     public record PositionOutcome(long deviceId, long positionId, boolean latest, String fixTime) {
@@ -95,7 +89,8 @@ public class GameEffectsService {
 
     /** The recorded outcome of a delivery; operator data. */
     public record Outcome(String deliveryId, boolean replayed, long epoch, List<PositionOutcome> positions,
-                          List<GameOperations.Result> operations, String generation, List<AlertOutcome> alerts,
+                          List<GameOperations.Result> operations, List<GamePingEngine.Outcome> pings,
+                          String generation, List<AlertOutcome> alerts,
                           List<PushOutcome> pushes, List<RequestOutcome> requests,
                           List<GameJokerService.UseOutcome> jokers, List<GameOperations.FakeOutcome> fakes,
                           long sessionRevision) {
@@ -107,12 +102,15 @@ public class GameEffectsService {
     private final GameTransactions transactions;
     private final ObjectMapper objectMapper;
     private final GamePublisher publisher;
+    private final GamePingEngine engine;
 
     @Inject
-    public GameEffectsService(GameTransactions transactions, ObjectMapper objectMapper, GamePublisher publisher) {
+    public GameEffectsService(GameTransactions transactions, ObjectMapper objectMapper, GamePublisher publisher,
+                              GamePingEngine engine) {
         this.transactions = transactions;
         this.objectMapper = objectMapper;
         this.publisher = publisher;
+        this.engine = engine;
     }
 
     private static <T> List<T> list(List<T> value) {
@@ -135,9 +133,10 @@ public class GameEffectsService {
             throw GameErrors.invalid("Delivery is too large");
         }
         if (hasNull(delivery.positions()) || hasNull(delivery.operations()) || hasNull(delivery.pushes())
-                || hasNull(delivery.jokers()) || hasNull(delivery.requests())) {
+                || hasNull(delivery.jokers()) || hasNull(delivery.requests()) || hasNull(delivery.pings())) {
             throw GameErrors.invalid("Invalid delivery item");
         }
+        GamePingEngine.validateAll(delivery.pings());
         if (delivery.notifications() != null) {
             var input = delivery.notifications();
             GameNotificationService.generation(input.generation());
@@ -222,14 +221,17 @@ public class GameEffectsService {
             pushes.add(push.id() != null && current.containsKey(push.id()) ? current.get(push.id()) : push);
         }
         return new Outcome(outcome.deliveryId(), true, outcome.epoch(), outcome.positions(), outcome.operations(),
-                outcome.generation(), outcome.alerts(), pushes, outcome.requests(), outcome.jokers(),
+                outcome.pings(), outcome.generation(), outcome.alerts(), pushes, outcome.requests(), outcome.jokers(),
                 outcome.fakes(), outcome.sessionRevision());
     }
 
     private Outcome apply(GameTransaction transaction, long sessionId, long epoch, Delivery delivery, long rowId)
             throws Exception {
         List<GameOperation> operations = list(delivery.operations());
-        transaction.lockMemberStates(GameOperations.members(transaction, sessionId, operations));
+        List<GamePingEngine.Intent> intents = list(delivery.pings());
+        Set<Long> locked = new java.util.TreeSet<>(GameOperations.members(transaction, sessionId, operations));
+        locked.addAll(GamePingEngine.members(transaction, sessionId, intents));
+        transaction.lockMemberStates(locked);
         GameOperations applied = new GameOperations(transaction, sessionId, epoch, "Tool", objectMapper);
 
         List<RequestOutcome> requestOutcomes = new ArrayList<>();
@@ -252,10 +254,13 @@ public class GameEffectsService {
             applied.jokerMembers().add(used.memberId());
         }
 
-        Set<Long> devices = new LinkedHashSet<>();
-        List<Position> latest = new ArrayList<>();
-        List<PositionOutcome> positions = positions(transaction, sessionId, delivery, operations, applied, devices,
-                latest);
+        GamePositions.Collector collector = new GamePositions.Collector();
+        List<PositionOutcome> positions = positions(transaction, sessionId, delivery, applied, collector);
+        List<GamePingEngine.Outcome> pings = new ArrayList<>();
+        for (GamePingEngine.Intent intent : intents) {
+            pings.add(engine.apply(transaction, sessionId, intent, GamePingEngine.Context.NONE, null, applied,
+                    collector));
+        }
 
         String generation = null;
         List<AlertOutcome> alerts = new ArrayList<>();
@@ -309,9 +314,7 @@ public class GameEffectsService {
 
         long revision = transaction.bumpSession();
         GameStateService.publish(transaction, publisher, sessionId, applied);
-        if (!devices.isEmpty()) {
-            transaction.afterCommit(() -> publisher.positions(devices, latest));
-        }
+        collector.publish(transaction, publisher);
         if (sessionAlert || !recipients.isEmpty()) {
             Set<Long> members = sessionAlert ? null : Set.copyOf(recipients);
             transaction.afterCommit(() -> publisher.invalidate(
@@ -320,25 +323,19 @@ public class GameEffectsService {
         if (!queued.isEmpty()) {
             transaction.afterCommit(() -> publisher.pushes(queued));
         }
-        return new Outcome(delivery.deliveryId(), false, epoch, positions, applied.results(), generation, alerts,
-                pushes, requestOutcomes, uses, applied.fakes(), revision);
+        return new Outcome(delivery.deliveryId(), false, epoch, positions, applied.results(), pings, generation,
+                alerts, pushes, requestOutcomes, uses, applied.fakes(), revision);
     }
 
     // Positions ---------------------------------------------------------------------------------------------
 
     private List<PositionOutcome> positions(GameTransaction transaction, long sessionId, Delivery delivery,
-                                            List<GameOperation> operations, GameOperations applied,
-                                            Set<Long> devices, List<Position> latest) throws Exception {
+                                            GameOperations applied, GamePositions.Collector collector)
+            throws Exception {
         List<PositionInput> inputs = list(delivery.positions());
         List<PositionOutcome> result = new ArrayList<>();
         if (inputs.isEmpty()) {
             return result;
-        }
-        Set<Long> guarded = new LinkedHashSet<>();
-        for (GameOperation operation : operations) {
-            if (operation instanceof GameOperation.FakeUsed used) {
-                guarded.add(used.reservationId());
-            }
         }
         Map<Long, Mirror> mirrors = new HashMap<>();
         for (GameResource.Mirror mirror : GameResourceRepository.mirrors(transaction, sessionId)) {
@@ -354,22 +351,17 @@ public class GameEffectsService {
             if (mirror == null) {
                 throw GameErrors.invalid("Device " + deviceId + " is not an active mirror of this game session");
             }
-            double[] coordinate = coordinate(input, guarded, applied.consumedFakes());
+            GamePositions.checkCoordinates(input.latitude(), input.longitude());
+            double[] coordinate = {input.latitude(), input.longitude()};
             GameOperations.AppliedFake fake = applied.appliedFakes().get(mirror.sourceMemberId());
             if (fake != null && GameMember.HUNTER.equals(mirror.destinationRole())) {
                 // The target's own speedhunt fake reaches hunter destinations only.
                 coordinate = fakeCoordinate(fake.latitude(), fake.longitude(), fake.live());
             }
-            Instant previous = latestFix(transaction, deviceId);
-            Position position = insertPosition(transaction, deviceId, input, coordinate, now);
-            boolean becomesLatest = previous == null || !position.getFixTime().toInstant().isBefore(previous);
-            if (becomesLatest) {
-                transaction.update("UPDATE tc_devices SET positionid = ? WHERE id = ?", position.getId(), deviceId);
-                latest.add(position);
-            }
-            devices.add(deviceId);
-            result.add(new PositionOutcome(deviceId, position.getId(), becomesLatest,
-                    position.getFixTime().toInstant().toString()));
+            var written = GamePositions.write(transaction, objectMapper, deviceId, coordinate[0], coordinate[1],
+                    GamePositions.fixTime(input.fixTime(), now), input.attributes(), collector);
+            result.add(new PositionOutcome(written.deviceId(), written.positionId(), written.latest(),
+                    written.fixTime()));
         }
         return result;
     }
@@ -384,31 +376,6 @@ public class GameEffectsService {
         return transaction.first("SELECT id FROM tc_devices WHERE uniqueid = ?", rows -> rows.getLong(1),
                 input.uniqueId()).orElseThrow(() -> GameErrors.invalid("Unknown position destination "
                         + input.uniqueId()));
-    }
-
-    private static void checkCoordinates(Double latitude, Double longitude) {
-        if (latitude == null || longitude == null || latitude.isNaN() || longitude.isNaN()
-                || Math.abs(latitude) > 90 || Math.abs(longitude) > 180) {
-            throw GameErrors.invalid("Invalid position coordinates");
-        }
-    }
-
-    /** The coordinate a position delivers: its own, or for a guarded fake the fallback unless the fake is used. */
-    private static double[] coordinate(PositionInput input, Set<Long> guarded, Set<Long> consumed) {
-        if (input.fakeReservationId() == null && input.fallbackLatitude() == null
-                && input.fallbackLongitude() == null) {
-            checkCoordinates(input.latitude(), input.longitude());
-            return new double[] {input.latitude(), input.longitude()};
-        }
-        if (input.fakeReservationId() == null || !guarded.contains(input.fakeReservationId())) {
-            throw GameErrors.invalid("A guarded position needs a matching fake settlement");
-        }
-        checkCoordinates(input.fallbackLatitude(), input.fallbackLongitude());
-        if (consumed.contains(input.fakeReservationId())) {
-            checkCoordinates(input.latitude(), input.longitude());
-            return new double[] {input.latitude(), input.longitude()};
-        }
-        return new double[] {input.fallbackLatitude(), input.fallbackLongitude()};
     }
 
     /**
@@ -428,84 +395,6 @@ public class GameEffectsService {
         double newLon = longitude + Math.toDegrees(Math.atan2(Math.sin(bearing) * Math.sin(angle) * Math.cos(lat),
                 Math.cos(angle) - Math.sin(lat) * Math.sin(newLat)));
         return new double[] {Math.toDegrees(newLat), Math.IEEEremainder(newLon, 360)};
-    }
-
-    /**
-     * The fix time to store, in whole seconds. MySQL keeps {@code tc_positions.fixtime} to the second and rounds
-     * fractions, so a millisecond fix time would be compared against a different stored value.
-     */
-    private static Instant fixTime(String value, Instant now) {
-        if (value == null) {
-            return now.truncatedTo(ChronoUnit.SECONDS);
-        }
-        try {
-            Instant parsed = Instant.parse(value).truncatedTo(ChronoUnit.SECONDS);
-            if (parsed.isAfter(now.plusSeconds(60)) || parsed.isBefore(GameTime.MIN)) {
-                throw GameErrors.invalid("Position fix time is out of range");
-            }
-            return parsed;
-        } catch (DateTimeParseException error) {
-            throw GameErrors.invalid("Invalid position fix time");
-        }
-    }
-
-    /** The uniform mirror payload the Tool has always uploaded, plus the caller's scalar extras. */
-    private static Map<String, Object> attributes(Map<String, Object> extras) {
-        Map<String, Object> result = new LinkedHashMap<>();
-        result.put(Position.KEY_EVENT, "location");
-        result.put(Position.KEY_MOTION, false);
-        result.put(Position.KEY_ODOMETER, 0);
-        result.put("activity", "still");
-        result.put(Position.KEY_BATTERY_LEVEL, 100);
-        if (extras != null) {
-            if (extras.size() > MAX_ATTRIBUTES) {
-                throw GameErrors.invalid("Too many position attributes");
-            }
-            for (var entry : extras.entrySet()) {
-                Object value = entry.getValue();
-                if (entry.getKey() == null || !entry.getKey().matches("[A-Za-z0-9_.-]{1,64}")
-                        || !(value instanceof String || value instanceof Number || value instanceof Boolean)
-                        || value instanceof String text && text.length() > 2048) {
-                    throw GameErrors.invalid("Invalid position attribute");
-                }
-                result.put(entry.getKey(), value);
-            }
-        }
-        return result;
-    }
-
-    private static Instant latestFix(GameTransaction transaction, long deviceId) throws SQLException {
-        long positionId = transaction.first("SELECT positionid FROM tc_devices WHERE id = ? FOR UPDATE",
-                rows -> rows.getLong(1), deviceId)
-                .orElseThrow(() -> GameErrors.invalid("Position destination not found"));
-        if (positionId <= 0) {
-            return null;
-        }
-        // Whole seconds like the new fix time, also for rows stored with fractions (H2).
-        return transaction.first("SELECT fixtime FROM tc_positions WHERE id = ?",
-                rows -> rows.getTimestamp(1).toInstant().truncatedTo(ChronoUnit.SECONDS), positionId).orElse(null);
-    }
-
-    /** Inserts a position with the same column conversions as Traccar's storage, so it reads back like an upload. */
-    private Position insertPosition(GameTransaction transaction, long deviceId, PositionInput input,
-                                    double[] coordinate, Instant now) throws Exception {
-        Position position = new Position(PROTOCOL);
-        position.setDeviceId(deviceId);
-        Date fix = Date.from(fixTime(input.fixTime(), now));
-        position.setServerTime(Date.from(now));
-        position.setDeviceTime(fix);
-        position.setFixTime(fix);
-        position.setValid(true);
-        position.setLatitude(coordinate[0]);
-        position.setLongitude(coordinate[1]);
-        position.setAttributes(new AttributeMap(attributes(input.attributes())));
-        position.setId(transaction.insert("INSERT INTO tc_positions (protocol, deviceid, servertime, devicetime,"
-                + " fixtime, valid, latitude, longitude, altitude, speed, course, address, attributes, accuracy,"
-                + " network, geofenceids) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, NULL, ?, 0, NULL, NULL)",
-                PROTOCOL, deviceId, new Timestamp(position.getServerTime().getTime()), new Timestamp(fix.getTime()),
-                new Timestamp(fix.getTime()), true, coordinate[0], coordinate[1],
-                objectMapper.writeValueAsString(position.getAttributes())));
-        return position;
     }
 
 }

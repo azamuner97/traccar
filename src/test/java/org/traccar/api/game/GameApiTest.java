@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.WebApplicationException;
+import jakarta.ws.rs.core.Response;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -42,6 +43,7 @@ import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 
@@ -84,6 +86,7 @@ public abstract class GameApiTest extends GameTestBase {
     private GameTimetableResource timetableApi;
     private GameNotificationResource notificationsApi;
     private GameProximityResource proximityApi;
+    private GameTimetableService timetables;
 
     @Override
     protected Set<GameBindingHook> hooks() {
@@ -95,9 +98,9 @@ public abstract class GameApiTest extends GameTestBase {
         services.addAll(List.of(permissions, storage, sessions, members, resources,
                 new GameStatusService(transactions), new GameSnapshotService(transactions, mapper),
                 new GameRequestService(transactions, mapper, publisher), new GameJokerService(transactions, publisher),
-                new GameTimetableService(transactions, mapper, publisher),
+                timetables = new GameTimetableService(transactions, mapper, publisher),
                 new GameDocumentService(transactions, mapper, cipher()), new GameLogService(transactions),
-                new GameEffectsService(transactions, mapper, publisher),
+                effectsService(),
                 new GameNotificationService(transactions, publisher), new GameProximityService(transactions, publisher),
                 new GameExecutionService(transactions, new GameControllerService(source, clock, 30, 5, null,
                         publisher), publisher)));
@@ -240,7 +243,7 @@ public abstract class GameApiTest extends GameTestBase {
     private JsonNode deliver(long session, List<GameRequestService.Completion> completions,
                              GameOperation... operations) throws Exception {
         return sessionsApi.applyEffects(session, HEADER, new GameEffectsService.Delivery("api-delivery-"
-                + ++deliveries, null, List.of(operations), null, null, null, completions, null));
+                + ++deliveries, null, List.of(operations), null, null, null, null, completions, null));
     }
 
     private static GameOperation.PingDelivered ping(GameMember target, int number) {
@@ -257,8 +260,8 @@ public abstract class GameApiTest extends GameTestBase {
 
     @Test
     void operatorsManageSessionsMembersAndResources() throws Exception {
-        assertEquals(new GameSessionResource.Capabilities(6), sessionsApi.capabilities());
-        assertEquals(6, GameSessionService.API_VERSION);
+        assertEquals(new GameSessionResource.Capabilities(7), sessionsApi.capabilities());
+        assertEquals(7, GameSessionService.API_VERSION);
         String name = "api-" + UUID.randomUUID();
         JsonNode created = sessionsApi.create(new GameSessionResource.CreateRequest(name, 5, null,
                 json("{\"game_settings\": " + SETTINGS + "}")));
@@ -335,15 +338,34 @@ public abstract class GameApiTest extends GameTestBase {
         assertEquals(1, sessionsApi.checkpoint(session, "monitoring").get("revision").asLong());
         assertEquals(204, sessionsApi.deleteCheckpoint(session, "monitoring").getStatus());
         assertEquals(0, sessionsApi.checkpoint(session, "monitoring").get("revision").asLong());
-        JsonNode timetable = sessionsApi.publishTimetable(session, new GameSessionResource.TimetablePublish(0L,
-                json("[\"Time\", \"Anna B\"]"), null, List.of(new GameTimetableService.EntryInput(
-                        T0.plus(Duration.ofHours(1)).toString(), "Anna B", ""))));
-        assertEquals(1, timetable.get("revision").asLong());
-        long entry = timetable.get("entries").get(0).get("id").asLong();
-        assertEquals(annaId, timetable.get("entries").get(0).get("memberId").asLong());
-        assertEquals(204, sessionsApi.timetableProgress(session, new GameSessionResource.ProgressUpdate(
-                List.of(new GameTimetableService.Progress(entry, "sent")))).getStatus());
-        assertEquals("sent", sessionsApi.timetable(session).get("entries").get(0).get("status").asText());
+        String at = T0.plus(Duration.ofHours(1)).toString();
+        var changeSet = new GameTimetableService.ChangeSet("change-api-1", 0L, List.of(
+                new GameTimetableService.Change(GameTimetableService.ADD_PARTICIPANT, null, null, null, null, annaId,
+                        null, null, null),
+                new GameTimetableService.Change(GameTimetableService.ADD_SLOT, "first", null, at,
+                        Map.of(Long.toString(annaId), " 2h "), null, null, null, null)));
+        Response changed = sessionsApi.timetableChanges(session, changeSet);
+        assertEquals(200, changed.getStatus());
+        assertEquals(1, ((JsonNode) changed.getEntity()).get("revision").asLong());
+        long slot = ((JsonNode) changed.getEntity()).get("slots").get("first").asLong();
+        JsonNode timetable = sessionsApi.timetable(session);
+        assertEquals(slot, timetable.get("slots").get(0).get("id").asLong());
+        assertEquals("2H", timetable.get("slots").get(0).get("entries").get(0).get("content").asText());
+        assertEquals(annaId, timetable.get("participants").get(0).get("memberId").asLong());
+        assertEquals("stopped", timetable.get("execution").get("gameState").asText());
+        // A retry answers the recorded result; a rejection lists the failing changes (422).
+        assertEquals(1, ((JsonNode) sessionsApi.timetableChanges(session, changeSet).getEntity()).get("revision")
+                .asLong());
+        Response rejected = sessionsApi.timetableChanges(session, new GameTimetableService.ChangeSet(
+                "change-api-2", 1L, List.of(new GameTimetableService.Change(GameTimetableService.SET_CELL, null, slot,
+                        null, null, annaId, "2Q", null, null))));
+        assertEquals(422, rejected.getStatus());
+        assertEquals("invalidInstruction", ((JsonNode) rejected.getEntity()).get("errors").get(0).get("code")
+                .asText());
+        assertTrue(sessionsApi.timetableExecution(session, new GameSessionResource.TimetableExecution(true))
+                .get("enabled").asBoolean());
+        assertCode(400, () -> sessionsApi.timetableExecution(session,
+                new GameSessionResource.TimetableExecution(null)));
         sessionsApi.appendLogs(session, new GameSessionResource.LogAppend(List.of(new GameLogService.LogInput(
                 "speedhunt", T0.toString(), "Started"))));
         JsonNode logs = sessionsApi.logs(session, null, 0, "speedhunt", false);
@@ -402,7 +424,7 @@ public abstract class GameApiTest extends GameTestBase {
 
         // A delivery needs the epoch the fence admitted; without one it is refused before anything happens.
         assertCode(423, () -> sessionsApi.applyEffects(session, null, new GameEffectsService.Delivery(
-                "api-unfenced-1", null, List.of(ping(game.anna(), 1)), null, null, null, null, null)));
+                "api-unfenced-1", null, List.of(ping(game.anna(), 1)), null, null, null, null, null, null)));
         JsonNode outcome = deliver(session, List.of(), ping(game.anna(), 1));
         assertEquals(EPOCH, outcome.get("epoch").asLong());
         assertEquals("real", outcome.get("operations").get(0).get("source").asText());
@@ -506,11 +528,8 @@ public abstract class GameApiTest extends GameTestBase {
         grant(session, null, GameJokerRepository.SPEEDHUNT, 2);
         grant(session, game.anna(), GameJokerRepository.FAKE_PING, 2);
         grant(session, game.ben(), GameJokerRepository.FAKE_PING, 1);
-        sessionsApi.publishTimetable(session, new GameSessionResource.TimetablePublish(0L,
-                json("[\"Time\", \"" + game.anna().displayName() + "\", \"" + game.ben().displayName() + "\"]"),
-                null, List.of(new GameTimetableService.EntryInput(T0.plus(Duration.ofHours(1)).toString(),
-                        game.anna().displayName(), ""), new GameTimetableService.EntryInput(
-                        T0.plus(Duration.ofHours(1)).toString(), game.ben().displayName(), "b"))));
+        timetable(timetables, session, List.of(game.anna(), game.ben()), row(T0.plus(Duration.ofHours(1)),
+                game.anna(), "", game.ben(), "b"));
 
         as(game.anna());
         JsonNode own = jokersApi.own();

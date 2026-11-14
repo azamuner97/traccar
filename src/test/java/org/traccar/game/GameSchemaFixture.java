@@ -30,6 +30,7 @@ public final class GameSchemaFixture {
     public static final Path SCHEMA = Path.of("schema");
     public static final String MASTER = "changelog-master.xml";
     public static final String MODEL_2 = "changelog-game-model-2.xml";
+    public static final String EXECUTION = "changelog-game-execution.xml";
     private static final String MODEL_1_MASTER = "changelog-master-model-1.xml";
 
     private GameSchemaFixture() {
@@ -69,6 +70,36 @@ public final class GameSchemaFixture {
                     new DirectoryResourceAccessor(directory), new DirectoryResourceAccessor(SCHEMA)));
         } finally {
             Files.delete(directory.resolve(MODEL_1_MASTER));
+            Files.delete(directory);
+        }
+    }
+
+    /**
+     * Applies the master changelog with the game-execution changelog cut before its first changeset whose ID starts
+     * with {@code prefix}: the schema as it was before that step. Applying {@link #MASTER} afterwards runs only the
+     * rest, as a server update does on an existing database.
+     */
+    public static void executionBefore(DataSource source, String prefix) throws Exception {
+        String changelog = Files.readString(SCHEMA.resolve(EXECUTION));
+        int cut = changelog.indexOf("<changeSet author=\"traccar-tool\" id=\"" + prefix);
+        if (cut < 0) {
+            throw new IllegalStateException("No changeset " + prefix + "* in " + EXECUTION);
+        }
+        Path directory = Files.createTempDirectory("game-schema");
+        try (var files = Files.list(SCHEMA)) {
+            for (Path file : files.toList()) {
+                Files.copy(file, directory.resolve(file.getFileName()));
+            }
+        }
+        Files.writeString(directory.resolve(EXECUTION), changelog.substring(0, cut) + "</databaseChangeLog>\n");
+        try {
+            apply(source, MASTER, new DirectoryResourceAccessor(directory));
+        } finally {
+            try (var files = Files.list(directory)) {
+                for (Path file : files.toList()) {
+                    Files.delete(file);
+                }
+            }
             Files.delete(directory);
         }
     }

@@ -34,8 +34,6 @@ import com.fasterxml.jackson.databind.JsonNode;
     @JsonSubTypes.Type(value = GameOperation.BreakEnded.class, name = "breakEnded"),
     @JsonSubTypes.Type(value = GameOperation.BreakCancelled.class, name = "breakCancelled"),
     @JsonSubTypes.Type(value = GameOperation.BreakMissed.class, name = "breakMissed"),
-    @JsonSubTypes.Type(value = GameOperation.FakeUsed.class, name = "fakeUsed"),
-    @JsonSubTypes.Type(value = GameOperation.FakeReleased.class, name = "fakeReleased"),
     @JsonSubTypes.Type(value = GameOperation.Checkpoint.class, name = "checkpoint"),
 })
 public sealed interface GameOperation {
@@ -124,14 +122,6 @@ public sealed interface GameOperation {
 
     /** A planned or waiting break was missed (its planned end passed before it could start); its joker returns. */
     record BreakMissed(long breakId) implements GameOperation {
-    }
-
-    /** An armed timetable fake reached the hunters with this delivery. */
-    record FakeUsed(long reservationId) implements GameOperation {
-    }
-
-    /** An armed timetable fake is returned: its ping was skipped, failed, or no longer reaches hunters. */
-    record FakeReleased(long reservationId, String detail) implements GameOperation {
     }
 
     /** A component checkpoint written with the delivery. */

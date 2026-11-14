@@ -132,118 +132,6 @@ public abstract class GameScheduleTest extends GameTestBase {
 
     // Timetables --------------------------------------------------------------------------------------------
 
-    private static GameTimetableService.EntryInput entry(String time, String participant, String content) {
-        return new GameTimetableService.EntryInput(time, participant, content);
-    }
-
-    @Test
-    void publishingResolvesColumnHeadersToMembers() throws Exception {
-        long session = session();
-        GameMember anna = plan(session, "player", "Anna");
-        GameMember ben = plan(session, "supporter", "Ben");
-        int carlaPhone = device("Carla phone");
-        GameMember carla = members.bindTracker(session, plan(session, "player", "Carla").id(), carlaPhone);
-        plan(session, "hunter", "Hugo");
-        GameMember retired = plan(session, "player", "Retired");
-        members.retire(session, retired.id());
-        String time = "2026-05-01T10:00:00Z";
-
-        var published = timetables.publish(session, 0, json("[\"Time\",\"Anna\",\"Ben\",\"Carla phone\"]"),
-                null, List.of(entry(time, "Anna", ""), entry(time, "Ben", "b"), entry(time, "Carla phone", "x")));
-        assertEquals(Map.of("Anna", anna.id(), "Ben", ben.id(), "Carla phone", carla.id()),
-                Map.of(published.entries().get(0).participant(), published.entries().get(0).memberId(),
-                        published.entries().get(1).participant(), published.entries().get(1).memberId(),
-                        published.entries().get(2).participant(), published.entries().get(2).memberId()));
-
-        for (String columns : List.of("[\"Time\",\"Hugo\"]", "[\"Time\",\"Retired\"]", "[\"Time\",\"Nobody\"]",
-                "[\"Time\",\"Anna\",\"Anna\"]", "[\"Time\",\"\"]", "[]", "[\"Time\", 5]")) {
-            assertStatus(400, () -> timetables.publish(session, 1, json(columns), null, List.of()));
-        }
-        // An entry must belong to one of the columns.
-        assertStatus(400, () -> timetables.publish(session, 1, json("[\"Time\",\"Anna\"]"), null,
-                List.of(entry(time, "Ben", ""))));
-
-        // Two members that share a display name make the header ambiguous; a tracker name does not count then.
-        plan(session, "supporter", "Anna");
-        assertStatus(400, () -> timetables.publish(session, 1, json("[\"Time\",\"Anna\"]"), null, List.of()));
-        // The display name wins over another member's tracker name, and two headers cannot name one member.
-        members.bindTracker(session, ben.id(), device("Carla"));
-        assertStatus(400, () -> timetables.publish(session, 1, json("[\"Time\",\"Carla\",\"Carla phone\"]"),
-                null, List.of()));
-        assertEquals(1, timetables.get(session).revision());
-    }
-
-    @Test
-    void timetableEntriesKeepIdentityAcrossPublications() throws Exception {
-        long session = session();
-        GameMember anna = plan(session, "player", "Anna");
-        plan(session, "player", "Ben");
-        JsonNode columns = json("[\"Time\",\"Anna\",\"Ben\"]");
-        JsonNode source = json("{\"file\":\"pings.xlsx\"}");
-        long before = revision(session);
-        var first = timetables.publish(session, 0, columns, source, List.of(
-                entry("2026-05-01T10:00:00Z", "Anna", ""),
-                entry("2026-05-01T10:00:00Z", "Ben", "b"),
-                entry("2026-05-01T10:30:00Z", "Anna", "x")));
-        assertEquals(1, first.revision());
-        assertEquals(before + 1, revision(session));
-        assertTrue(first.structureChanged());
-        assertEquals(3, first.entries().size());
-        long annaFirst = first.entries().getFirst().id();
-        assertEquals(anna.id(), first.entries().getFirst().memberId());
-        assertEquals(GameTimetableService.SCHEDULED, first.entries().getFirst().status());
-        assertEquals(1, publisher.topic(GamePublisher.TIMETABLE).stream()
-                .filter(item -> item.gameSessionId() == session && item.members() == null).count());
-
-        timetables.progress(session, List.of(new GameTimetableService.Progress(annaFirst, "sent")));
-        assertStatus(400, () -> timetables.progress(session,
-                List.of(new GameTimetableService.Progress(annaFirst, "done"))));
-        assertStatus(400, () -> timetables.progress(session,
-                List.of(new GameTimetableService.Progress(999999, "sent"))));
-
-        // A content-only edit keeps every entry ID and its progress.
-        var second = timetables.publish(session, 1, columns, source, List.of(
-                entry("2026-05-01T10:00:00Z", "Anna", "47.1,8.5|2H"),
-                entry("2026-05-01T10:00:00Z", "Ben", "b"),
-                entry("2026-05-01T10:30:00Z", "Anna", "")));
-        assertEquals(2, second.revision());
-        assertFalse(second.structureChanged());
-        assertEquals(first.entries().stream().map(GameTimetableService.Entry::id).toList(),
-                second.entries().stream().map(GameTimetableService.Entry::id).toList());
-        assertEquals("sent", second.entries().getFirst().status());
-        assertEquals("47.1,8.5|2H", second.entries().getFirst().content());
-
-        // An identical retry with the previous base revision answers the current version; a different one conflicts.
-        assertEquals(2, timetables.publish(session, 1, columns, source, List.of(
-                entry("2026-05-01T10:00:00Z", "Anna", "47.1,8.5|2H"),
-                entry("2026-05-01T10:00:00Z", "Ben", "b"),
-                entry("2026-05-01T10:30:00Z", "Anna", ""))).revision());
-        assertStatus(409, () -> timetables.publish(session, 1, columns, json("{}"), List.of()));
-
-        // A timestamp change is structural; matching time and member keep their IDs and progress.
-        var third = timetables.publish(session, 2, columns, json("{}"), List.of(
-                entry("2026-05-01T10:00:00Z", "Anna", "47.1,8.5|2H"),
-                entry("2026-05-01T11:00:00Z", "Ben", "")));
-        assertTrue(third.structureChanged());
-        assertEquals(2, third.entries().size());
-        assertEquals(annaFirst, third.entries().getFirst().id());
-        assertEquals("sent", third.entries().getFirst().status());
-        assertEquals(3, timetables.get(session).revision());
-        assertEquals(columns, timetables.get(session).columns());
-
-        // An entry that comes back is the same entry again.
-        var fourth = timetables.publish(session, 3, columns, json("{}"), List.of(
-                entry("2026-05-01T10:00:00Z", "Anna", ""), entry("2026-05-01T10:00:00Z", "Ben", "b")));
-        assertEquals(first.entries().get(1).id(), fourth.entries().get(1).id());
-
-        assertStatus(400, () -> timetables.publish(session, 4, columns, json("{}"), List.of(
-                entry("2026-05-01T10:00:00Z", "Anna", ""), entry("2026-05-01T10:00:00Z", "Anna", "b"))));
-        assertStatus(400, () -> timetables.publish(session, 4, columns, json("{}"), List.of(
-                entry("not a time", "Anna", ""))));
-        assertStatus(400, () -> timetables.publish(session, 4, json("[]"), json("{}"), List.of()));
-        assertEquals(4, timetables.get(session).revision());
-    }
-
     @Test
     void membersSeeTheirTimetablePingsWithoutCellContent() throws Exception {
         long session = session();
@@ -251,37 +139,42 @@ public abstract class GameScheduleTest extends GameTestBase {
         GameMember ben = plan(session, "supporter", "Ben");
         GameMember spectator = plan(session, "spectator");
         GameMember hunter = plan(session, "hunter");
-        Instant now = clock.instant();
-        List<GameTimetableService.EntryInput> entries = new ArrayList<>();
-        entries.add(entry(now.minusSeconds(600).toString(), "Anna", ""));
-        entries.add(entry(now.minusSeconds(7200).toString(), "Anna", ""));
-        entries.add(entry(now.plusSeconds(30).toString(), "Anna", "2H"));
-        entries.add(entry(now.plusSeconds(600).toString(), "Anna", "b"));
-        entries.add(entry(now.plusSeconds(600).toString(), "Ben", "47.1,8.5|2P"));
-        entries.add(entry(now.plusSeconds(900).toString(), "Anna", "2P2S"));
-        entries.add(entry(now.plusSeconds(1200).toString(), "Anna", ""));
-        entries.add(entry(now.plusSeconds(1200).toString(), "Ben", "x"));
-        timetables.publish(session, 0, json("[\"Time\",\"Anna\",\"Ben\"]"), null, entries);
+        Instant now = clock.instant().plusSeconds(8000);
+        timetable(timetables, session, List.of(anna, ben),
+                row(now.minusSeconds(600), anna, ""),
+                row(now.minusSeconds(7200), anna, ""),
+                row(now.plusSeconds(10), anna, "2H"),
+                row(now.plusSeconds(600), anna, "b", ben, "47.1,8.5|2P"),
+                row(now.plusSeconds(900), anna, "2P2S"),
+                row(now.plusSeconds(1200), anna, "", ben, "x"));
+        Instant start = clock.instant();
+        clock.set(now);
+        try {
 
-        var own = timetables.pings(anna);
-        assertEquals(List.of(now.minusSeconds(600), now.plusSeconds(30), now.plusSeconds(1200)),
-                own.stream().map(GameTimetableService.Ping::scheduledAt).toList());
-        assertEquals(java.util.Arrays.asList(false, false, true),
-                own.stream().map(GameTimetableService.Ping::fakeAllowed).toList());
-        assertTrue(timetables.pings(ben).isEmpty());
+            var own = timetables.pings(anna);
+            assertEquals(List.of(now.minusSeconds(600), now.plusSeconds(10), now.plusSeconds(1200)),
+                    own.stream().map(GameTimetableService.Ping::scheduledAt).toList());
+            // The fake cutoff is 15 s: a ping 10 s ahead can no longer carry a fake.
+            assertEquals(java.util.Arrays.asList(false, false, true),
+                    own.stream().map(GameTimetableService.Ping::fakeAllowed).toList());
+            assertTrue(timetables.pings(ben).isEmpty());
 
-        var watched = timetables.pings(spectator);
-        assertEquals(List.of(now.minusSeconds(600), now.plusSeconds(30), now.plusSeconds(600),
-                now.plusSeconds(1200)), watched.stream().map(GameTimetableService.Ping::scheduledAt).toList());
-        assertEquals(ben.id(), watched.get(2).memberId());
-        assertNull(watched.getFirst().fakeAllowed());
-        assertEquals(List.of(now.minusSeconds(600), now.plusSeconds(30), now.plusSeconds(600),
-                now.plusSeconds(1200)), timetables.hunterSlots(session));
-        assertStatus(403, () -> timetables.pings(hunter));
+            var watched = timetables.pings(spectator);
+            assertEquals(List.of(now.minusSeconds(600), now.plusSeconds(10), now.plusSeconds(600),
+                    now.plusSeconds(1200)), watched.stream().map(GameTimetableService.Ping::scheduledAt).toList());
+            assertEquals(ben.id(), watched.get(2).memberId());
+            assertEquals(GameTimetableRepository.SCHEDULED, watched.get(2).state());
+            assertNull(watched.getFirst().fakeAllowed());
+            assertEquals(List.of(now.minusSeconds(600), now.plusSeconds(10), now.plusSeconds(600),
+                    now.plusSeconds(1200)), timetables.hunterSlots(session));
+            assertStatus(403, () -> timetables.pings(hunter));
 
-        // A retired member's pings are no longer shown.
-        members.retire(session, anna.id());
-        assertEquals(List.of(now.plusSeconds(600)), timetables.hunterSlots(session));
+            // A retired member's pings are no longer shown.
+            members.retire(session, anna.id());
+            assertEquals(List.of(now.plusSeconds(600)), timetables.hunterSlots(session));
+        } finally {
+            clock.set(start);
+        }
     }
 
     // Notifications -----------------------------------------------------------------------------------------

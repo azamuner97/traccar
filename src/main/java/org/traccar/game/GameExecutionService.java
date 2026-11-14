@@ -34,7 +34,8 @@ import java.util.TreeSet;
  *
  * <p>Stopping the game, in the same transaction: open requests end ({@code pending} and {@code approved} ones are
  * cancelled, {@code executing} ones fail, their jokers return) and active live uploads and relays end
- * ({@code gameStopped}). Break deadlines do not move.
+ * ({@code gameStopped}); timetable entries still waiting for a fresh fix are skipped ({@code stopped}). Break
+ * deadlines do not move; slots that come due while the game is stopped are missed when it runs again.
  */
 @Singleton
 public class GameExecutionService {
@@ -132,7 +133,7 @@ public class GameExecutionService {
         }
     }
 
-    private static String userLabel(GameTransaction transaction, long userId) throws SQLException {
+    static String userLabel(GameTransaction transaction, long userId) throws SQLException {
         return transaction.first("SELECT name, email FROM tc_users WHERE id = ?", rows -> {
             String name = rows.getString("name");
             return GameJokerRepository.clip(name == null || name.isBlank() ? rows.getString("email") : name, 128);
@@ -183,8 +184,8 @@ public class GameExecutionService {
                 }
                 throw error;
             }
-            Stopped stopped = start ? new Stopped(0, 0, false, Set.of(), false)
-                    : stopEffects(transaction, sessionId);
+            Stopped stopped = start ? new Stopped(0, 0, 0, false, Set.of(), false)
+                    : stopEffects(transaction, publisher, sessionId);
 
             String detail = epoch == null ? "Stopped without control of the game" : null;
             transaction.insert("INSERT INTO tc_game_controller_history (epoch, event, userid, userlabel, instanceid,"
@@ -201,6 +202,7 @@ public class GameExecutionService {
             if (!start) {
                 data.put("endedRequests", stopped.requests());
                 data.put("endedLiveUploads", stopped.uploads());
+                data.put("skippedTimetableEntries", stopped.timetableEntries());
             }
             GameLogService.event(transaction, publisher, sessionId, GameEvent.GAME,
                     (start ? "Game started by " : "Game stopped by ") + changedBy
@@ -228,12 +230,16 @@ public class GameExecutionService {
     }
 
     /** What stopping the game ended. */
-    private record Stopped(int requests, int uploads, boolean requestsChanged, Set<Long> jokerMembers,
-                           boolean pool) {
+    private record Stopped(int requests, int uploads, int timetableEntries, boolean requestsChanged,
+                           Set<Long> jokerMembers, boolean pool) {
     }
 
-    /** Ends the open requests and active live uploads of a session whose game stops. */
-    private static Stopped stopEffects(GameTransaction transaction, long sessionId) throws SQLException {
+    /**
+     * Ends the open requests and active live uploads of a session whose game stops, and skips ({@code stopped})
+     * the timetable entries that wait for a fresh fix.
+     */
+    private static Stopped stopEffects(GameTransaction transaction, GamePublisher publisher, long sessionId)
+            throws SQLException {
         List<GameState.LiveUpload> uploads = GameStateRepository.activeUploads(transaction, sessionId);
         Set<Long> members = new TreeSet<>();
         for (GameState.LiveUpload upload : uploads) {
@@ -256,7 +262,14 @@ public class GameExecutionService {
             pool |= settled.pool();
             ended++;
         }
-        return new Stopped(ended, uploads.size(), ended > 0, owners, pool);
+        Set<Long> fakeOwners = new HashSet<>();
+        int entries = GameTimetableService.stopWaiting(transaction, publisher, sessionId, fakeOwners);
+        if (entries > 0) {
+            owners.addAll(fakeOwners);
+            transaction.afterCommit(() -> publisher.invalidate(
+                    new GamePublisher.Invalidation(sessionId, GamePublisher.TIMETABLE, null)));
+        }
+        return new Stopped(ended, uploads.size(), entries, ended > 0, owners, pool);
     }
 
     // Test events -------------------------------------------------------------------------------------------

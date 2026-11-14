@@ -1,0 +1,1233 @@
+{
+  "description": "Ping-engine policy cases (plan B3): input state + intent -> outcome. Run by the server's GamePingPolicyTest (the pure decision) and GamePingEngineTest (the engine against a database), and by the Tool's tests/application/tracking/test_shared_policy_vectors.py against OutgoingPositionPolicy (cases with \"tool\": true, which only need its rules: caught, break, joker fake, coordinate split) until phase 4 removes it. 'real' audiences receive the real position, 'fake' ones the intent's fake coordinate; a used joker fake gives the hunters its coordinate instead of the real one.",
+  "stateDefaults": {
+    "active": true,
+    "tracked": true,
+    "caught": false,
+    "onBreak": false,
+    "otherPlayers": true,
+    "otherSupporters": true,
+    "mirrors": [
+      "hunters",
+      "players",
+      "supporters"
+    ],
+    "position": "fresh",
+    "pastNotAfter": false,
+    "jokerFake": false
+  },
+  "relayStateDefaults": {
+    "active": true,
+    "caught": false,
+    "onBreak": false,
+    "pastNotAfter": false
+  },
+  "cases": [
+    {
+      "name": "A blank cell reaches every audience",
+      "intent": {
+        "path": "timetable",
+        "audiences": [
+          "hunters",
+          "players",
+          "supporters"
+        ]
+      },
+      "state": {},
+      "expected": {
+        "status": "sent",
+        "reason": null,
+        "real": [
+          "hunters",
+          "players",
+          "supporters"
+        ],
+        "fake": [],
+        "withheld": [],
+        "jokerFakeUsed": false,
+        "stale": false
+      },
+      "tool": true
+    },
+    {
+      "name": "A caught source sends nothing",
+      "intent": {
+        "path": "timetable",
+        "audiences": [
+          "hunters",
+          "players",
+          "supporters"
+        ]
+      },
+      "state": {
+        "caught": true
+      },
+      "expected": {
+        "status": "skipped",
+        "reason": "caught",
+        "real": [],
+        "fake": [],
+        "withheld": [],
+        "jokerFakeUsed": false,
+        "stale": false
+      },
+      "tool": true
+    },
+    {
+      "name": "Caught wins over a break",
+      "intent": {
+        "path": "timetable",
+        "audiences": [
+          "hunters",
+          "players",
+          "supporters"
+        ]
+      },
+      "state": {
+        "caught": true,
+        "onBreak": true
+      },
+      "expected": {
+        "status": "skipped",
+        "reason": "caught",
+        "real": [],
+        "fake": [],
+        "withheld": [],
+        "jokerFakeUsed": false,
+        "stale": false
+      },
+      "tool": true
+    },
+    {
+      "name": "A break withholds the hunters; the rest is delivered and the ping counts as skipped",
+      "intent": {
+        "path": "timetable",
+        "audiences": [
+          "hunters",
+          "players",
+          "supporters"
+        ]
+      },
+      "state": {
+        "onBreak": true
+      },
+      "expected": {
+        "status": "skipped",
+        "reason": "break",
+        "real": [
+          "players",
+          "supporters"
+        ],
+        "fake": [],
+        "withheld": [
+          "hunters"
+        ],
+        "jokerFakeUsed": false,
+        "stale": false
+      },
+      "tool": true
+    },
+    {
+      "name": "A hunters-only ping during a break reaches nobody",
+      "intent": {
+        "path": "timetable",
+        "audiences": [
+          "hunters"
+        ]
+      },
+      "state": {
+        "onBreak": true
+      },
+      "expected": {
+        "status": "skipped",
+        "reason": "break",
+        "real": [],
+        "fake": [],
+        "withheld": [
+          "hunters"
+        ],
+        "jokerFakeUsed": false,
+        "stale": false
+      },
+      "tool": true
+    },
+    {
+      "name": "A break cell (b) is unaffected by a break",
+      "intent": {
+        "path": "timetable",
+        "audiences": [
+          "players",
+          "supporters"
+        ]
+      },
+      "state": {
+        "onBreak": true
+      },
+      "expected": {
+        "status": "sent",
+        "reason": null,
+        "real": [
+          "players",
+          "supporters"
+        ],
+        "fake": [],
+        "withheld": [],
+        "jokerFakeUsed": false,
+        "stale": false
+      },
+      "tool": true
+    },
+    {
+      "name": "A target code reaches its audiences",
+      "intent": {
+        "path": "timetable",
+        "audiences": [
+          "hunters",
+          "supporters"
+        ]
+      },
+      "state": {},
+      "expected": {
+        "status": "sent",
+        "reason": null,
+        "real": [
+          "hunters",
+          "supporters"
+        ],
+        "fake": [],
+        "withheld": [],
+        "jokerFakeUsed": false,
+        "stale": false
+      },
+      "tool": true
+    },
+    {
+      "name": "An armed joker fake gives the hunters its coordinate and is used",
+      "intent": {
+        "path": "timetable",
+        "audiences": [
+          "hunters",
+          "players",
+          "supporters"
+        ]
+      },
+      "state": {
+        "jokerFake": true
+      },
+      "expected": {
+        "status": "sent",
+        "reason": null,
+        "real": [
+          "hunters",
+          "players",
+          "supporters"
+        ],
+        "fake": [],
+        "withheld": [],
+        "jokerFakeUsed": true,
+        "stale": false
+      },
+      "tool": true
+    },
+    {
+      "name": "A break withholds the hunters, so the joker fake is not used",
+      "intent": {
+        "path": "timetable",
+        "audiences": [
+          "hunters",
+          "players",
+          "supporters"
+        ]
+      },
+      "state": {
+        "jokerFake": true,
+        "onBreak": true
+      },
+      "expected": {
+        "status": "skipped",
+        "reason": "break",
+        "real": [
+          "players",
+          "supporters"
+        ],
+        "fake": [],
+        "withheld": [
+          "hunters"
+        ],
+        "jokerFakeUsed": false,
+        "stale": false
+      },
+      "tool": true
+    },
+    {
+      "name": "A joker fake on a ping without hunters is not used",
+      "intent": {
+        "path": "timetable",
+        "audiences": [
+          "players",
+          "supporters"
+        ]
+      },
+      "state": {
+        "jokerFake": true
+      },
+      "expected": {
+        "status": "sent",
+        "reason": null,
+        "real": [
+          "players",
+          "supporters"
+        ],
+        "fake": [],
+        "withheld": [],
+        "jokerFakeUsed": false,
+        "stale": false
+      },
+      "tool": true
+    },
+    {
+      "name": "A coordinate (default 2H) goes to the hunters, the real position to the others",
+      "intent": {
+        "path": "timetable",
+        "audiences": [
+          "players",
+          "supporters"
+        ],
+        "fake": {
+          "audiences": [
+            "hunters"
+          ]
+        }
+      },
+      "state": {},
+      "expected": {
+        "status": "sent",
+        "reason": null,
+        "real": [
+          "players",
+          "supporters"
+        ],
+        "fake": [
+          "hunters"
+        ],
+        "withheld": [],
+        "jokerFakeUsed": false,
+        "stale": false
+      },
+      "tool": true
+    },
+    {
+      "name": "A coordinate for players during a break: hunters withheld from the real split",
+      "intent": {
+        "path": "timetable",
+        "audiences": [
+          "hunters",
+          "supporters"
+        ],
+        "fake": {
+          "audiences": [
+            "players"
+          ]
+        }
+      },
+      "state": {
+        "onBreak": true
+      },
+      "expected": {
+        "status": "skipped",
+        "reason": "break",
+        "real": [
+          "supporters"
+        ],
+        "fake": [
+          "players"
+        ],
+        "withheld": [
+          "hunters"
+        ],
+        "jokerFakeUsed": false,
+        "stale": false
+      },
+      "tool": true
+    },
+    {
+      "name": "A hunters' coordinate during a break: only the real split goes out",
+      "intent": {
+        "path": "timetable",
+        "audiences": [
+          "players",
+          "supporters"
+        ],
+        "fake": {
+          "audiences": [
+            "hunters"
+          ]
+        }
+      },
+      "state": {
+        "onBreak": true
+      },
+      "expected": {
+        "status": "skipped",
+        "reason": "break",
+        "real": [
+          "players",
+          "supporters"
+        ],
+        "fake": [],
+        "withheld": [
+          "hunters"
+        ],
+        "jokerFakeUsed": false,
+        "stale": false
+      },
+      "tool": true
+    },
+    {
+      "name": "A coordinate for every audience needs no real position",
+      "intent": {
+        "path": "timetable",
+        "audiences": [],
+        "fake": {
+          "audiences": [
+            "hunters",
+            "players",
+            "supporters"
+          ]
+        }
+      },
+      "state": {
+        "position": "none"
+      },
+      "expected": {
+        "status": "sent",
+        "reason": null,
+        "real": [],
+        "fake": [
+          "hunters",
+          "players",
+          "supporters"
+        ],
+        "withheld": [],
+        "jokerFakeUsed": false,
+        "stale": false
+      }
+    },
+    {
+      "name": "A coordinate for every audience",
+      "intent": {
+        "path": "timetable",
+        "audiences": [],
+        "fake": {
+          "audiences": [
+            "hunters",
+            "players",
+            "supporters"
+          ]
+        }
+      },
+      "state": {},
+      "expected": {
+        "status": "sent",
+        "reason": null,
+        "real": [],
+        "fake": [
+          "hunters",
+          "players",
+          "supporters"
+        ],
+        "withheld": [],
+        "jokerFakeUsed": false,
+        "stale": false
+      },
+      "tool": true
+    },
+    {
+      "name": "A break withholds the hunters on the manual path too",
+      "intent": {
+        "path": "manual",
+        "audiences": [
+          "hunters",
+          "players"
+        ]
+      },
+      "state": {
+        "onBreak": true
+      },
+      "expected": {
+        "status": "skipped",
+        "reason": "break",
+        "real": [
+          "players"
+        ],
+        "fake": [],
+        "withheld": [
+          "hunters"
+        ],
+        "jokerFakeUsed": false,
+        "stale": false
+      },
+      "tool": true
+    },
+    {
+      "name": "A caught source sends nothing on the manual path",
+      "intent": {
+        "path": "manual",
+        "audiences": [
+          "hunters"
+        ]
+      },
+      "state": {
+        "caught": true
+      },
+      "expected": {
+        "status": "skipped",
+        "reason": "caught",
+        "real": [],
+        "fake": [],
+        "withheld": [],
+        "jokerFakeUsed": false,
+        "stale": false
+      },
+      "tool": true
+    },
+    {
+      "name": "A break withholds the hunters on the live path too",
+      "intent": {
+        "path": "live",
+        "audiences": [
+          "hunters",
+          "players"
+        ]
+      },
+      "state": {
+        "onBreak": true
+      },
+      "expected": {
+        "status": "skipped",
+        "reason": "break",
+        "real": [
+          "players"
+        ],
+        "fake": [],
+        "withheld": [
+          "hunters"
+        ],
+        "jokerFakeUsed": false,
+        "stale": false
+      },
+      "tool": true
+    },
+    {
+      "name": "A caught source sends nothing on the live path",
+      "intent": {
+        "path": "live",
+        "audiences": [
+          "hunters"
+        ]
+      },
+      "state": {
+        "caught": true
+      },
+      "expected": {
+        "status": "skipped",
+        "reason": "caught",
+        "real": [],
+        "fake": [],
+        "withheld": [],
+        "jokerFakeUsed": false,
+        "stale": false
+      },
+      "tool": true
+    },
+    {
+      "name": "A break withholds the hunters on the geofenceLive path too",
+      "intent": {
+        "path": "geofenceLive",
+        "audiences": [
+          "hunters",
+          "players"
+        ]
+      },
+      "state": {
+        "onBreak": true
+      },
+      "expected": {
+        "status": "skipped",
+        "reason": "break",
+        "real": [
+          "players"
+        ],
+        "fake": [],
+        "withheld": [
+          "hunters"
+        ],
+        "jokerFakeUsed": false,
+        "stale": false
+      },
+      "tool": true
+    },
+    {
+      "name": "A caught source sends nothing on the geofenceLive path",
+      "intent": {
+        "path": "geofenceLive",
+        "audiences": [
+          "hunters"
+        ]
+      },
+      "state": {
+        "caught": true
+      },
+      "expected": {
+        "status": "skipped",
+        "reason": "caught",
+        "real": [],
+        "fake": [],
+        "withheld": [],
+        "jokerFakeUsed": false,
+        "stale": false
+      },
+      "tool": true
+    },
+    {
+      "name": "A break withholds the hunters on the speedhunt path too",
+      "intent": {
+        "path": "speedhunt",
+        "audiences": [
+          "hunters",
+          "players"
+        ]
+      },
+      "state": {
+        "onBreak": true
+      },
+      "expected": {
+        "status": "skipped",
+        "reason": "break",
+        "real": [
+          "players"
+        ],
+        "fake": [],
+        "withheld": [
+          "hunters"
+        ],
+        "jokerFakeUsed": false,
+        "stale": false
+      },
+      "tool": true
+    },
+    {
+      "name": "A caught source sends nothing on the speedhunt path",
+      "intent": {
+        "path": "speedhunt",
+        "audiences": [
+          "hunters"
+        ]
+      },
+      "state": {
+        "caught": true
+      },
+      "expected": {
+        "status": "skipped",
+        "reason": "caught",
+        "real": [],
+        "fake": [],
+        "withheld": [],
+        "jokerFakeUsed": false,
+        "stale": false
+      },
+      "tool": true
+    },
+    {
+      "name": "A retired source is inactive",
+      "intent": {
+        "path": "timetable",
+        "audiences": [
+          "hunters",
+          "players",
+          "supporters"
+        ]
+      },
+      "state": {
+        "active": false
+      },
+      "expected": {
+        "status": "skipped",
+        "reason": "inactive",
+        "real": [],
+        "fake": [],
+        "withheld": [],
+        "jokerFakeUsed": false,
+        "stale": false
+      }
+    },
+    {
+      "name": "A source without a tracker is inactive",
+      "intent": {
+        "path": "timetable",
+        "audiences": [
+          "hunters",
+          "players",
+          "supporters"
+        ]
+      },
+      "state": {
+        "tracked": false
+      },
+      "expected": {
+        "status": "skipped",
+        "reason": "inactive",
+        "real": [],
+        "fake": [],
+        "withheld": [],
+        "jokerFakeUsed": false,
+        "stale": false
+      }
+    },
+    {
+      "name": "Inactive wins over caught",
+      "intent": {
+        "path": "timetable",
+        "audiences": [
+          "hunters",
+          "players",
+          "supporters"
+        ]
+      },
+      "state": {
+        "tracked": false,
+        "caught": true
+      },
+      "expected": {
+        "status": "skipped",
+        "reason": "inactive",
+        "real": [],
+        "fake": [],
+        "withheld": [],
+        "jokerFakeUsed": false,
+        "stale": false
+      }
+    },
+    {
+      "name": "Players need another active player",
+      "intent": {
+        "path": "timetable",
+        "audiences": [
+          "hunters",
+          "players"
+        ]
+      },
+      "state": {
+        "otherPlayers": false
+      },
+      "expected": {
+        "status": "sent",
+        "reason": null,
+        "real": [
+          "hunters"
+        ],
+        "fake": [],
+        "withheld": [],
+        "jokerFakeUsed": false,
+        "stale": false
+      }
+    },
+    {
+      "name": "Supporters need another active supporter",
+      "intent": {
+        "path": "timetable",
+        "audiences": [
+          "hunters",
+          "players",
+          "supporters"
+        ]
+      },
+      "state": {
+        "otherSupporters": false
+      },
+      "expected": {
+        "status": "sent",
+        "reason": null,
+        "real": [
+          "hunters",
+          "players"
+        ],
+        "fake": [],
+        "withheld": [],
+        "jokerFakeUsed": false,
+        "stale": false
+      }
+    },
+    {
+      "name": "Nobody left to receive the ping",
+      "intent": {
+        "path": "timetable",
+        "audiences": [
+          "players",
+          "supporters"
+        ]
+      },
+      "state": {
+        "otherPlayers": false,
+        "otherSupporters": false
+      },
+      "expected": {
+        "status": "failed",
+        "reason": "noRecipient",
+        "real": [],
+        "fake": [],
+        "withheld": [],
+        "jokerFakeUsed": false,
+        "stale": false
+      }
+    },
+    {
+      "name": "A break and no other players leave nobody: the break decides",
+      "intent": {
+        "path": "timetable",
+        "audiences": [
+          "hunters",
+          "players"
+        ]
+      },
+      "state": {
+        "onBreak": true,
+        "otherPlayers": false
+      },
+      "expected": {
+        "status": "skipped",
+        "reason": "break",
+        "real": [],
+        "fake": [],
+        "withheld": [
+          "hunters"
+        ],
+        "jokerFakeUsed": false,
+        "stale": false
+      }
+    },
+    {
+      "name": "A missing mirror of a requested audience fails the ping",
+      "intent": {
+        "path": "timetable",
+        "audiences": [
+          "hunters",
+          "players"
+        ]
+      },
+      "state": {
+        "mirrors": [
+          "hunters",
+          "supporters"
+        ]
+      },
+      "expected": {
+        "status": "failed",
+        "reason": "noMirror",
+        "real": [],
+        "fake": [],
+        "withheld": [],
+        "jokerFakeUsed": false,
+        "stale": false
+      }
+    },
+    {
+      "name": "A missing mirror of an audience that is not requested does not matter",
+      "intent": {
+        "path": "timetable",
+        "audiences": [
+          "hunters"
+        ]
+      },
+      "state": {
+        "mirrors": [
+          "hunters"
+        ]
+      },
+      "expected": {
+        "status": "sent",
+        "reason": null,
+        "real": [
+          "hunters"
+        ],
+        "fake": [],
+        "withheld": [],
+        "jokerFakeUsed": false,
+        "stale": false
+      }
+    },
+    {
+      "name": "A dropped audience needs no mirror",
+      "intent": {
+        "path": "timetable",
+        "audiences": [
+          "hunters",
+          "players"
+        ]
+      },
+      "state": {
+        "mirrors": [
+          "hunters"
+        ],
+        "otherPlayers": false
+      },
+      "expected": {
+        "status": "sent",
+        "reason": null,
+        "real": [
+          "hunters"
+        ],
+        "fake": [],
+        "withheld": [],
+        "jokerFakeUsed": false,
+        "stale": false
+      }
+    },
+    {
+      "name": "No position at all fails the ping",
+      "intent": {
+        "path": "timetable",
+        "audiences": [
+          "hunters",
+          "players",
+          "supporters"
+        ]
+      },
+      "state": {
+        "position": "none"
+      },
+      "expected": {
+        "status": "failed",
+        "reason": "noPosition",
+        "real": [],
+        "fake": [],
+        "withheld": [],
+        "jokerFakeUsed": false,
+        "stale": false
+      }
+    },
+    {
+      "name": "No position: the fake coordinate still goes out",
+      "intent": {
+        "path": "timetable",
+        "audiences": [
+          "players",
+          "supporters"
+        ],
+        "fake": {
+          "audiences": [
+            "hunters"
+          ]
+        }
+      },
+      "state": {
+        "position": "none"
+      },
+      "expected": {
+        "status": "sent",
+        "reason": null,
+        "real": [],
+        "fake": [
+          "hunters"
+        ],
+        "withheld": [],
+        "jokerFakeUsed": false,
+        "stale": false
+      }
+    },
+    {
+      "name": "No position: the joker fake is not used",
+      "intent": {
+        "path": "timetable",
+        "audiences": [
+          "hunters",
+          "players",
+          "supporters"
+        ]
+      },
+      "state": {
+        "position": "none",
+        "jokerFake": true
+      },
+      "expected": {
+        "status": "failed",
+        "reason": "noPosition",
+        "real": [],
+        "fake": [],
+        "withheld": [],
+        "jokerFakeUsed": false,
+        "stale": false
+      }
+    },
+    {
+      "name": "A fix older than minimumFixTime is delivered and marked stale",
+      "intent": {
+        "path": "timetable",
+        "audiences": [
+          "hunters",
+          "players",
+          "supporters"
+        ]
+      },
+      "state": {
+        "position": "stale"
+      },
+      "expected": {
+        "status": "sent",
+        "reason": null,
+        "real": [
+          "hunters",
+          "players",
+          "supporters"
+        ],
+        "fake": [],
+        "withheld": [],
+        "jokerFakeUsed": false,
+        "stale": true
+      }
+    },
+    {
+      "name": "A stale ping still uses the joker fake",
+      "intent": {
+        "path": "timetable",
+        "audiences": [
+          "hunters",
+          "players",
+          "supporters"
+        ]
+      },
+      "state": {
+        "position": "stale",
+        "jokerFake": true
+      },
+      "expected": {
+        "status": "sent",
+        "reason": null,
+        "real": [
+          "hunters",
+          "players",
+          "supporters"
+        ],
+        "fake": [],
+        "withheld": [],
+        "jokerFakeUsed": true,
+        "stale": true
+      }
+    },
+    {
+      "name": "Past notAfter nothing is written",
+      "intent": {
+        "path": "timetable",
+        "audiences": [
+          "hunters",
+          "players",
+          "supporters"
+        ]
+      },
+      "state": {
+        "pastNotAfter": true
+      },
+      "expected": {
+        "status": "skipped",
+        "reason": "missed",
+        "real": [],
+        "fake": [],
+        "withheld": [],
+        "jokerFakeUsed": false,
+        "stale": false
+      }
+    },
+    {
+      "name": "Past notAfter wins over every other rule",
+      "intent": {
+        "path": "timetable",
+        "audiences": [
+          "hunters",
+          "players",
+          "supporters"
+        ]
+      },
+      "state": {
+        "pastNotAfter": true,
+        "caught": true,
+        "active": false
+      },
+      "expected": {
+        "status": "skipped",
+        "reason": "missed",
+        "real": [],
+        "fake": [],
+        "withheld": [],
+        "jokerFakeUsed": false,
+        "stale": false
+      }
+    }
+  ],
+  "relays": [
+    {
+      "name": "Every active hunter's position reaches the recipient",
+      "state": {
+        "hunters": [
+          {
+            "position": true,
+            "mirror": true
+          },
+          {
+            "position": true,
+            "mirror": true
+          }
+        ]
+      },
+      "expected": {
+        "status": "sent",
+        "reason": null,
+        "relayed": [
+          0,
+          1
+        ]
+      },
+      "tool": true
+    },
+    {
+      "name": "A caught recipient receives no relay",
+      "state": {
+        "caught": true,
+        "hunters": [
+          {
+            "position": true,
+            "mirror": true
+          }
+        ]
+      },
+      "expected": {
+        "status": "skipped",
+        "reason": "caught",
+        "relayed": []
+      },
+      "tool": true
+    },
+    {
+      "name": "A break does not affect relays to the member",
+      "state": {
+        "onBreak": true,
+        "hunters": [
+          {
+            "position": true,
+            "mirror": true
+          }
+        ]
+      },
+      "expected": {
+        "status": "sent",
+        "reason": null,
+        "relayed": [
+          0
+        ]
+      },
+      "tool": true
+    },
+    {
+      "name": "A hunter without a position or mirror is left out",
+      "state": {
+        "hunters": [
+          {
+            "position": false,
+            "mirror": true
+          },
+          {
+            "position": true,
+            "mirror": false
+          },
+          {
+            "position": true,
+            "mirror": true
+          }
+        ]
+      },
+      "expected": {
+        "status": "sent",
+        "reason": null,
+        "relayed": [
+          2
+        ]
+      }
+    },
+    {
+      "name": "No hunter position at all",
+      "state": {
+        "hunters": [
+          {
+            "position": false,
+            "mirror": true
+          }
+        ]
+      },
+      "expected": {
+        "status": "failed",
+        "reason": "noPosition",
+        "relayed": []
+      }
+    },
+    {
+      "name": "No per-hunter mirror",
+      "state": {
+        "hunters": [
+          {
+            "position": true,
+            "mirror": false
+          }
+        ]
+      },
+      "expected": {
+        "status": "failed",
+        "reason": "noMirror",
+        "relayed": []
+      }
+    },
+    {
+      "name": "No hunters",
+      "state": {
+        "hunters": []
+      },
+      "expected": {
+        "status": "failed",
+        "reason": "noRecipient",
+        "relayed": []
+      }
+    },
+    {
+      "name": "A retired recipient is inactive",
+      "state": {
+        "active": false,
+        "hunters": [
+          {
+            "position": true,
+            "mirror": true
+          }
+        ]
+      },
+      "expected": {
+        "status": "skipped",
+        "reason": "inactive",
+        "relayed": []
+      }
+    },
+    {
+      "name": "Past notAfter nothing is relayed",
+      "state": {
+        "pastNotAfter": true,
+        "hunters": [
+          {
+            "position": true,
+            "mirror": true
+          }
+        ]
+      },
+      "expected": {
+        "status": "skipped",
+        "reason": "missed",
+        "relayed": []
+      }
+    }
+  ]
+}

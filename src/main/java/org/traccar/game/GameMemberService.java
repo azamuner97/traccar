@@ -319,6 +319,9 @@ public class GameMemberService {
                     + " unbind its account instead");
         }
         endActivity(transaction, member);
+        if (GameMember.hasState(member.role())) {
+            GameTimetableService.memberRetired(transaction, publisher, member.gameSessionId(), member.id());
+        }
         GameMemberRepository.retire(transaction, member.gameSessionId(), member.id());
         return bindingChanged(transaction, member);
     }

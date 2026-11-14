@@ -426,9 +426,10 @@ public class GameRequestService {
     private static Instant fakeEntry(GameTransaction transaction, long sessionId, long memberId, long entryId)
             throws SQLException {
         var entry = GameTimetableRepository.find(transaction, sessionId, entryId)
-                .filter(row -> row.active() && row.memberId() == memberId)
+                .filter(row -> row.present() && row.open() && row.memberId() == memberId
+                        && GameTimetableRepository.SCHEDULED.equals(row.slotState()))
                 .orElseThrow(() -> GameErrors.invalid("Choose one of your upcoming timetable pings"));
-        if (!GameTimetableService.fakeEligible(entry.content())) {
+        if (!TimetableInstruction.fakeEligible(entry.content())) {
             throw GameErrors.conflict("This ping does not reach the hunters, so it cannot carry a fake");
         }
         if (!entry.scheduledAt().isAfter(transaction.now().plusSeconds(GameTimetableService.FAKE_CUTOFF_SECONDS))) {

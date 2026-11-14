@@ -139,9 +139,98 @@ public abstract class GameTestBase {
         }
     }
 
+    /**
+     * The game execution thread on virtual time: tasks run when a test calls {@link #runPending} or
+     * {@link #advance}, which also moves the clock.
+     */
+    protected static final class ManualScheduler extends GameScheduler {
+        private record Task(long at, long sequence, Runnable runnable, long period, boolean[] cancelled) {
+        }
+
+        private final TestClock clock;
+        private final java.util.PriorityQueue<Task> tasks = new java.util.PriorityQueue<>(
+                java.util.Comparator.comparingLong(Task::at).thenComparingLong(Task::sequence));
+        private long sequence;
+
+        public ManualScheduler(TestClock clock) {
+            this.clock = clock;
+        }
+
+        private long now() {
+            return clock.instant().toEpochMilli();
+        }
+
+        private synchronized Handle add(Runnable runnable, long delay, long period) {
+            boolean[] cancelled = {false};
+            tasks.add(new Task(now() + Math.max(0, delay), sequence++, runnable, period, cancelled));
+            return () -> cancelled[0] = true;
+        }
+
+        @Override
+        public void execute(Runnable task) {
+            add(task, 0, 0);
+        }
+
+        @Override
+        public Handle schedule(Runnable task, long delayMillis) {
+            return add(task, delayMillis, 0);
+        }
+
+        @Override
+        public Handle repeat(Runnable task, long delayMillis, long periodMillis) {
+            return add(task, delayMillis, periodMillis);
+        }
+
+        private synchronized Task next(long until) {
+            while (!tasks.isEmpty() && tasks.peek().cancelled()[0]) {
+                tasks.poll();
+            }
+            return !tasks.isEmpty() && tasks.peek().at() <= until ? tasks.poll() : null;
+        }
+
+        /** Runs every task due now, including the ones they schedule for now. */
+        public void runPending() {
+            run(now());
+        }
+
+        private void run(long until) {
+            for (Task task = next(until); task != null; task = next(until)) {
+                if (task.at() > now()) {
+                    clock.set(Instant.ofEpochMilli(task.at()));
+                }
+                if (task.period() > 0) {
+                    synchronized (this) {
+                        tasks.add(new Task(task.at() + task.period(), sequence++, task.runnable(), task.period(),
+                                task.cancelled()));
+                    }
+                }
+                task.runnable().run();
+            }
+        }
+
+        /** Moves the clock forward, running each task at its time. */
+        public void advance(Duration duration) {
+            long target = now() + duration.toMillis();
+            run(target);
+            clock.set(Instant.ofEpochMilli(target));
+        }
+
+        /** Tasks still pending, cancelled ones excluded. */
+        public synchronized int pending() {
+            return (int) tasks.stream().filter(task -> !task.cancelled()[0]).count();
+        }
+
+        @Override
+        public synchronized void shutdown() {
+            tasks.clear();
+        }
+    }
+
     protected final ObjectMapper mapper = new ObjectMapper();
     protected final TestClock clock = new TestClock();
     protected final RecordingPublisher publisher = new RecordingPublisher();
+    protected final ManualScheduler scheduler = new ManualScheduler(clock);
+    protected final GamePositionWaiter waiter = new GamePositionWaiter();
     protected TimeZone zone;
     protected DataSource source;
     protected GameTransactions transactions;
@@ -175,6 +264,16 @@ public abstract class GameTestBase {
     @AfterAll
     void restoreZone() {
         TimeZone.setDefault(zone);
+    }
+
+    /** The ping engine on the test clock, the manual scheduler and the test waiter. */
+    protected GamePingEngine engine() {
+        return new GamePingEngine(transactions, mapper, publisher, waiter, scheduler);
+    }
+
+    /** Effects deliveries with the test engine. */
+    protected GameEffectsService effectsService() {
+        return new GameEffectsService(transactions, mapper, publisher, engine());
     }
 
     protected GameCredentialCipher cipher() {
@@ -334,6 +433,143 @@ public abstract class GameTestBase {
     protected void stopGame(long session) throws SQLException {
         execute("UPDATE tc_game_session_state SET state = 'stopped', runningkey = NULL WHERE gamesessionid = ?",
                 session);
+    }
+
+    // Timetables --------------------------------------------------------------------------------------------
+
+    /** A timetable row to add: its time and each member's cell. */
+    protected record Row(Instant at, java.util.Map<Long, String> cells) {
+    }
+
+    /** A row with cells given as (member, content) pairs. */
+    protected static Row row(Instant at, Object... cells) {
+        java.util.Map<Long, String> map = new java.util.LinkedHashMap<>();
+        for (int i = 0; i < cells.length; i += 2) {
+            map.put(((GameMember) cells[i]).id(), (String) cells[i + 1]);
+        }
+        return new Row(at, map);
+    }
+
+    /**
+     * Adds the columns that are not listed yet and the rows (keys {@code r0}, {@code r1}, …) with one changeset;
+     * returns the slot ID of each row.
+     */
+    protected List<Long> timetable(GameTimetableService service, long session, List<GameMember> columns,
+                                   Row... rows) throws Exception {
+        var current = service.get(session);
+        List<GameTimetableService.Change> changes = new ArrayList<>();
+        for (GameMember column : columns) {
+            if (current.participants().stream().noneMatch(item -> item.memberId() == column.id())) {
+                changes.add(new GameTimetableService.Change(GameTimetableService.ADD_PARTICIPANT, null, null, null,
+                        null, column.id(), null, null, null));
+            }
+        }
+        for (int i = 0; i < rows.length; i++) {
+            java.util.Map<String, String> cells = new java.util.LinkedHashMap<>();
+            rows[i].cells().forEach((member, content) -> cells.put(Long.toString(member), content));
+            changes.add(new GameTimetableService.Change(GameTimetableService.ADD_SLOT, "r" + i, null,
+                    rows[i].at().toString(), cells, null, null, null, null));
+        }
+        var result = service.changes(session, new GameTimetableService.ChangeSet(
+                "change-" + UUID.randomUUID(), current.revision(), changes));
+        List<Long> slots = new ArrayList<>();
+        for (int i = 0; i < rows.length; i++) {
+            slots.add(result.slots().get("r" + i));
+        }
+        return slots;
+    }
+
+    /** The entry of a member in a slot. */
+    protected GameTimetableService.Entry entry(GameTimetableService service, long session, long slotId,
+                                               long memberId) throws Exception {
+        return service.get(session).slots().stream().filter(slot -> slot.id() == slotId).findFirst().orElseThrow()
+                .entries().stream().filter(item -> item.memberId() == memberId).findFirst().orElseThrow();
+    }
+
+    /** Stores a real tracker position and makes it the device's latest, as Traccar's storage would. */
+    protected long trackerPosition(long deviceId, double latitude, double longitude, Instant fixTime)
+            throws SQLException {
+        java.sql.Timestamp fix = new java.sql.Timestamp(fixTime.toEpochMilli());
+        long id;
+        try (Connection connection = source.getConnection();
+             PreparedStatement statement = connection.prepareStatement("INSERT INTO tc_positions (protocol,"
+                     + " deviceid, servertime, devicetime, fixtime, valid, latitude, longitude, altitude, speed,"
+                     + " course, attributes, accuracy) VALUES ('osmand', ?, ?, ?, ?, TRUE, ?, ?, 0, 0, 0, '{}', 0)",
+                     Statement.RETURN_GENERATED_KEYS)) {
+            statement.setLong(1, deviceId);
+            statement.setTimestamp(2, fix);
+            statement.setTimestamp(3, fix);
+            statement.setTimestamp(4, fix);
+            statement.setDouble(5, latitude);
+            statement.setDouble(6, longitude);
+            statement.executeUpdate();
+            try (ResultSet keys = statement.getGeneratedKeys()) {
+                keys.next();
+                id = keys.getLong(1);
+            }
+        }
+        execute("UPDATE tc_devices SET positionid = ? WHERE id = ?", id, deviceId);
+        return id;
+    }
+
+    /** A processed tracker position as {@code PostProcessHandler} hands it to observers. */
+    protected static Position arriving(long deviceId, double latitude, double longitude, Instant fixTime) {
+        Position position = new Position("osmand");
+        position.setDeviceId(deviceId);
+        position.setValid(true);
+        position.setLatitude(latitude);
+        position.setLongitude(longitude);
+        position.setFixTime(java.util.Date.from(fixTime));
+        position.setDeviceTime(java.util.Date.from(fixTime));
+        position.setServerTime(java.util.Date.from(fixTime));
+        return position;
+    }
+
+    /** Records an open catch of a member directly. */
+    protected void caught(long session, GameMember member) throws SQLException {
+        execute("INSERT INTO tc_game_catches (gamesessionid, memberid, caughtat, activememberid)"
+                + " VALUES (?, ?, ?, ?)", session, member.id(), clock.instant(), member.id());
+    }
+
+    /** Starts a member's break directly, until {@code deadline}. */
+    protected long onBreak(long session, GameMember member, Instant deadline) throws SQLException {
+        return insert("INSERT INTO tc_game_breaks (gamesessionid, memberid, state, startedat, deadline, plannedby,"
+                + " activememberid) VALUES (?, ?, 'active', ?, ?, 'participant', ?)", session, member.id(),
+                clock.instant(), deadline, member.id());
+    }
+
+    /** Grants and arms a fake-ping joker of a member on a timetable entry, with its ledger; returns the reservation. */
+    protected long armFake(long session, GameMember member, long entryId, double latitude, double longitude)
+            throws Exception {
+        return transactions.write(transaction -> {
+            transaction.lockSession(session);
+            int[] balance = GameJokerRepository.balance(transaction, session, member.id(),
+                    GameJokerRepository.FAKE_PING);
+            GameJokerRepository.store(transaction, session, member.id(), GameJokerRepository.FAKE_PING,
+                    balance[0] + 1, balance[1]);
+            GameJokerRepository.ledger(transaction, session, member.id(), GameJokerRepository.FAKE_PING,
+                    GameJokerRepository.GRANT, 1, null, null, "Test", null);
+            long reservation = GameJokerRepository.reserve(transaction, session, member.id(),
+                    GameJokerRepository.FAKE_PING, null, false, "Test", null);
+            GameJokerRepository.insertPlan(transaction, session, reservation, member.id(), latitude, longitude,
+                    entryId, null, null);
+            return reservation;
+        });
+    }
+
+    protected String reservationStatus(long reservation) throws SQLException {
+        return text("SELECT status FROM tc_game_joker_reservations WHERE id = ?", reservation);
+    }
+
+    /** The coordinate of a device's latest position, or null without one. */
+    protected double[] latest(long deviceId) throws SQLException {
+        long position = number("SELECT positionid FROM tc_devices WHERE id = ?", deviceId);
+        if (position <= 0) {
+            return null;
+        }
+        return new double[] {
+            Double.parseDouble(text("SELECT latitude FROM tc_positions WHERE id = ?", position)),
+            Double.parseDouble(text("SELECT longitude FROM tc_positions WHERE id = ?", position))};
     }
 
     protected long memberRevision(long memberId) throws SQLException {

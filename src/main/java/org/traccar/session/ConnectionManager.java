@@ -51,10 +51,13 @@ import java.util.Collections;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.function.Consumer;
 import java.util.stream.Collectors;
 
 @Singleton
@@ -81,6 +84,7 @@ public class ConnectionManager implements BroadcastInterface {
     private final DeviceLookupService deviceLookupService;
 
     private final Map<Long, Set<UpdateListener>> listeners = new HashMap<>();
+    private final List<Consumer<Position>> positionObservers = new CopyOnWriteArrayList<>();
     private final Map<Long, Set<Long>> userDevices = new HashMap<>();
     private final Map<Long, Set<Long>> deviceUsers = new HashMap<>();
 
@@ -320,10 +324,25 @@ public class ConnectionManager implements BroadcastInterface {
         }
     }
 
+    /**
+     * Observes every processed position, before it reaches the WebSocket listeners: the game ping engine completes
+     * its fresh-fix waits with it. Observers must return quickly and never throw.
+     */
+    public void addPositionObserver(Consumer<Position> observer) {
+        positionObservers.add(observer);
+    }
+
     @Override
     public synchronized void updatePosition(boolean local, Position position) {
         if (local) {
             broadcastService.updatePosition(true, position);
+        }
+        for (Consumer<Position> observer : positionObservers) {
+            try {
+                observer.accept(position);
+            } catch (RuntimeException error) {
+                LOGGER.warn("Position observer failed", error);
+            }
         }
         for (long userId : deviceUsers.getOrDefault(position.getDeviceId(), Collections.emptySet())) {
             if (!canReadDevice(userId, position.getDeviceId())) {

@@ -47,7 +47,6 @@ public final class GameOperations {
     }
 
     static final String BOUND = "bound";
-    static final String SKIPPED = "skipped";
     static final String BREAK_UNAVAILABLE = "A break cannot start right now; try again later";
 
     private final GameTransaction transaction;
@@ -61,7 +60,6 @@ public final class GameOperations {
     private final List<FakeOutcome> fakes = new ArrayList<>();
     private final Set<Long> jokerMembers = new LinkedHashSet<>();
     private final Map<Long, AppliedFake> appliedFakes = new HashMap<>();
-    private final Set<Long> consumedFakes = new LinkedHashSet<>();
     private final Set<Long> immediateBreaks = new LinkedHashSet<>();
     private final Set<Long> succeededBreaks = new LinkedHashSet<>();
     private boolean statusChanged;
@@ -95,11 +93,6 @@ public final class GameOperations {
     /** The joker fakes to apply to the targets' hunter mirror positions of this delivery, by member. */
     Map<Long, AppliedFake> appliedFakes() {
         return appliedFakes;
-    }
-
-    /** Timetable fakes used with this delivery. */
-    Set<Long> consumedFakes() {
-        return consumedFakes;
     }
 
     /** Immediate break requests whose break started with these operations. */
@@ -181,12 +174,6 @@ public final class GameOperations {
                 case GameOperation.BreakEnded item -> breakMember(transaction, session, item.breakId(), result);
                 case GameOperation.BreakCancelled item -> breakMember(transaction, session, item.breakId(), result);
                 case GameOperation.BreakMissed item -> breakMember(transaction, session, item.breakId(), result);
-                case GameOperation.FakeUsed item -> GameJokerRepository.reservation(transaction, session,
-                        item.reservationId()).map(GameJokerRepository.Reservation::memberId)
-                        .ifPresent(result::add);
-                case GameOperation.FakeReleased item -> GameJokerRepository.reservation(transaction, session,
-                        item.reservationId()).map(GameJokerRepository.Reservation::memberId)
-                        .ifPresent(result::add);
                 case GameOperation.Checkpoint item -> {
                 }
             }
@@ -277,9 +264,6 @@ public final class GameOperations {
                     GameState.CANCELLED, item.detail() == null ? "Cancelled by an operator" : item.detail());
             case GameOperation.BreakMissed item -> breakReturned(index, item, item.breakId(), GameState.MISSED,
                     "The planned break was missed");
-            case GameOperation.FakeUsed item -> fakeSettled(index, item, item.reservationId(), true, null);
-            case GameOperation.FakeReleased item -> fakeSettled(index, item, item.reservationId(), false,
-                    item.detail());
             case GameOperation.Checkpoint item -> {
                 var checkpoint = GameDocumentService.putCheckpoint(transaction, objectMapper, session,
                         item.component(), item.expectedRevision(), item.schemaVersion(), item.document());
@@ -734,36 +718,6 @@ public final class GameOperations {
         }
         jokerMembers.add(pause.memberId());
         result(index, operation, pause.id(), null, null, null, state);
-    }
-
-    // Timetable fakes ---------------------------------------------------------------------------------------
-
-    /**
-     * Settles an armed timetable fake: used when the hunters received it with this delivery, released otherwise. A
-     * fake that is no longer armed (cancelled, its owner caught, already settled) is skipped.
-     */
-    private void fakeSettled(int index, GameOperation operation, long reservationId, boolean used, String detail)
-            throws Exception {
-        var reservation = GameJokerRepository.reservation(transaction, session, reservationId)
-                .orElseThrow(() -> GameErrors.invalid("Joker reservation " + reservationId + " not found"));
-        var plan = GameJokerRepository.plan(transaction, session, reservationId);
-        if (plan.isEmpty() || !plan.get().timetable()) {
-            throw GameErrors.invalid("Only timetable fakes are used or released by deliveries");
-        }
-        String status = SKIPPED;
-        if (reservation.armed()) {
-            if (used) {
-                GameJokerRepository.consume(transaction, reservation, "Tool", null);
-                consumedFakes.add(reservationId);
-                status = GameJokerRepository.CONSUMED;
-            } else {
-                GameJokerRepository.release(transaction, reservation, "Tool", detail);
-                status = GameJokerRepository.RELEASED;
-            }
-            jokerMembers.add(plan.get().memberId());
-        }
-        fakes.add(new FakeOutcome(reservationId, status));
-        result(index, operation, reservationId, null, null, null, status);
     }
 
 }

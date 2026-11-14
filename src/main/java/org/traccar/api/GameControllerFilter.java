@@ -40,12 +40,12 @@ import java.util.concurrent.atomic.AtomicBoolean;
 /**
  * Fences mutations with the game controller lease.
  * <ul>
- * <li>Game endpoints that change execution state require the current {@code controllerEpoch}: effects, timetable
- * progress, members, resource rows, checkpoints, requests and jokers of any session, every write of the running
- * session (its game state, {@code running}), and every write of game notifications and proximity. Configuration
- * edits of a stored session that is not running (name, settings, credentials, geofence plans, timetable, logs)
- * need only their revision check. Without a controller nobody changes a running session, while the server's own
- * execution goes on.</li>
+ * <li>Game endpoints that change execution state require the current {@code controllerEpoch}: effects, members,
+ * resource rows, checkpoints, requests and jokers of any session, every write of the running session (its game
+ * state, {@code running}, its timetable changes and execution toggle), and every write of game notifications and
+ * proximity. Configuration edits of a stored session that is not running (name, settings, credentials, geofence
+ * plans, timetable changes and toggle, logs) need only their revision check. Without a controller nobody
+ * changes a running session, while the server's own execution goes on.</li>
  * <li>The game state ({@code PUT game-sessions/{id}/state}) is fenced, with one exception: without an epoch, any
  * administrator may stop a game while no lease is active ({@link GameExecutionService#change} accepts only a stop
  * then, and records who stopped it). A test event ({@code POST game-sessions/{id}/events/test}) is never fenced: it
@@ -72,7 +72,7 @@ public class GameControllerFilter implements ContainerRequestFilter, ContainerRe
 
     private static final Set<String> STANDARD = Set.of("devices", "groups", "users", "geofences");
     /** Parts of a session path fenced whatever session they name: exact parts, and first segments. */
-    private static final Set<String> ALWAYS_FENCED_PARTS = Set.of("timetable/progress", "effects");
+    private static final Set<String> ALWAYS_FENCED_PARTS = Set.of("effects");
     private static final Set<String> ALWAYS_FENCED_SEGMENTS = Set.of(
             "members", "resources", "checkpoints", "requests", "jokers");
     private static final String STATE_PART = "state";

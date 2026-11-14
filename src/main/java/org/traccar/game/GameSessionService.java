@@ -32,7 +32,7 @@ public class GameSessionService {
      * The game-session API version of data model 2. Model 1 answered 4, so a Tool built for model 1 stops at
      * connection to this server.
      */
-    public static final int API_VERSION = 6;
+    public static final int API_VERSION = 7;
     /** The operators' WebSocket invalidation of the session list. */
     public static final String SESSIONS_INVALIDATION = "game-sessions";
 
@@ -83,6 +83,7 @@ public class GameSessionService {
         if (settings == null || !settings.isObject()) {
             throw GameErrors.invalid("Settings must be a JSON object");
         }
+        GameSettings.validate(settings);
         String serialized = objectMapper.writeValueAsString(settings);
         if (serialized.length() > MAX_SETTINGS_LENGTH) {
             throw GameErrors.invalid("Settings exceed the size limit");

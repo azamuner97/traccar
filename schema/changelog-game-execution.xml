@@ -55,4 +55,155 @@
     </addColumn>
   </changeSet>
 
+  <!--
+    Phase 1: the server-run timetable (Claude outputs/game-execution-plan.md, 1.1). The published-workbook tables
+    of model 2 are dropped with their data; timetable fakes planned on them return their joker first, and their
+    open requests end. The new tables:
+
+    - tc_game_timetables: the plan revision (changed only by edits, never by execution) and the execution toggle.
+    - tc_game_timetable_participants: the columns (player and supporter members) and their order. Retired members
+      stay listed so their history remains visible.
+    - tc_game_timetable_slots: the rows. activeat equals scheduledat unless the slot is removed, so the unique
+      (gamesessionid, activeat) allows one live slot per time. Moving a slot changes only scheduledat.
+    - tc_game_timetable_entries: the cells. An absent cell has no entry; blank content is a real ping. Removed
+      slots and cancelled entries are kept, because tc_game_fake_ping_plans references entries.
+    - tc_game_timetable_changes: recorded changesets (changeId, request hash, result), so a retried changeset
+      answers its recorded result.
+  -->
+  <changeSet author="traccar-tool" id="game-execution-2-timetable-fakes">
+    <sql>
+      UPDATE tc_game_requests SET status = 'cancelled', message = 'The timetable was replaced',
+          completedat = updatedat
+        WHERE status IN ('pending', 'approved', 'executing') AND id IN (SELECT r.requestid
+          FROM tc_game_joker_reservations r JOIN tc_game_fake_ping_plans p ON p.reservationid = r.id
+          WHERE p.timetableentryid IS NOT NULL AND r.requestid IS NOT NULL);
+      INSERT INTO tc_game_joker_ledger (gamesessionid, memberid, type, kind, quantity, requestid, reservationid,
+          actor, detail, occurredat)
+        SELECT r.gamesessionid, r.memberid, r.type, 'release', 1, r.requestid, r.id, NULL,
+            'The timetable was replaced', r.updatedat
+          FROM tc_game_joker_reservations r JOIN tc_game_fake_ping_plans p ON p.reservationid = r.id
+          WHERE p.timetableentryid IS NOT NULL AND r.status = 'reserved';
+      UPDATE tc_game_joker_reservations SET status = 'released'
+        WHERE status = 'reserved' AND id IN (SELECT reservationid FROM tc_game_fake_ping_plans
+          WHERE timetableentryid IS NOT NULL);
+      DELETE FROM tc_game_fake_ping_plans WHERE timetableentryid IS NOT NULL;
+    </sql>
+  </changeSet>
+
+  <changeSet author="traccar-tool" id="game-execution-2-drop-timetable">
+    <dropForeignKeyConstraint baseTableName="tc_game_fake_ping_plans" constraintName="fk_gm_fake_plans_entry" />
+    <dropTable tableName="tc_game_timetable_entries" />
+    <dropTable tableName="tc_game_timetables" />
+  </changeSet>
+
+  <changeSet author="traccar-tool" id="game-execution-2-timetable">
+    <createTable tableName="tc_game_timetables">
+      <column name="gamesessionid" type="BIGINT">
+        <constraints primaryKey="true" primaryKeyName="pk_gm_timetables" nullable="false" />
+      </column>
+      <column name="revision" type="BIGINT"><constraints nullable="false" /></column>
+      <column name="enabled" type="BOOLEAN"><constraints nullable="false" /></column>
+      <column name="enabledchangedat" type="DATETIME(3)" />
+      <column name="updatedat" type="DATETIME(3)"><constraints nullable="false" /></column>
+    </createTable>
+    <addForeignKeyConstraint baseTableName="tc_game_timetables" baseColumnNames="gamesessionid"
+      referencedTableName="tc_game_sessions" referencedColumnNames="id" constraintName="fk_gm_timetables_session" />
+
+    <createTable tableName="tc_game_timetable_participants">
+      <column name="gamesessionid" type="BIGINT"><constraints nullable="false" /></column>
+      <column name="memberid" type="BIGINT"><constraints nullable="false" /></column>
+      <column name="ordinal" type="INT"><constraints nullable="false" /></column>
+    </createTable>
+    <addPrimaryKey tableName="tc_game_timetable_participants" columnNames="gamesessionid,memberid"
+      constraintName="pk_gm_timetable_participants" />
+    <addForeignKeyConstraint baseTableName="tc_game_timetable_participants" baseColumnNames="gamesessionid"
+      referencedTableName="tc_game_sessions" referencedColumnNames="id"
+      constraintName="fk_gm_tt_participants_session" />
+    <addForeignKeyConstraint baseTableName="tc_game_timetable_participants" baseColumnNames="gamesessionid,memberid"
+      referencedTableName="tc_game_session_members" referencedColumnNames="gamesessionid,id"
+      constraintName="fk_gm_tt_participants_member" />
+
+    <createTable tableName="tc_game_timetable_slots">
+      <column name="id" type="BIGINT" autoIncrement="true">
+        <constraints primaryKey="true" primaryKeyName="pk_gm_timetable_slots" nullable="false" />
+      </column>
+      <column name="gamesessionid" type="BIGINT"><constraints nullable="false" /></column>
+      <column name="scheduledat" type="DATETIME(3)"><constraints nullable="false" /></column>
+      <column name="state" type="VARCHAR(16)"><constraints nullable="false" /></column>
+      <column name="claimedat" type="DATETIME(3)" />
+      <column name="finishedat" type="DATETIME(3)" />
+      <column name="activeat" type="DATETIME(3)" />
+    </createTable>
+    <addUniqueConstraint tableName="tc_game_timetable_slots" columnNames="gamesessionid,id"
+      constraintName="uq_gm_slots_session_id" />
+    <addUniqueConstraint tableName="tc_game_timetable_slots" columnNames="gamesessionid,activeat"
+      constraintName="uq_gm_slots_active_time" />
+    <addForeignKeyConstraint baseTableName="tc_game_timetable_slots" baseColumnNames="gamesessionid"
+      referencedTableName="tc_game_sessions" referencedColumnNames="id" constraintName="fk_gm_slots_session" />
+    <createIndex tableName="tc_game_timetable_slots" indexName="idx_gm_slots_due">
+      <column name="gamesessionid" /><column name="state" /><column name="scheduledat" />
+    </createIndex>
+
+    <createTable tableName="tc_game_timetable_entries">
+      <column name="id" type="BIGINT" autoIncrement="true">
+        <constraints primaryKey="true" primaryKeyName="pk_gm_timetable_entries" nullable="false" />
+      </column>
+      <column name="gamesessionid" type="BIGINT"><constraints nullable="false" /></column>
+      <column name="slotid" type="BIGINT"><constraints nullable="false" /></column>
+      <column name="memberid" type="BIGINT"><constraints nullable="false" /></column>
+      <column name="content" type="VARCHAR(512)"><constraints nullable="false" /></column>
+      <column name="status" type="VARCHAR(16)"><constraints nullable="false" /></column>
+      <column name="statusat" type="DATETIME(3)" />
+      <column name="reason" type="VARCHAR(32)" />
+      <column name="detail" type="VARCHAR(512)" />
+    </createTable>
+    <addUniqueConstraint tableName="tc_game_timetable_entries" columnNames="gamesessionid,id"
+      constraintName="uq_gm_entries_session_id" />
+    <addUniqueConstraint tableName="tc_game_timetable_entries" columnNames="slotid,memberid"
+      constraintName="uq_gm_entries_cell" />
+    <addForeignKeyConstraint baseTableName="tc_game_timetable_entries" baseColumnNames="gamesessionid"
+      referencedTableName="tc_game_sessions" referencedColumnNames="id" constraintName="fk_gm_entries_session" />
+    <addForeignKeyConstraint baseTableName="tc_game_timetable_entries" baseColumnNames="gamesessionid,slotid"
+      referencedTableName="tc_game_timetable_slots" referencedColumnNames="gamesessionid,id"
+      constraintName="fk_gm_entries_slot" />
+    <addForeignKeyConstraint baseTableName="tc_game_timetable_entries" baseColumnNames="gamesessionid,memberid"
+      referencedTableName="tc_game_session_members" referencedColumnNames="gamesessionid,id"
+      constraintName="fk_gm_entries_member" />
+    <createIndex tableName="tc_game_timetable_entries" indexName="idx_gm_entries_member">
+      <column name="gamesessionid" /><column name="memberid" /><column name="status" />
+    </createIndex>
+
+    <createTable tableName="tc_game_timetable_changes">
+      <column name="id" type="BIGINT" autoIncrement="true">
+        <constraints primaryKey="true" primaryKeyName="pk_gm_timetable_changes" nullable="false" />
+      </column>
+      <column name="gamesessionid" type="BIGINT"><constraints nullable="false" /></column>
+      <column name="changeid" type="VARCHAR(64)"><constraints nullable="false" /></column>
+      <column name="requesthash" type="VARCHAR(64)"><constraints nullable="false" /></column>
+      <column name="result" type="CLOB"><constraints nullable="false" /></column>
+      <column name="createdat" type="DATETIME(3)"><constraints nullable="false" /></column>
+    </createTable>
+    <addUniqueConstraint tableName="tc_game_timetable_changes" columnNames="gamesessionid,changeid"
+      constraintName="uq_gm_timetable_changes" />
+    <addForeignKeyConstraint baseTableName="tc_game_timetable_changes" baseColumnNames="gamesessionid"
+      referencedTableName="tc_game_sessions" referencedColumnNames="id"
+      constraintName="fk_gm_timetable_changes_session" />
+
+    <addForeignKeyConstraint baseTableName="tc_game_fake_ping_plans" baseColumnNames="gamesessionid,timetableentryid"
+      referencedTableName="tc_game_timetable_entries" referencedColumnNames="gamesessionid,id"
+      constraintName="fk_gm_fake_plans_entry" />
+  </changeSet>
+
+  <changeSet author="traccar-tool" id="game-execution-2-timetable-checks">
+    <sql>
+      ALTER TABLE tc_game_timetable_slots ADD CONSTRAINT ck_gm_slots_state
+        CHECK ((state IN ('scheduled', 'claimed', 'done') AND activeat IS NOT NULL AND activeat = scheduledat)
+          OR (state = 'removed' AND activeat IS NULL));
+      ALTER TABLE tc_game_timetable_entries ADD CONSTRAINT ck_gm_entries_status
+        CHECK (status IN ('scheduled', 'sent', 'skipped', 'failed', 'cancelled'));
+      ALTER TABLE tc_game_timetable_participants ADD CONSTRAINT ck_gm_tt_participants_ordinal
+        CHECK (ordinal >= 0);
+    </sql>
+  </changeSet>
+
 </databaseChangeLog>

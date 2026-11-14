@@ -84,7 +84,7 @@ tags:
   - name: Game Sessions
     description: >-
       Sessions, settings, members, resource rows, documents, timetable and logs (operators only). The game endpoints
-      describe game data model 2 (game-session API version 6): each participant is a member with a stable ID, typed
+      describe game data model 2 (game-session API version 7): each participant is a member with a stable ID, typed
       tables hold the game state, and the server computes every member's status. Operators are Traccar
       administrators. Members are resolved from the caller's account; an account without membership gets 403 from
       every member endpoint. Every time is an ISO-8601 instant in UTC. Players and supporters never receive member
@@ -104,8 +104,8 @@ tags:
     description: >-
       Server-wide controller lease for Traccar Tool (administrators only). Fenced requests carry the current
       controllerEpoch in the X-Game-Controller-Epoch header and are refused with 423 otherwise. Fenced are, for any
-      session, effects, timetable progress, members/*, resources/*, checkpoints/*, requests/* and jokers/*; every
-      write of the running session (its game state is running); the game state itself (PUT
+      session, effects, members/*, resources/*, checkpoints/*, requests/* and jokers/*; every write of the running
+      session (its game state is running), including its timetable changes and execution toggle; the game state itself (PUT
       /game-sessions/{id}/state), except a stop without the header while no lease is active; writes to
       /game-notifications and /game-proximity; and - while a lease is held - standard mutations (devices, groups,
       users, permissions, geofences, DELETE /positions) of the Traccar resources a session owns (members' accounts
@@ -3971,7 +3971,7 @@ paths:
   /game-sessions/capabilities:
     get:
       operationId: getGameCapabilities
-      summary: The game-session API version (5 for data model 2)
+      summary: The game-session API version (7)
       tags: [Game Sessions]
       responses:
         '200':
@@ -4696,7 +4696,12 @@ paths:
       - $ref: '#/components/parameters/GameSessionId'
     get:
       operationId: getGameTimetable
-      summary: The published timetable with its active entries
+      summary: The server timetable with its participants, slots, cells and execution state
+      description: >-
+        frozenUntil is serverTime plus the 15 s freeze horizon: slots due before it can't change. execution.lastEventId
+        is the newest execution event of the session; the Tool catches up with GET logs?events=true&after=<id> when it
+        is newer than the one it showed. Removed slots and cancelled (absent) cells are not listed. A claimed slot's
+        cells read scheduled until their outcome.
       tags: [Game Sessions]
       responses:
         '200':
@@ -4709,23 +4714,33 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
-    put:
-      operationId: publishGameTimetable
-      summary: Publishes a parsed timetable; headers resolve to members by display name, else tracker name
+  /game-sessions/{id}/timetable/changes:
+    parameters:
+      - $ref: '#/components/parameters/GameSessionId'
+    post:
+      operationId: changeGameTimetable
+      summary: Applies a timetable changeset all-or-nothing
+      description: >-
+        Checked at commit under the session lock. A slot is editable while scheduled and more than 15 s ahead (a
+        move's new time too); cells hold valid instructions, stored trimmed and canonical; cells name active players
+        and supporters listed as participants; slot times are unique; at most 20000 present cells. An armed fake is
+        released, and its owner told, when its cell is cancelled, becomes ineligible, or its slot moves. A repeated
+        changeId with the same content answers the recorded result (replayed true); with other content 409.
+        baseRevision must be the current revision, else 409. Fenced on the running session.
       tags: [Game Sessions]
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/GameTimetablePublish'
+              $ref: '#/components/schemas/GameTimetableChangeSet'
       responses:
         '200':
-          description: OK
+          description: Applied, or the recorded result of the same changeId
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/GameTimetablePublished'
+                $ref: '#/components/schemas/GameTimetableChangeResult'
         '400':
           $ref: '#/components/responses/BadRequest'
         '403':
@@ -4734,24 +4749,44 @@ paths:
           $ref: '#/components/responses/NotFound'
         '409':
           $ref: '#/components/responses/Conflict'
+        '422':
+          description: Rejected; every failing change is listed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GameTimetableRejection'
         '423':
           $ref: '#/components/responses/Locked'
-  /game-sessions/{id}/timetable/progress:
+  /game-sessions/{id}/timetable/execution:
     parameters:
       - $ref: '#/components/parameters/GameSessionId'
     put:
-      operationId: updateGameTimetableProgress
-      summary: Records the execution state of entries (fenced)
+      operationId: setGameTimetableExecution
+      summary: Switches timetable execution on or off
+      description: >-
+        The timetable runs only while this is on and the game is running; a lost lease or a closed Tool does not
+        affect it. Switching off lets cells already being written finish; cells still waiting for a fresh fix are
+        skipped (reason stopped). It switches itself off (completed) when no scheduled slot is left. Each change
+        writes a timetable execution event. Fenced on the running session.
       tags: [Game Sessions]
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/GameTimetableProgressUpdate'
+              type: object
+              additionalProperties: false
+              required: [enabled]
+              properties:
+                enabled:
+                  type: boolean
       responses:
-        '204':
-          description: Recorded
+        '200':
+          description: The execution state
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GameTimetableExecution'
         '400':
           $ref: '#/components/responses/BadRequest'
         '403':
@@ -6835,7 +6870,7 @@ components:
       properties:
         apiVersion:
           type: integer
-          const: 6
+          const: 7
     GameSessionSummary:
       type: object
       properties:
@@ -7120,87 +7155,207 @@ components:
           $ref: '#/components/schemas/Id'
     GameTimetableEntry:
       type: object
+      description: A present cell; fakeReservationId names the fake-ping joker armed on it.
+      required: [id, memberId, content, status]
       properties:
         id:
           $ref: '#/components/schemas/Id'
-        scheduledAt:
-          $ref: '#/components/schemas/Time'
         memberId:
           $ref: '#/components/schemas/Id'
-        participant:
-          type: [string, 'null']
         content:
           type: string
+          maxLength: 512
+          description: The canonical instruction (x, blank, b, a target code, lat,lon or lat,lon|code)
         status:
           type: string
           enum: [scheduled, sent, skipped, failed]
         statusAt:
           $ref: '#/components/schemas/NullableTime'
-    GameTimetable:
+        reason:
+          type: string
+          description: >-
+            Why a cell was not sent: inactive, caught, break, noRecipient, noMirror, noPosition, missed, stopped, skip
+            (x), invalid or error
+        detail:
+          type: string
+        fakeReservationId:
+          $ref: '#/components/schemas/Id'
+    GameTimetableSlotRow:
       type: object
+      required: [id, scheduledAt, state, entries]
       properties:
-        revision:
-          type: integer
-        columns:
-          type: array
-        source:
-          type: object
+        id:
+          $ref: '#/components/schemas/Id'
+        scheduledAt:
+          $ref: '#/components/schemas/Time'
+        state:
+          type: string
+          enum: [scheduled, claimed, done]
+        claimedAt:
+          $ref: '#/components/schemas/Time'
+        finishedAt:
+          $ref: '#/components/schemas/Time'
         entries:
           type: array
           items:
             $ref: '#/components/schemas/GameTimetableEntry'
-    GameTimetablePublish:
+    GameTimetableParticipant:
       type: object
-      required: [expectedRevision, columns, entries]
+      required: [memberId, position, displayName, role, number, state]
       properties:
-        expectedRevision:
+        memberId:
+          $ref: '#/components/schemas/Id'
+        position:
           type: integer
           minimum: 0
-        columns:
-          type: array
-          description: The time column, then one header per participant
-          items:
-            type: string
-        source:
-          type: [object, 'null']
-        entries:
-          type: array
-          items:
-            type: object
-            required: [scheduledAt, participant, content]
-            properties:
-              scheduledAt:
-                $ref: '#/components/schemas/Time'
-              participant:
-                type: string
-              content:
-                type: string
-    GameTimetablePublished:
+        displayName:
+          type: string
+        role:
+          type: string
+          enum: [player, supporter]
+        number:
+          type: integer
+        state:
+          type: string
+          enum: [active, retired]
+        trackerId:
+          $ref: '#/components/schemas/NullableId'
+    GameTimetableExecution:
       type: object
+      required: [enabled, gameState, lastEventId]
+      properties:
+        enabled:
+          type: boolean
+        enabledChangedAt:
+          $ref: '#/components/schemas/Time'
+        gameState:
+          type: string
+          enum: [running, stopped]
+        nextSlotAt:
+          $ref: '#/components/schemas/Time'
+        currentSlotId:
+          $ref: '#/components/schemas/Id'
+        lastEventId:
+          type: integer
+          format: int64
+    GameTimetable:
+      type: object
+      required: [revision, serverTime, frozenUntil, execution, participants, slots]
       properties:
         revision:
           type: integer
-        structureChanged:
-          type: boolean
-        entries:
+          description: The plan revision; edits advance it, execution never does
+        serverTime:
+          $ref: '#/components/schemas/Time'
+        frozenUntil:
+          $ref: '#/components/schemas/Time'
+        execution:
+          $ref: '#/components/schemas/GameTimetableExecution'
+        participants:
           type: array
           items:
-            $ref: '#/components/schemas/GameTimetableEntry'
-    GameTimetableProgressUpdate:
+            $ref: '#/components/schemas/GameTimetableParticipant'
+        slots:
+          type: array
+          items:
+            $ref: '#/components/schemas/GameTimetableSlotRow'
+    GameTimetableChange:
       type: object
-      required: [entries]
+      required: [type]
+      description: >-
+        addSlot (key, scheduledAt, cells by member ID), moveSlot (slotId, scheduledAt), removeSlot (slotId), setCell
+        (slotId or key, memberId, content), clearCell (slotId or key, memberId), addParticipant (memberId, optional
+        position), removeParticipant (memberId; the column stays while the member has history), orderParticipants
+        (memberIds: every column once).
       properties:
-        entries:
+        type:
+          type: string
+          enum: [addSlot, moveSlot, removeSlot, setCell, clearCell, addParticipant, removeParticipant,
+                 orderParticipants]
+        key:
+          type: string
+          pattern: '^[A-Za-z0-9_.:-]{1,64}$'
+        slotId:
+          $ref: '#/components/schemas/Id'
+        scheduledAt:
+          $ref: '#/components/schemas/Time'
+        cells:
+          type: object
+          additionalProperties:
+            type: string
+            maxLength: 512
+        memberId:
+          $ref: '#/components/schemas/Id'
+        content:
+          type: string
+          maxLength: 512
+        position:
+          type: integer
+          minimum: 0
+        memberIds:
+          type: array
+          items:
+            $ref: '#/components/schemas/Id'
+    GameTimetableChangeSet:
+      type: object
+      required: [changeId, baseRevision, changes]
+      properties:
+        changeId:
+          type: string
+          pattern: '^[A-Za-z0-9_-]{8,64}$'
+        baseRevision:
+          type: integer
+          minimum: 0
+        changes:
+          type: array
+          maxItems: 5000
+          items:
+            $ref: '#/components/schemas/GameTimetableChange'
+    GameTimetableChangeResult:
+      type: object
+      required: [changeId, revision, slots, replayed]
+      properties:
+        changeId:
+          type: string
+        revision:
+          type: integer
+        slots:
+          type: object
+          description: The slot ID of each added slot's key
+          additionalProperties:
+            type: integer
+            format: int64
+        replayed:
+          type: boolean
+    GameTimetableRejection:
+      type: object
+      required: [message, errors]
+      properties:
+        message:
+          type: string
+        errors:
           type: array
           items:
             type: object
-            required: [id, status]
+            required: [code, message]
             properties:
-              id:
+              index:
+                type: integer
+                description: The failing change's index; absent for a limit of the whole changeset
+              slotId:
                 $ref: '#/components/schemas/Id'
-              status:
+              key:
                 type: string
-                enum: [scheduled, sent, skipped, failed]
+              memberId:
+                $ref: '#/components/schemas/Id'
+              code:
+                type: string
+                description: >-
+                  frozen, claimed, done, removed, invalidInstruction, inactiveMember, notParticipant, duplicateTime,
+                  duplicateParticipant, unknownSlot, unknownKey, invalidKey, invalidTime, invalidOrder,
+                  invalidChange or tooManyEntries
+              message:
+                type: string
     GameLogPage:
       type: object
       properties:
@@ -7503,7 +7658,7 @@ components:
           type: string
           enum: [catch, release, pingDelivered, pingFailed, runEnded, liveUploadStarted, liveUploadSample,
                  liveUploadEnded, breakPlanned, breakWaiting, breakStarted, breakEnded, breakCancelled, breakMissed,
-                 fakeUsed, fakeReleased, checkpoint]
+                 checkpoint]
       additionalProperties: true
     GameEffectsDelivery:
       type: object
@@ -7515,8 +7670,10 @@ components:
         positions:
           type: [array, 'null']
           maxItems: 200
+          description: Raw mirror positions (until every ping is an intent, phase 4)
           items:
             type: object
+            additionalProperties: false
             properties:
               deviceId:
                 $ref: '#/components/schemas/NullableId'
@@ -7530,17 +7687,19 @@ components:
                 $ref: '#/components/schemas/NullableTime'
               attributes:
                 type: [object, 'null']
-              fakeReservationId:
-                $ref: '#/components/schemas/NullableId'
-              fallbackLatitude:
-                type: [number, 'null']
-              fallbackLongitude:
-                type: [number, 'null']
         operations:
           type: [array, 'null']
           maxItems: 200
           items:
             $ref: '#/components/schemas/GameOperation'
+        pings:
+          type: [array, 'null']
+          maxItems: 50
+          description: >-
+            Ping intents, decided by the server's ping engine in this delivery after the operations; one outcome each
+            (GameEffectsOutcome.pings). An intent of a delivery never waits for a fresh fix (no freshness).
+          items:
+            $ref: '#/components/schemas/GamePingIntent'
         notifications:
           type: [object, 'null']
           properties:
@@ -7610,6 +7769,191 @@ components:
                 type: [boolean, 'null']
               detail:
                 type: [string, 'null']
+    GamePingAudience:
+      type: string
+      enum: [hunters, players, supporters]
+    GamePingEffects:
+      type: object
+      additionalProperties: false
+      description: Operations, request completions and joker uses applied in the intent's transaction
+      properties:
+        operations:
+          type: [array, 'null']
+          items:
+            $ref: '#/components/schemas/GameOperation'
+        requests:
+          type: [array, 'null']
+          items:
+            type: object
+            required: [id, status]
+            properties:
+              id:
+                $ref: '#/components/schemas/Id'
+              status:
+                type: string
+                enum: [succeeded, failed, rejected]
+              message:
+                type: [string, 'null']
+              detail:
+                type: [string, 'null']
+        jokers:
+          type: [array, 'null']
+          items:
+            type: object
+            properties:
+              memberId:
+                $ref: '#/components/schemas/Id'
+              type:
+                type: string
+                const: hunterPositions
+              overAllocate:
+                type: [boolean, 'null']
+              detail:
+                type: [string, 'null']
+    GamePingIntent:
+      type: object
+      required: [path]
+      additionalProperties: false
+      description: >-
+        One ping, decided by the server's rules (plan B3). Participant paths name sourceMemberId and audiences (the
+        real position) and optionally a fake coordinate with its own audiences; a relay names recipientMemberId, who
+        receives every active hunter's position on their per-hunter mirrors. Past notAfter nothing is written
+        (skipped/missed). onDelivered applies when at least one audience received a position, onNotDelivered
+        otherwise.
+      properties:
+        path:
+          type: string
+          enum: [timetable, manual, live, geofenceLive, speedhunt, relay]
+        sourceMemberId:
+          $ref: '#/components/schemas/NullableId'
+        recipientMemberId:
+          $ref: '#/components/schemas/NullableId'
+        audiences:
+          type: [array, 'null']
+          items:
+            $ref: '#/components/schemas/GamePingAudience'
+        fake:
+          type: [object, 'null']
+          required: [latitude, longitude, audiences]
+          properties:
+            latitude:
+              type: number
+            longitude:
+              type: number
+            audiences:
+              type: array
+              minItems: 1
+              items:
+                $ref: '#/components/schemas/GamePingAudience'
+        freshness:
+          type: [object, 'null']
+          description: Only the server's timetable waits; refused in effects deliveries
+          properties:
+            minimumFixTime:
+              $ref: '#/components/schemas/Time'
+            waitSeconds:
+              type: integer
+              minimum: 0
+              maximum: 60
+        notAfter:
+          $ref: '#/components/schemas/NullableTime'
+        onDelivered:
+          oneOf:
+            - type: 'null'
+            - $ref: '#/components/schemas/GamePingEffects'
+        onNotDelivered:
+          oneOf:
+            - type: 'null'
+            - $ref: '#/components/schemas/GamePingEffects'
+    GamePingOutcome:
+      type: object
+      required: [path, status, delivered, withheld]
+      description: >-
+        What became of one intent. status sent, skipped (inactive, caught, break, missed, or delivered with audiences
+        withheld by a break: reason break) or failed (noRecipient, noMirror, noPosition). delivered lists the
+        audiences that received a position (real or fake); fake is the coordinate delivered with its audiences;
+        jokerFake the timetable fake-ping joker (consumed or released); position the real position used (stale when
+        older than minimumFixTime); delaySeconds the delay after the scheduled time; hunters the relayed hunters.
+      properties:
+        path:
+          type: string
+        sourceMemberId:
+          $ref: '#/components/schemas/Id'
+        recipientMemberId:
+          $ref: '#/components/schemas/Id'
+        status:
+          type: string
+          enum: [sent, skipped, failed]
+        reason:
+          type: string
+          enum: [inactive, caught, break, noRecipient, noMirror, noPosition, missed]
+        delivered:
+          type: array
+          items:
+            $ref: '#/components/schemas/GamePingAudience'
+        withheld:
+          type: array
+          items:
+            $ref: '#/components/schemas/GamePingAudience'
+        fake:
+          type: object
+          properties:
+            latitude:
+              type: number
+            longitude:
+              type: number
+            audiences:
+              type: array
+              items:
+                $ref: '#/components/schemas/GamePingAudience'
+        jokerFake:
+          type: object
+          properties:
+            reservationId:
+              $ref: '#/components/schemas/Id'
+            status:
+              type: string
+              enum: [consumed, released]
+            latitude:
+              type: number
+            longitude:
+              type: number
+        position:
+          type: object
+          properties:
+            latitude:
+              type: number
+            longitude:
+              type: number
+            fixTime:
+              $ref: '#/components/schemas/Time'
+            stale:
+              type: boolean
+        delaySeconds:
+          type: number
+        detail:
+          type: string
+        hunters:
+          type: array
+          items:
+            $ref: '#/components/schemas/Id'
+        positions:
+          type: array
+          items:
+            type: object
+            properties:
+              deviceId:
+                $ref: '#/components/schemas/Id'
+              positionId:
+                $ref: '#/components/schemas/Id'
+              latest:
+                type: boolean
+              fixTime:
+                $ref: '#/components/schemas/Time'
+        operations:
+          type: array
+          items:
+            type: object
     GameEffectsOutcome:
       type: object
       description: The recorded outcome of a delivery (operator data; it names joker fakes)
@@ -7643,6 +7987,10 @@ components:
                 type: string
               status:
                 type: string
+        pings:
+          type: array
+          items:
+            $ref: '#/components/schemas/GamePingOutcome'
         generation:
           type: [string, 'null']
         alerts:

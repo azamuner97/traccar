@@ -337,10 +337,16 @@ public abstract class GameServicesTest {
                 + " VALUES (?, 'game', ?, 'message')", session, T0);
         execute("INSERT INTO tc_game_geofence_plans (gamesessionid, revision, data, updatedat) VALUES (?, 1, '{}', ?)",
                 session, T0);
-        execute("INSERT INTO tc_game_timetables (gamesessionid, revision, headers, source, updatedat)"
-                + " VALUES (?, 1, '[]', '{}', ?)", session, T0);
-        execute("INSERT INTO tc_game_timetable_entries (gamesessionid, memberid, scheduledat, content, active, revision,"
-                + " status) VALUES (?, ?, ?, 'content', TRUE, 1, 'scheduled')", session, player, T0);
+        execute("INSERT INTO tc_game_timetables (gamesessionid, revision, enabled, updatedat)"
+                + " VALUES (?, 1, TRUE, ?)", session, T0);
+        execute("INSERT INTO tc_game_timetable_participants (gamesessionid, memberid, ordinal) VALUES (?, ?, 0)",
+                session, player);
+        long slot = insert("INSERT INTO tc_game_timetable_slots (gamesessionid, scheduledat, state, activeat)"
+                + " VALUES (?, ?, 'scheduled', ?)", session, T0, T0);
+        execute("INSERT INTO tc_game_timetable_entries (gamesessionid, slotid, memberid, content, status)"
+                + " VALUES (?, ?, ?, '', 'scheduled')", session, slot, player);
+        execute("INSERT INTO tc_game_timetable_changes (gamesessionid, changeid, requesthash, result, createdat)"
+                + " VALUES (?, 'change-1', 'hash', '{}', ?)", session, T0);
         long request = insert("INSERT INTO tc_game_requests (gamesessionid, type, requestermemberid, requesterrole,"
                 + " targetmemberid, parameters, status, createdat, updatedat)"
                 + " VALUES (?, 'speedhunt', ?, 'hunter', ?, '{}', 'succeeded', ?, ?)",

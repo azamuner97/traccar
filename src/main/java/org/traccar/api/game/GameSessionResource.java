@@ -44,7 +44,7 @@ import java.util.Map;
  * bindings, resource rows, documents and checkpoints, the timetable, logs, requests, jokers, effects deliveries and
  * the operator snapshot. Model 1's paths are kept where the concept is unchanged.
  *
- * <p>{@code GameControllerFilter} fences writes by path: effects, timetable progress, {@code members/*},
+ * <p>{@code GameControllerFilter} fences writes by path: effects, {@code members/*},
  * {@code resources/*}, {@code checkpoints/*}, {@code requests/*} and {@code jokers/*} always, and every write of the
  * running session. The game state ({@code state}) is fenced too, except a stop without an epoch while no lease is
  * active; a test event ({@code events/test}) is never fenced.
@@ -95,11 +95,12 @@ public class GameSessionResource extends GameApiResource {
     public record RebindInput(Long resourceId) {
     }
 
-    public record TimetablePublish(Long expectedRevision, JsonNode columns, JsonNode source,
-                                   List<GameTimetableService.EntryInput> entries) {
+    /** The timetable execution toggle. */
+    public record TimetableExecution(Boolean enabled) {
     }
 
-    public record ProgressUpdate(List<GameTimetableService.Progress> entries) {
+    /** A rejected timetable changeset (422): every failing change. */
+    public record TimetableRejection(String message, List<GameTimetableService.ChangeError> errors) {
     }
 
     public record LogAppend(List<GameLogService.LogInput> entries) {
@@ -507,21 +508,32 @@ public class GameSessionResource extends GameApiResource {
         return json(timetables.get(id));
     }
 
-    @PUT
-    @Path("{id}/timetable")
-    public JsonNode publishTimetable(@PathParam("id") long id, TimetablePublish request) throws Exception {
+    /**
+     * Applies a timetable changeset all-or-nothing (plan 1.4): 409 for a stale {@code baseRevision} or a reused
+     * {@code changeId} with other changes, 422 listing every failing change.
+     */
+    @POST
+    @Path("{id}/timetable/changes")
+    public Response timetableChanges(@PathParam("id") long id, GameTimetableService.ChangeSet changeSet)
+            throws Exception {
         checkOperator();
-        required(request, "Timetable required");
-        return json(timetables.publish(id, expected(request.expectedRevision()), request.columns(),
-                request.source(), request.entries()));
+        try {
+            return Response.ok(json(timetables.changes(id, changeSet))).type(MediaType.APPLICATION_JSON).build();
+        } catch (GameTimetableService.Rejected rejected) {
+            return Response.status(422).entity(json(new TimetableRejection(rejected.getMessage(), rejected.errors())))
+                    .type(MediaType.APPLICATION_JSON).build();
+        }
     }
 
+    /** Switches timetable execution on or off; it runs only while it is on and the game is running. */
     @PUT
-    @Path("{id}/timetable/progress")
-    public Response timetableProgress(@PathParam("id") long id, ProgressUpdate request) throws Exception {
+    @Path("{id}/timetable/execution")
+    public JsonNode timetableExecution(@PathParam("id") long id, TimetableExecution request) throws Exception {
         checkOperator();
-        timetables.progress(id, request == null ? null : request.entries());
-        return Response.noContent().build();
+        if (request == null || request.enabled() == null) {
+            throw new BadRequestException("enabled is required");
+        }
+        return json(timetables.setExecution(id, request.enabled(), getUserId()));
     }
 
     @GET

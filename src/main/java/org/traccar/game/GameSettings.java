@@ -22,6 +22,14 @@ public final class GameSettings {
     public static final int DEFAULT_PINGS_PER_SPEEDHUNT = 4;
     /** The highest ping number a fake may name when speedhunts have no ping limit. */
     public static final int MAX_PING_NUMBER = 1000;
+    /** A timetable fix counts as fresh if it is no older than this before its row. */
+    public static final String TIMETABLE_FRESHNESS = "timetable_freshness_window_seconds";
+    public static final int DEFAULT_TIMETABLE_FRESHNESS = 20;
+    public static final int MAX_TIMETABLE_FRESHNESS = 300;
+    /** How long a timetable ping waits for a fresh fix before it uses the last known position. */
+    public static final String TIMETABLE_WAIT = "timetable_fresh_fix_wait_seconds";
+    public static final int DEFAULT_TIMETABLE_WAIT = 30;
+    public static final int MAX_TIMETABLE_WAIT = 60;
 
     private static final ObjectMapper READER = new ObjectMapper();
 
@@ -29,6 +37,45 @@ public final class GameSettings {
 
     private GameSettings(JsonNode game) {
         this.game = game;
+    }
+
+    /**
+     * Checks the settings the server reads with a range ({@link #TIMETABLE_FRESHNESS}, {@link #TIMETABLE_WAIT}):
+     * absent or null, or a whole number of seconds in range. Other keys are the Tool's.
+     */
+    public static void validate(JsonNode settings) {
+        JsonNode game = settings == null ? null : settings.path("game_settings");
+        if (game == null || !game.isObject()) {
+            return;
+        }
+        seconds(game.path(TIMETABLE_FRESHNESS), 0, MAX_TIMETABLE_FRESHNESS, "timetable freshness window");
+        seconds(game.path(TIMETABLE_WAIT), 0, MAX_TIMETABLE_WAIT, "timetable fresh-fix wait");
+    }
+
+    private static void seconds(JsonNode value, int min, int max, String label) {
+        if (value.isMissingNode() || value.isNull()) {
+            return;
+        }
+        if (!value.isIntegralNumber() || !value.canConvertToInt() || value.asInt() < min || value.asInt() > max) {
+            throw GameErrors.invalid("The " + label + " must be a whole number of seconds from " + min + " to "
+                    + max);
+        }
+    }
+
+    private int seconds(String key, int fallback, int max) {
+        JsonNode value = game.path(key);
+        return value.isIntegralNumber() && value.canConvertToInt() && value.asInt() >= 0 && value.asInt() <= max
+                ? value.asInt() : fallback;
+    }
+
+    /** The timetable freshness window in seconds ({@code timetable_freshness_window_seconds}, default 20). */
+    public int timetableFreshnessSeconds() {
+        return seconds(TIMETABLE_FRESHNESS, DEFAULT_TIMETABLE_FRESHNESS, MAX_TIMETABLE_FRESHNESS);
+    }
+
+    /** The timetable fresh-fix wait in seconds ({@code timetable_fresh_fix_wait_seconds}, default 30, 0–60). */
+    public int timetableWaitSeconds() {
+        return seconds(TIMETABLE_WAIT, DEFAULT_TIMETABLE_WAIT, MAX_TIMETABLE_WAIT);
     }
 
     /** The settings of a session; missing or unreadable settings behave like an empty document. */
