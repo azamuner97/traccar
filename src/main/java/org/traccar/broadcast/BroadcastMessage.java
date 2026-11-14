@@ -50,6 +50,16 @@ public class BroadcastMessage {
         this.gameUsersIds = gameUsersIds;
     }
 
+    private java.util.List<org.traccar.game.GameEvent> gameEvents;
+
+    public java.util.List<org.traccar.game.GameEvent> getGameEvents() {
+        return gameEvents;
+    }
+
+    public void setGameEvents(java.util.List<org.traccar.game.GameEvent> gameEvents) {
+        this.gameEvents = gameEvents;
+    }
+
     private String gameAdminResource;
 
     public String getGameAdminResource() {

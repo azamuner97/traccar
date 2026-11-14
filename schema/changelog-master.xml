@@ -52,4 +52,7 @@
 
   <!-- Game data model 2: drops the model-1 game tables above and creates the model-2 schema. -->
   <include file="changelog-game-model-2.xml" relativeToChangelogFile="true" />
+
+  <!-- Game execution: the server executes on time, the Tool decides (phase 0: game state, control, events). -->
+  <include file="changelog-game-execution.xml" relativeToChangelogFile="true" />
 </databaseChangeLog>

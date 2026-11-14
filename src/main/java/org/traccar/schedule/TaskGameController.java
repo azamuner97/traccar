@@ -11,7 +11,6 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.traccar.game.GameControllerService;
 import org.traccar.game.GamePushOutbox;
-import org.traccar.game.GameRequestService;
 
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -19,12 +18,11 @@ import java.util.concurrent.TimeUnit;
 /**
  * Game maintenance of data model 2, every second.
  * <ul>
- * <li>Once at startup: ends a controller lease that survived the restart, marks pushes whose attempt the restart
- * interrupted as uncertain (never retried), and sends the pushes still queued.</li>
- * <li>Records lease expiry from the stored deadline. The controller service then ends the open requests and
- * announces the change.</li>
- * <li>Expires requests awaiting approval or execution past their deadline
- * ({@link GameRequestService#expire}); the request service publishes the change.</li>
+ * <li>Once at startup: ends a controller lease that survived the restart (its Tool re-acquires it automatically),
+ * marks pushes whose attempt the restart interrupted as uncertain (never retried), and sends the pushes still
+ * queued. The game state of every session is kept.</li>
+ * <li>Records lease expiry from the stored deadline and announces it. Requests never expire, and losing the lease
+ * changes neither the game state nor any request.</li>
  * </ul>
  */
 public class TaskGameController implements ScheduleTask {
@@ -33,14 +31,12 @@ public class TaskGameController implements ScheduleTask {
 
     private final GameControllerService controller;
     private final GamePushOutbox outbox;
-    private final GameRequestService requests;
     private boolean started;
 
     @Inject
-    public TaskGameController(GameControllerService controller, GamePushOutbox outbox, GameRequestService requests) {
+    public TaskGameController(GameControllerService controller, GamePushOutbox outbox) {
         this.controller = controller;
         this.outbox = outbox;
-        this.requests = requests;
     }
 
     @Override
@@ -53,7 +49,7 @@ public class TaskGameController implements ScheduleTask {
         try {
             if (!started) {
                 if (controller.endAfterRestart()) {
-                    LOGGER.info("Game controller lease ended by the server restart; Tool must resume explicitly");
+                    LOGGER.info("Game controller lease ended by the server restart; its Tool re-acquires it");
                 }
                 int uncertain = outbox.markInterrupted();
                 if (uncertain > 0) {
@@ -63,7 +59,6 @@ public class TaskGameController implements ScheduleTask {
                 started = true;
             }
             controller.recordExpiry();
-            requests.expire();
         } catch (Exception error) {
             LOGGER.warn("Game controller maintenance failed", error);
         }

@@ -167,7 +167,7 @@ public abstract class GameStatusTest extends GameTestBase {
         assertEquals(session, anna.gameSessionId());
         assertEquals(game.anna().id(), anna.memberId());
         assertEquals("player", anna.role());
-        assertTrue(anna.controllerActive());
+        assertTrue(anna.running());
         assertEquals(T0.toString(), anna.serverTime());
         GameStatus.PlayerView view = (GameStatus.PlayerView) anna.status();
         assertFalse(view.speedhunt().active());
@@ -353,16 +353,19 @@ public abstract class GameStatusTest extends GameTestBase {
         assertEquals(hunter.limits(), spectator.limits());
         assertFalse(fieldNames(mapper.valueToTree(spectator)).contains("liveShares"));
 
-        // Without a controller, progress and live shares are inactive; the roster stays.
-        execute("DELETE FROM tc_game_controller WHERE id = 1");
+        // While the game is stopped, progress and live shares are inactive; the roster stays. Losing the lease
+        // changes nothing members see.
+        execute("UPDATE tc_game_controller SET state = 'expired' WHERE id = 1");
+        assertTrue(statusOf(game.ben()).running());
+        stopGame(session);
         hunterStatus = statusOf(game.hunter());
         hunter = (GameStatus.HunterView) hunterStatus.status();
-        assertFalse(hunterStatus.controllerActive());
+        assertFalse(hunterStatus.running());
         assertEquals(GameStatus.SpeedhuntProgress.INACTIVE, hunter.speedhunt());
         assertEquals(List.of(), hunter.liveShares());
         assertTrue(hunter.participants().getFirst().speedhunt().running());
         GameStatus.PlayerView player = (GameStatus.PlayerView) statusOf(game.ben()).status();
-        assertFalse(statusOf(game.ben()).controllerActive());
+        assertFalse(statusOf(game.ben()).running());
         assertEquals(GameStatus.SpeedhuntProgress.INACTIVE, player.speedhunt());
         assertNull(player.runningFake());
     }
@@ -396,7 +399,7 @@ public abstract class GameStatusTest extends GameTestBase {
         assertEquals(GameState.STATIC, first.pings().getFirst().mode());
         assertNoPrivateFields(history);
 
-        execute("DELETE FROM tc_game_controller WHERE id = 1");
+        stopGame(session);
         assertEquals(GameStatus.SpeedhuntProgress.INACTIVE, status.speedhunt(null));
         assertStatus(403, () -> status.status(user()));
         assertStatus(403, () -> status.speedhuntHistory(user()));
@@ -424,7 +427,8 @@ public abstract class GameStatusTest extends GameTestBase {
         assertEquals(session, snapshot.gameSessionId());
         assertEquals(revision(session), snapshot.revision());
         assertEquals(snapshot.revision(), snapshot.session().revision());
-        assertEquals(EPOCH, snapshot.executingEpoch());
+        assertTrue(snapshot.game().running());
+        assertEquals(GameExecutionService.RUNNING, snapshot.game().state());
         assertEquals(T0, snapshot.readAt());
         assertEquals(json(SETTINGS), snapshot.session().settings().settings().path("game_settings"));
         assertEquals(6, snapshot.members().size());

@@ -48,6 +48,13 @@ public abstract class BaseBroadcastService implements BroadcastService {
         sendMessage(message);
     }
 
+    @Override
+    public void updateGameEvents(boolean local, java.util.List<org.traccar.game.GameEvent> events) {
+        var message = new BroadcastMessage();
+        message.setGameEvents(events);
+        sendMessage(message);
+    }
+
     private final Set<BroadcastInterface> listeners = new HashSet<>();
 
     @Override
@@ -124,6 +131,8 @@ public abstract class BaseBroadcastService implements BroadcastService {
             listeners.forEach(listener -> listener.updateGameUsers(
                     false, message.getGameUsersIds() == null ? Set.of() : message.getGameUsersIds(),
                     message.getGameUsersResource()));
+        } else if (message.getGameEvents() != null) {
+            listeners.forEach(listener -> listener.updateGameEvents(false, message.getGameEvents()));
         } else if (message.getGameAdminResource() != null) {
             listeners.forEach(listener -> listener.updateGameAdmin(false, message.getGameAdminResource()));
         } else if (message.getDevice() != null) {

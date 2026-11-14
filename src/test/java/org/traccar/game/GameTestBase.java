@@ -83,6 +83,7 @@ public abstract class GameTestBase {
         final List<String> accountTopics = new CopyOnWriteArrayList<>();
         final List<Set<Long>> accounts = new CopyOnWriteArrayList<>();
         final List<String> operatorTopics = new CopyOnWriteArrayList<>();
+        final List<GameEvent> events = new CopyOnWriteArrayList<>();
 
         @Override
         public void positions(Collection<Long> received, List<Position> latest) {
@@ -116,6 +117,11 @@ public abstract class GameTestBase {
             operatorTopics.add(topic);
         }
 
+        @Override
+        public void gameEvents(List<GameEvent> published) {
+            events.addAll(published);
+        }
+
         void clear() {
             invalidations.clear();
             positions.clear();
@@ -125,6 +131,7 @@ public abstract class GameTestBase {
             accounts.clear();
             accountTopics.clear();
             operatorTopics.clear();
+            events.clear();
         }
 
         List<Invalidation> topic(String topic) {
@@ -305,11 +312,28 @@ public abstract class GameTestBase {
         return member;
     }
 
-    /** Makes the controller lease active, executing {@code session} under {@code epoch}. */
+    /** Makes the controller lease active under {@code epoch}, and {@code session}'s game the running one. */
     protected void lease(long session, long epoch) throws SQLException {
         execute("DELETE FROM tc_game_controller WHERE id = 1");
-        execute("INSERT INTO tc_game_controller (id, epoch, state, gamesessionid, acquiredat, renewedat, expiresat)"
-                + " VALUES (1, ?, 'active', ?, ?, ?, ?)", epoch, session, T0, T0, T0.plus(Duration.ofDays(30)));
+        execute("INSERT INTO tc_game_controller (id, epoch, state, acquiredat, renewedat, expiresat)"
+                + " VALUES (1, ?, 'active', ?, ?, ?)", epoch, T0, T0, T0.plus(Duration.ofDays(30)));
+        startGame(session);
+    }
+
+    /** Makes {@code session}'s game the running one, stopping any other, without the effects of a stop. */
+    protected void startGame(long session) throws SQLException {
+        execute("UPDATE tc_game_session_state SET state = 'stopped', runningkey = NULL WHERE runningkey = 1");
+        if (execute("UPDATE tc_game_session_state SET state = 'running', runningkey = 1 WHERE gamesessionid = ?",
+                session) == 0) {
+            execute("INSERT INTO tc_game_session_state (gamesessionid, state, changedat, runningkey)"
+                    + " VALUES (?, 'running', ?, 1)", session, T0);
+        }
+    }
+
+    /** Marks {@code session}'s game stopped, without the effects of a stop. */
+    protected void stopGame(long session) throws SQLException {
+        execute("UPDATE tc_game_session_state SET state = 'stopped', runningkey = NULL WHERE gamesessionid = ?",
+                session);
     }
 
     protected long memberRevision(long memberId) throws SQLException {

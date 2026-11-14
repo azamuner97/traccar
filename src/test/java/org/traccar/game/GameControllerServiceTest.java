@@ -97,9 +97,9 @@ public class GameControllerServiceTest {
         GameMember hunter = members.plan(session, GameMember.HUNTER, null, "Hunter");
         Instant now = clock.instant();
         return insert("INSERT INTO tc_game_requests (gamesessionid, type, requestermemberid, requesterrole,"
-                + " parameters, status, epoch, createdat, expiresat, updatedat) VALUES (?, ?, ?, 'hunter', '{}', ?, ?,"
-                + " ?, ?, ?)", session, GameRequest.TERMINATE, hunter.id(), status,
-                GameRequest.EXECUTING.equals(status) ? 1L : null, now, now.plusSeconds(600), now);
+                + " parameters, status, epoch, createdat, updatedat) VALUES (?, ?, ?, 'hunter', '{}', ?, ?, ?, ?)",
+                session, GameRequest.TERMINATE, hunter.id(), status, GameRequest.EXECUTING.equals(status) ? 1L : null,
+                now, now);
     }
 
     private String requestStatus(long id) throws Exception {
@@ -196,15 +196,9 @@ public class GameControllerServiceTest {
     }
 
     @Test
-    void executingSessionAndDriftReport() throws Exception {
+    void driftReportsUnfencedEditsSinceThePreviousAcquisition() throws Exception {
         long epoch = service.acquire(alice, A, "Laptop").lease().epoch();
-        assertEquals(session, service.setExecuting(alice, epoch, session).gameSessionId());
-        assertEquals(session, service.executingSessionId());
-        assertNull(service.setExecuting(alice, epoch, null).gameSessionId());
-        assertEquals(423, status(assertThrows(WebApplicationException.class,
-                () -> service.setExecuting(alice, epoch + 5, session))));
         service.release(alice, epoch);
-        assertNull(service.executingSessionId());
 
         service.recordUnfencedEdit(bob, "PUT /api/devices/101");
         var acquisition = service.acquire(alice, A, "Laptop");
@@ -212,6 +206,41 @@ public class GameControllerServiceTest {
         assertEquals("PUT /api/devices/101", acquisition.drift().getFirst().detail());
         service.release(alice, acquisition.lease().epoch());
         assertTrue(service.acquire(alice, A, "Laptop").drift().isEmpty());
+    }
+
+    @Test
+    void aToolThatLostControlResumesItOnlyIfNobodyAcquiredItSince() throws Exception {
+        long epoch = service.acquire(alice, A, "Laptop").lease().epoch();
+        // While its lease is still active, resuming returns it unchanged.
+        var same = service.acquire(alice, A, "Laptop", epoch);
+        assertFalse(same.acquired());
+        assertEquals(epoch, same.lease().epoch());
+
+        // Expired: granted without a takeover, with a new epoch.
+        clock.advance(31);
+        var resumed = service.acquire(alice, A, "Laptop", epoch);
+        assertTrue(resumed.acquired());
+        assertEquals(epoch + 1, resumed.lease().epoch());
+
+        // Ended by a server restart: free, so granted too.
+        service = new GameControllerService(source, clock, 30, 5, requests, publisher);
+        assertTrue(service.endAfterRestart());
+        assertEquals(epoch + 2, service.acquire(alice, A, "Laptop", epoch + 1).lease().epoch());
+
+        // Another Tool acquired control meanwhile: refused even though the lease is free again.
+        clock.advance(31);
+        long other = service.acquire(bob, B, "Desk").lease().epoch();
+        service.release(bob, other);
+        assertEquals(409, status(assertThrows(WebApplicationException.class,
+                () -> service.acquire(alice, A, "Laptop", epoch + 2))));
+        // Another instance cannot resume this one's epoch, and an active lease of another holder stays locked.
+        assertEquals(409, status(assertThrows(WebApplicationException.class,
+                () -> service.acquire(alice, B, "PC", other))));
+        long held = service.acquire(bob, B, "Desk").lease().epoch();
+        assertEquals(423, status(assertThrows(WebApplicationException.class,
+                () -> service.acquire(alice, A, "Laptop", held))));
+        assertEquals(List.of("acquired", "expired", "acquired", "serverRestart", "acquired", "expired",
+                "acquired", "released", "acquired"), events());
     }
 
     @Test
@@ -238,39 +267,35 @@ public class GameControllerServiceTest {
     }
 
     @Test
-    void aChangeOfControlEndsOpenRequestsAndAnnouncesItself() throws Exception {
+    void aChangeOfControlEndsNoRequestAndAnnouncesItself() throws Exception {
         long epoch = service.acquire(alice, A, "Laptop").lease().epoch();
         assertEquals(List.of(GameControllerService.INVALIDATION), publisher.operatorTopics);
         assertTrue(publisher.topic(GamePublisher.STATUS).isEmpty());
 
-        // Executing a session changes its members' status (controllerActive); requests stay open.
+        // A takeover keeps waiting requests and returns one still executing under an older epoch to approved.
         long waiting = pending(GameRequest.PENDING);
-        publisher.clear();
-        service.setExecuting(alice, epoch, session);
-        assertEquals(List.of(new GamePublisher.Invalidation(session, GamePublisher.STATUS, null)),
-                publisher.topic(GamePublisher.STATUS));
-        assertEquals(GameRequest.PENDING, requestStatus(waiting));
-
-        // A takeover ends every open request after its commit: waiting ones expire, executing ones fail.
+        long approved = pending(GameRequest.APPROVED);
         long executing = pending(GameRequest.EXECUTING);
         publisher.clear();
         var takeover = service.takeover(bob, B, "Desk");
         assertEquals(epoch + 1, takeover.lease().epoch());
-        assertEquals(GameRequest.EXPIRED, requestStatus(waiting));
-        assertEquals(GameRequest.FAILED, requestStatus(executing));
-        assertEquals(List.of(new GamePublisher.Invalidation(session, GamePublisher.STATUS, null)),
-                publisher.topic(GamePublisher.STATUS));
-        assertFalse(publisher.topic(GamePublisher.REQUESTS).isEmpty());
+        assertEquals(GameRequest.PENDING, requestStatus(waiting));
+        assertEquals(GameRequest.APPROVED, requestStatus(approved));
+        assertEquals(GameRequest.APPROVED, requestStatus(executing));
+        assertEquals(List.of(new GamePublisher.Invalidation(session, GamePublisher.REQUESTS, null)),
+                publisher.topic(GamePublisher.REQUESTS));
+        assertTrue(publisher.topic(GamePublisher.STATUS).isEmpty());
         assertEquals(List.of(GameControllerService.INVALIDATION), publisher.operatorTopics);
 
-        // Expiry and release end requests the same way; a renewal changes nothing.
+        // Expiry, release and a restart end no request either; a renewal announces nothing.
         publisher.clear();
         service.renew(bob, epoch + 1, B);
         assertTrue(publisher.operatorTopics.isEmpty());
-        long later = pending(GameRequest.APPROVED);
         clock.advance(31);
         assertTrue(service.recordExpiry());
-        assertEquals(GameRequest.EXPIRED, requestStatus(later));
+        assertEquals(GameRequest.PENDING, requestStatus(waiting));
+        assertEquals(GameRequest.APPROVED, requestStatus(approved));
         assertEquals(List.of(GameControllerService.INVALIDATION), publisher.operatorTopics);
+        assertTrue(publisher.topic(GamePublisher.REQUESTS).isEmpty());
     }
 }

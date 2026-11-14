@@ -38,11 +38,10 @@ public class GameSnapshotService {
     }
 
     /**
-     * {@code executingEpoch} is the controller epoch while the lease executes this session, else null.
-     * {@code requests} are the open requests; {@code fakePlans} the plans of reserved fake ping jokers (planned
-     * breaks are break rows of {@code state}).
+     * {@code game} is the session's game state (running or stopped). {@code requests} are the open requests;
+     * {@code fakePlans} the plans of reserved fake ping jokers (planned breaks are break rows of {@code state}).
      */
-    public record Snapshot(long gameSessionId, long revision, Instant readAt, Long executingEpoch,
+    public record Snapshot(long gameSessionId, long revision, Instant readAt, GameExecutionService.State game,
                            GameSessionService.Session session, List<GameMember> members, Resources resources,
                            State state, List<GameRequest> requests, GameJokerService.Overview jokers,
                            List<GameJokerRepository.Plan> fakePlans, GameTimetableService.Timetable timetable,
@@ -78,7 +77,7 @@ public class GameSnapshotService {
                     GameResourceRepository.groups(transaction, sessionId),
                     GameResourceRepository.geofences(transaction, sessionId));
             return new Snapshot(sessionId, session.revision(), transaction.now(),
-                    GameStateRepository.executingEpoch(transaction, sessionId), session,
+                    GameExecutionService.read(transaction, sessionId), session,
                     GameMemberRepository.list(transaction, sessionId), resources, state,
                     GameRequestRepository.open(transaction, sessionId),
                     GameJokerService.overview(transaction, sessionId),

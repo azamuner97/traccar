@@ -32,7 +32,7 @@ public class GameSessionService {
      * The game-session API version of data model 2. Model 1 answered 4, so a Tool built for model 1 stops at
      * connection to this server.
      */
-    public static final int API_VERSION = 5;
+    public static final int API_VERSION = 6;
     /** The operators' WebSocket invalidation of the session list. */
     public static final String SESSIONS_INVALIDATION = "game-sessions";
 
@@ -43,8 +43,9 @@ public class GameSessionService {
                           Instant updatedAt, Settings settings) {
     }
 
+    /** A listed session; {@code gameState} is {@code running} or {@code stopped}. */
     public record Summary(long id, String name, int schemaVersion, long revision, long settingsRevision,
-                          Instant createdAt, Instant updatedAt) {
+                          Instant createdAt, Instant updatedAt, String gameState) {
     }
 
     private final GameTransactions transactions;
@@ -115,9 +116,12 @@ public class GameSessionService {
     public List<Summary> list() throws Exception {
         return transactions.read(transaction -> {
             List<Summary> result = new ArrayList<>();
+            Long running = GameExecutionService.runningSession(transaction).orElse(null);
             for (GameSessionRepository.Row row : GameSessionRepository.list(transaction)) {
                 result.add(new Summary(row.id(), row.name(), row.schemaVersion(), row.revision(),
-                        row.settingsRevision(), row.createdAt(), row.updatedAt()));
+                        row.settingsRevision(), row.createdAt(), row.updatedAt(),
+                        Long.valueOf(row.id()).equals(running) ? GameExecutionService.RUNNING
+                                : GameExecutionService.STOPPED));
             }
             return result;
         });
@@ -204,6 +208,9 @@ public class GameSessionService {
     public void delete(long id) throws Exception {
         transactions.write(transaction -> {
             transaction.lockSession(id);
+            if (GameExecutionService.running(transaction, id)) {
+                throw GameErrors.conflict("The game of this session is running; stop it before deleting the session");
+            }
             transaction.lockMemberStates(GameMemberRepository.memberIds(transaction, id));
             // The accounts lose their membership; no member resolves to them after the commit.
             Set<Long> accounts = Set.copyOf(transaction.list("SELECT userid FROM tc_game_session_members"

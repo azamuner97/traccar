@@ -43,6 +43,9 @@ public interface BroadcastInterface {
      */
     default void updateGameUsers(boolean local, java.util.Set<Long> userIds, String resource) {}
 
+    /** Execution events of a game session, for administrators only (they can carry fake coordinates). */
+    default void updateGameEvents(boolean local, java.util.List<org.traccar.game.GameEvent> events) {}
+
     default <T extends BaseModel> void invalidateObject(
             boolean local, Class<T> clazz, long id, ObjectOperation operation) throws Exception {}
 

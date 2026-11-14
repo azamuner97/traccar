@@ -321,20 +321,13 @@ public final class GameStateRepository {
                         + " AND state = ?", sessionId, GameState.SPEEDHUNT_PING, GameState.ACTIVE);
     }
 
-    /** The session the active controller lease executes, if any. */
-    public static Optional<Long> executingSession(GameTransaction transaction) throws SQLException {
-        return transaction.first("SELECT gamesessionid FROM tc_game_controller WHERE id = 1 AND state = 'active'"
-                + " AND expiresat > ? AND gamesessionid IS NOT NULL", rows -> rows.getLong(1), transaction.now());
-    }
-
     /**
-     * The current controller epoch while the lease is active and executes this session, otherwise null. The lease
-     * row keeps model 1's UTC {@code TIMESTAMP(3)} columns, which read and write like {@link GameTime} values.
+     * The current controller epoch, whether or not its lease is still active. The lease row keeps model 1's UTC
+     * {@code TIMESTAMP(3)} columns.
      */
-    public static Long executingEpoch(GameTransaction transaction, long sessionId) throws SQLException {
-        return transaction.first("SELECT epoch FROM tc_game_controller WHERE id = 1 AND state = 'active'"
-                + " AND expiresat > ? AND gamesessionid = ?", rows -> rows.getLong(1),
-                transaction.now(), sessionId).orElse(null);
+    public static long controllerEpoch(GameTransaction transaction) throws SQLException {
+        return transaction.first("SELECT epoch FROM tc_game_controller WHERE id = 1", rows -> rows.getLong(1))
+                .orElse(0L);
     }
 
 }

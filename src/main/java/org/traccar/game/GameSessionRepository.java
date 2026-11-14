@@ -52,6 +52,7 @@ public final class GameSessionRepository {
             "tc_game_session_checkpoints",
             "tc_game_session_credentials",
             "tc_game_session_logs",
+            "tc_game_session_state",
             "tc_game_session_settings");
 
     /** A session row with its settings row. */

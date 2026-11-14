@@ -267,30 +267,26 @@ public abstract class GameJokerTest extends GameTestBase {
                 null)));
         assertStatus(404, () -> requests.claim(session, -1, EPOCH));
 
-        // Requests awaiting approval or execution expire after two minutes; executing ones fail on a change of
-        // control. Their jokers return either way.
-        requests.claim(session, ping.id(), EPOCH);
-        clock.advance(Duration.ofSeconds(GameRequestService.EXPIRY_SECONDS + 1));
-        assertTrue(requests.expire().contains(session));
-        assertEquals(GameRequest.EXPIRED, requests.operatorList(session, false, 0).stream()
-                .filter(item -> item.id() == joker.id()).findFirst().orElseThrow().status());
-        assertEquals(1, inventory(anna, GameJokerRepository.HUNTER_POSITIONS).available());
-        assertEquals(List.of(ping.id()), requests.operatorList(session, true, 0).stream().map(GameRequest::id)
-                .toList());
-        assertTrue(requests.invalidateOpen("Control changed").contains(session));
-        var failed = requests.operatorList(session, false, 0).stream().filter(item -> item.id() == ping.id())
-                .findFirst().orElseThrow();
-        assertEquals(GameRequest.FAILED, failed.status());
-        assertEquals("Control changed", failed.message());
-        assertEquals(0, pool(session).reserved());
-        assertTrue(requests.operatorList(session, true, 0).isEmpty());
-        assertReconciled(session);
+        // Requests never expire: hours later they are still open and can be claimed.
+        clock.advance(Duration.ofHours(6));
+        assertEquals(List.of(ping.id(), joker.id()), requests.operatorList(session, true, 0).stream()
+                .map(GameRequest::id).toList());
+        assertEquals(GameRequest.EXECUTING, requests.claim(session, ping.id(), EPOCH).status());
 
-        // A request claimed after its deadline expires instead.
-        clock.set(T0);
-        long late = hunt(hunter, GameRequest.STOP_LIVE_PING, anna).id();
-        clock.advance(Duration.ofSeconds(GameRequestService.EXPIRY_SECONDS));
-        assertEquals(GameRequest.EXPIRED, requests.claim(session, late, EPOCH).status());
+        // A new controller epoch returns a request still executing under an older one to approved, with its
+        // joker still reserved; waiting requests stay as they are.
+        assertTrue(requests.returnExecuting(EPOCH).isEmpty());
+        assertEquals(java.util.Set.of(session), requests.returnExecuting(EPOCH + 1));
+        GameRequest returned = requests.operatorList(session, true, 0).stream()
+                .filter(item -> item.id() == ping.id()).findFirst().orElseThrow();
+        assertEquals(GameRequest.APPROVED, returned.status());
+        assertNull(returned.epoch());
+        assertEquals(GameRequest.PENDING, requests.operatorList(session, true, 0).stream()
+                .filter(item -> item.id() == joker.id()).findFirst().orElseThrow().status());
+        assertEquals(1, pool(session).reserved());
+        assertTrue(requests.returnExecuting(EPOCH + 1).isEmpty());
+        assertEquals(GameRequest.EXECUTING, requests.claim(session, ping.id(), EPOCH + 1).status());
+        assertReconciled(session);
     }
 
     // The hunters' speedhunt pool ---------------------------------------------------------------------------

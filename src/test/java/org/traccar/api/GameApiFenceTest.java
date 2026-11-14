@@ -9,6 +9,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.traccar.api.security.UserPrincipal;
 import org.traccar.game.GameControllerService;
+import org.traccar.game.GameExecutionService;
 import org.traccar.game.GameOwnershipService;
 
 import java.util.Arrays;
@@ -27,10 +28,11 @@ import static org.mockito.Mockito.*;
  */
 public class GameApiFenceTest {
 
-    private static final long EXECUTING = 5;
+    private static final long RUNNING = 5;
     private static final long STORED = 6;
 
     private final GameControllerService controller = mock(GameControllerService.class);
+    private final GameExecutionService execution = mock(GameExecutionService.class);
     private GameControllerFilter filter;
 
     private static void inject(Object object, String name, Object value) throws Exception {
@@ -44,11 +46,16 @@ public class GameApiFenceTest {
         filter = new GameControllerFilter();
         inject(filter, "controller", controller);
         inject(filter, "ownership", mock(GameOwnershipService.class));
-        when(controller.executingSessionId()).thenReturn(EXECUTING);
+        inject(filter, "execution", execution);
+        when(execution.runningSessionId()).thenReturn(RUNNING);
         when(controller.lockShared()).thenReturn(1L);
     }
 
     private static ContainerRequestContext request(String method, String path) {
+        return request(method, path, null);
+    }
+
+    private static ContainerRequestContext request(String method, String path, String epoch) {
         var request = mock(ContainerRequestContext.class);
         when(request.getMethod()).thenReturn(method);
         var security = mock(SecurityContext.class);
@@ -63,14 +70,15 @@ public class GameApiFenceTest {
         when(uri.getPathSegments()).thenReturn(segments);
         when(uri.getQueryParameters()).thenReturn(new MultivaluedHashMap<>());
         when(request.getUriInfo()).thenReturn(uri);
+        when(request.getHeaderString(GameControllerService.EPOCH_HEADER)).thenReturn(epoch);
         return request;
     }
 
-    /** Whether the filter checks the controller epoch for this write. */
+    /** Whether the filter checks the controller epoch for this write, sent with an epoch. */
     private boolean fenced(String write) throws Exception {
         clearInvocations(controller);
         String[] parts = write.split(" ", 2);
-        filter.filter(request(parts[0], parts[1]));
+        filter.filter(request(parts[0], parts[1], "1"));
         try {
             verify(controller, never()).check(anyLong(), any());
             return false;
@@ -94,20 +102,22 @@ public class GameApiFenceTest {
                 "PUT " + base + "/checkpoints/monitoring", "DELETE " + base + "/checkpoints/monitoring",
                 "PUT " + base + "/timetable", "PUT " + base + "/timetable/progress", "POST " + base + "/logs",
                 "POST " + base + "/requests/9/decision", "POST " + base + "/requests/9/claim",
-                "POST " + base + "/jokers/change", "POST " + base + "/jokers/breaks", "POST " + base + "/effects");
+                "POST " + base + "/jokers/change", "POST " + base + "/jokers/breaks", "POST " + base + "/effects",
+                "PUT " + base + "/state");
     }
 
     @Test
-    void everyWriteOfTheExecutingSessionIsFenced() throws Exception {
-        for (String write : sessionWrites(EXECUTING)) {
+    void everyWriteOfTheRunningSessionIsFenced() throws Exception {
+        for (String write : sessionWrites(RUNNING)) {
             assertTrue(fenced(write), write);
         }
+        assertFalse(fenced("POST game-sessions/5/events/test"));
     }
 
     @Test
     void executionWritesOfAStoredSessionAreFencedAndConfigurationIsNot() throws Exception {
-        // Configuration of a session that is not executing needs only its revision check; members, resource rows
-        // and checkpoints are written by the controlling Tool and always fenced.
+        // Configuration of a session that is not running needs only its revision check; members, resource rows,
+        // checkpoints and the game state are written by the controlling Tool and always fenced.
         Set<String> configuration = Set.of("DELETE game-sessions/6", "PUT game-sessions/6/name",
                 "PUT game-sessions/6/config", "PUT game-sessions/6/credentials", "PUT game-sessions/6/geofence-plans",
                 "PUT game-sessions/6/timetable", "POST game-sessions/6/logs");

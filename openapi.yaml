@@ -84,7 +84,7 @@ tags:
   - name: Game Sessions
     description: >-
       Sessions, settings, members, resource rows, documents, timetable and logs (operators only). The game endpoints
-      describe game data model 2 (game-session API version 5): each participant is a member with a stable ID, typed
+      describe game data model 2 (game-session API version 6): each participant is a member with a stable ID, typed
       tables hold the game state, and the server computes every member's status. Operators are Traccar
       administrators. Members are resolved from the caller's account; an account without membership gets 403 from
       every member endpoint. Every time is an ISO-8601 instant in UTC. Players and supporters never receive member
@@ -105,12 +105,15 @@ tags:
       Server-wide controller lease for Traccar Tool (administrators only). Fenced requests carry the current
       controllerEpoch in the X-Game-Controller-Epoch header and are refused with 423 otherwise. Fenced are, for any
       session, effects, timetable progress, members/*, resources/*, checkpoints/*, requests/* and jokers/*; every
-      write of the executing session; writes to /game-notifications and /game-proximity; and - while a lease is
-      held - standard mutations (devices, groups, users, permissions, geofences, DELETE /positions) of the Traccar
-      resources a session owns (members' accounts and trackers, mirrors, groups, geofences), and
-      /notifications/send/* reaching members of the executing session. Users may always update their own account.
-      A request that carries the header must carry the current epoch, whatever it changes. A change of control
-      ends every open game request.
+      write of the running session (its game state is running); the game state itself (PUT
+      /game-sessions/{id}/state), except a stop without the header while no lease is active; writes to
+      /game-notifications and /game-proximity; and - while a lease is held - standard mutations (devices, groups,
+      users, permissions, geofences, DELETE /positions) of the Traccar resources a session owns (members' accounts
+      and trackers, mirrors, groups, geofences), and /notifications/send/* reaching members of the running
+      session. Users may always update their own account. A request that carries the header must carry the
+      current epoch, whatever it changes. The lease decides only which Tool may make decisions: losing, releasing
+      or taking over control changes no game state and ends no request; a new epoch returns requests still
+      executing under an older one to approved.
 paths:
   /audit:
     get:
@@ -4777,6 +4780,14 @@ paths:
           in: query
           schema:
             type: string
+        - name: events
+          in: query
+          description: >-
+            Only execution events (rows with data), so the Tool catches up after the last event ID it showed
+            (with after).
+          schema:
+            type: boolean
+            default: false
       responses:
         '200':
           description: OK
@@ -5053,6 +5064,118 @@ paths:
           $ref: '#/components/responses/Conflict'
         '423':
           $ref: '#/components/responses/Locked'
+  /game-sessions/{id}/effects/{deliveryId}:
+    parameters:
+      - $ref: '#/components/parameters/GameSessionId'
+      - name: deliveryId
+        in: path
+        required: true
+        schema:
+          type: string
+          pattern: '^[A-Za-z0-9_-]{8,64}$'
+    get:
+      operationId: getGameEffectsOutcome
+      summary: The recorded outcome of a delivery, under any epoch
+      description: >-
+        Read-only. Answers the recorded outcome as a replay (with the current push states), or 404 when the delivery
+        was never recorded. After re-acquiring control the Tool reconciles each uncertain delivery from it and never
+        sends one again under the new epoch.
+      tags: [Game Effects]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GameEffectsOutcome'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /game-sessions/{id}/state:
+    parameters:
+      - $ref: '#/components/parameters/GameSessionId'
+    get:
+      operationId: getGameSessionState
+      summary: The session's game state, running or stopped
+      tags: [Game Sessions]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GameSessionState'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    put:
+      operationId: putGameSessionState
+      summary: Starts or stops the session's game
+      description: >-
+        Fenced: it needs the controlling Tool's epoch. Without one, any administrator may stop the game while no
+        lease is active (recorded in the controller history and reported to the next acquisition as drift).
+        Starting is refused (409) while another session's game runs; at most one game runs per server. Stopping
+        ends the open requests (pending and approved ones are cancelled, executing ones fail; their jokers return)
+        and the active live uploads and relays (endReason gameStopped), in one transaction. Each change writes a
+        game execution event and announces the members' status. Setting the current state changes nothing.
+      tags: [Game Sessions]
+      parameters:
+        - $ref: '#/components/parameters/GameControllerEpoch'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GameStateChange'
+      responses:
+        '200':
+          description: The game state after the change
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GameSessionState'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '423':
+          $ref: '#/components/responses/Locked'
+  /game-sessions/{id}/events/test:
+    parameters:
+      - $ref: '#/components/parameters/GameSessionId'
+    post:
+      operationId: postGameTestEvent
+      summary: Writes a game test event and pushes it to administrators
+      description: >-
+        Never fenced: it only writes a log row (category game, data type test). Used in outage drills: an event
+        written while the Tool is disconnected must appear in its upload log after reconnect, exactly once.
+      tags: [Game Sessions]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GameTestEvent'
+      responses:
+        '200':
+          description: The event
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GameEvent'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
   /game-status:
     get:
       operationId: getGameStatus
@@ -5470,7 +5593,10 @@ paths:
     post:
       operationId: acquireGameController
       summary: Acquire a free or expired controller lease
-      description: Repeating the call from the instance that holds the active lease returns it unchanged.
+      description: >-
+        Repeating the call from the instance that holds the active lease returns it unchanged. With resumeEpoch (the
+        epoch this instance held when it lost control) the lease is granted without a takeover only if nobody
+        acquired control since (a lease ended by a server restart counts as free); otherwise 409.
       tags:
         - Game Controller
       requestBody:
@@ -5486,6 +5612,9 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/GameControllerAcquisition'
+        '409':
+          description: resumeEpoch is no longer the latest acquisition of this instance; resume explicitly
+          content: {}
         '423':
           description: Another Tool instance holds the lease
           content: {}
@@ -5552,34 +5681,10 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/GameControllerLease'
-  /game-controller/session:
-    parameters:
-      - $ref: '#/components/parameters/GameControllerEpoch'
-    put:
-      operationId: putGameControllerSession
-      summary: Set the stored session the controller executes (null stops execution)
-      tags:
-        - Game Controller
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/GameControllerSession'
-      responses:
-        '200':
-          description: Updated lease
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/GameControllerLease'
-        '423':
-          description: The game controller lease is required, or another Tool instance holds it
-          content: {}
   /game-controller/history:
     get:
       operationId: getGameControllerHistory
-      summary: Acquisitions, releases, expiries, takeovers, restarts, execution changes and unfenced edits
+      summary: Acquisitions, releases, expiries, takeovers, restarts, game starts and stops, and unfenced edits
       tags:
         - Game Controller
       parameters:
@@ -6557,8 +6662,8 @@ components:
           type: [string, 'null']
     GameControllerLease:
       type: object
-      required: [epoch, state, active, holder, gameSessionId, acquiredAt, renewedAt, expiresAt, serverTime,
-                 leaseSeconds, renewSeconds]
+      required: [epoch, state, active, holder, acquiredAt, renewedAt, expiresAt, serverTime, leaseSeconds,
+                 renewSeconds]
       properties:
         epoch:
           type: integer
@@ -6573,10 +6678,6 @@ components:
           oneOf:
             - $ref: '#/components/schemas/GameControllerHolder'
             - type: 'null'
-        gameSessionId:
-          type: [integer, 'null']
-          format: int64
-          description: Session the active controller executes
         acquiredAt:
           type: [string, 'null']
           format: date-time
@@ -6605,7 +6706,7 @@ components:
           format: int64
         event:
           type: string
-          enum: [acquired, takeover, takenOver, released, expired, serverRestart, executing, stoppedExecuting,
+          enum: [acquired, takeover, takenOver, released, expired, serverRestart, gameStarted, gameStopped,
                  unfencedEdit]
         userId:
           type: [integer, 'null']
@@ -6635,7 +6736,8 @@ components:
           description: False when the calling instance already held the active lease
         drift:
           type: array
-          description: Administrator edits of game-owned resources made while no lease was held
+          description: >-
+            Administrator edits of game-owned resources, and games stopped without control, while no lease was held
           items:
             $ref: '#/components/schemas/GameControllerHistoryEntry'
     GameControllerHistoryPage:
@@ -6660,13 +6762,10 @@ components:
         label:
           type: [string, 'null']
           maxLength: 128
-    GameControllerSession:
-      type: object
-      required: [gameSessionId]
-      properties:
-        gameSessionId:
+        resumeEpoch:
           type: [integer, 'null']
           format: int64
+          description: Acquisition only; the epoch this instance held when it lost control
     Time:
       type: string
       format: date-time
@@ -6683,13 +6782,60 @@ components:
     Role:
       type: string
       enum: [player, supporter, hunter, spectator]
+    GameSessionState:
+      type: object
+      required: [gameSessionId, state, changedAt, changedBy]
+      properties:
+        gameSessionId:
+          $ref: '#/components/schemas/Id'
+        state:
+          type: string
+          enum: [running, stopped]
+        changedAt:
+          $ref: '#/components/schemas/NullableTime'
+        changedBy:
+          type: [string, 'null']
+    GameStateChange:
+      type: object
+      required: [state]
+      properties:
+        state:
+          type: string
+          enum: [running, stopped]
+    GameTestEvent:
+      type: object
+      properties:
+        message:
+          type: [string, 'null']
+          maxLength: 512
+    GameEvent:
+      type: object
+      description: >-
+        An execution event: a session log row with data, written by a server-initiated execution step. Pushed after
+        commit to administrators only over /api/socket as {"gameEvents": [GameEvent]}; members never receive it.
+      required: [id, gameSessionId, category, occurredAt, message, data]
+      properties:
+        id:
+          $ref: '#/components/schemas/Id'
+        gameSessionId:
+          $ref: '#/components/schemas/Id'
+        category:
+          type: string
+          enum: [game, timetable, live, relay, break]
+        occurredAt:
+          $ref: '#/components/schemas/Time'
+        message:
+          type: string
+        data:
+          type: object
+          description: At most 4 KB of JSON; data.type names the event (gameStarted, gameStopped, test, ...)
     GameCapabilities:
       type: object
       required: [apiVersion]
       properties:
         apiVersion:
           type: integer
-          const: 5
+          const: 6
     GameSessionSummary:
       type: object
       properties:
@@ -6708,6 +6854,9 @@ components:
           $ref: '#/components/schemas/Time'
         updatedAt:
           $ref: '#/components/schemas/Time'
+        gameState:
+          type: string
+          enum: [running, stopped]
     GameSession:
       type: object
       properties:
@@ -7068,6 +7217,9 @@ components:
                 $ref: '#/components/schemas/Time'
               message:
                 type: string
+              data:
+                type: [object, 'null']
+                description: Set on execution events only (see GameEvent)
         nextCursor:
           type: string
         hasMore:
@@ -7094,7 +7246,9 @@ components:
       type: object
       description: >-
         Members get no detail or epoch; hunters get roster labels and no message. baseRevision is the target's member
-        state revision of a hunter's request.
+        state revision of a hunter's request. Requests never expire with time (expired marks a waiting request that
+        lapsed because its requester or target left the game); a change of control returns one still executing
+        under an older epoch to approved.
       properties:
         id:
           $ref: '#/components/schemas/Id'
@@ -7131,8 +7285,6 @@ components:
           type: [integer, 'null']
         createdAt:
           $ref: '#/components/schemas/Time'
-        expiresAt:
-          $ref: '#/components/schemas/NullableTime'
         decidedAt:
           $ref: '#/components/schemas/NullableTime'
         completedAt:
@@ -7535,8 +7687,8 @@ components:
           description: The session aggregate revision
         readAt:
           $ref: '#/components/schemas/Time'
-        executingEpoch:
-          type: [integer, 'null']
+        game:
+          $ref: '#/components/schemas/GameSessionState'
         session:
           $ref: '#/components/schemas/GameSession'
         members:
@@ -7606,7 +7758,8 @@ components:
     GameStatus:
       type: object
       description: >-
-        The caller's membership, whether a Tool controls the game, the server time for countdowns, a hash of the
+        The caller's membership, whether the game runs (its game state; never whether a Tool is connected), the
+        server time for countdowns, a hash of the
         projection (it changes only with what this member observes; members never see the session revision) and the
         role projection.
       properties:
@@ -7620,7 +7773,7 @@ components:
           type: integer
         displayName:
           type: string
-        controllerActive:
+        running:
           type: boolean
         serverTime:
           $ref: '#/components/schemas/Time'

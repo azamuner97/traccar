@@ -12,6 +12,7 @@ import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.traccar.api.security.UserPrincipal;
 import org.traccar.game.GameControllerService;
+import org.traccar.game.GameExecutionService;
 import org.traccar.game.GameOwnershipService;
 
 import java.io.ByteArrayInputStream;
@@ -29,6 +30,7 @@ public class GameControllerFilterTest {
 
     private final GameControllerService controller = mock(GameControllerService.class);
     private final GameOwnershipService ownership = mock(GameOwnershipService.class);
+    private final GameExecutionService execution = mock(GameExecutionService.class);
     private GameControllerFilter filter;
 
     private static void inject(Object object, String name, Object value) throws Exception {
@@ -42,13 +44,18 @@ public class GameControllerFilterTest {
         filter = new GameControllerFilter();
         inject(filter, "controller", controller);
         inject(filter, "ownership", ownership);
+        inject(filter, "execution", execution);
         inject(filter, "objectMapper", new ObjectMapper());
         // User 10 is a member of a stored session; a Tool holds the lease without being the caller.
         when(ownership.owned()).thenReturn(new GameOwnershipService.Owned(Set.of(201L), Set.of(), Set.of(10L, 11L),
                 Set.of()));
-        when(controller.status()).thenReturn(new GameControllerService.Lease(3, "active", true, null, null,
-                null, null, null, "2026-05-01T10:00:00Z", 30, 5));
+        when(controller.status()).thenReturn(lease(true));
         when(controller.lockShared()).thenReturn(1L);
+    }
+
+    private static GameControllerService.Lease lease(boolean active) {
+        return new GameControllerService.Lease(3, active ? "active" : "expired", active, null, null, null, null,
+                "2026-05-01T10:00:00Z", 30, 5);
     }
 
     private ContainerRequestContext request(long userId, String method, String path) {
@@ -112,8 +119,8 @@ public class GameControllerFilterTest {
 
     @Test
     void pathNumbersAreReadLikeJerseyReadsThem() throws Exception {
-        // "07" names session 7 for the resource, so it is the executing session's write.
-        when(controller.executingSessionId()).thenReturn(7L);
+        // "07" names session 7 for the resource, so it is the running session's write.
+        when(execution.runningSessionId()).thenReturn(7L);
         when(controller.check(anyLong(), any())).thenThrow(GameControllerService.locked("lease required"));
         for (String path : new String[] {"game-sessions/07/name", "game-sessions/+7/name", "game-sessions/7/name"}) {
             var rename = request(1, "PUT", path);
@@ -137,5 +144,37 @@ public class GameControllerFilterTest {
         var unrelated = request(1, "POST", "permissions", "{\"userId\":30,\"deviceId\":999}");
         filter.filter(unrelated);
         assertNull(abortStatus(unrelated));
+    }
+
+    @Test
+    void anAdministratorMayStopTheGameWithoutTheEpochOnlyWhileNoLeaseIsActive() throws Exception {
+        // While a Tool holds the lease, a stop without its epoch is refused before the resource runs.
+        var held = request(1, "PUT", "game-sessions/7/state");
+        filter.filter(held);
+        assertEquals(423, abortStatus(held));
+        verify(controller, never()).check(anyLong(), any());
+
+        // Without an active lease it reaches the resource unfenced; the service accepts only a stop then.
+        when(controller.status()).thenReturn(lease(false));
+        var free = request(1, "PUT", "game-sessions/7/state");
+        filter.filter(free);
+        assertNull(abortStatus(free));
+        verify(controller, never()).check(anyLong(), any());
+        verify(controller, never()).lockShared();
+
+        // With an epoch it is fenced like any other game write.
+        var fenced = request(1, "PUT", "game-sessions/7/state");
+        when(fenced.getHeaderString(GameControllerService.EPOCH_HEADER)).thenReturn("3");
+        filter.filter(fenced);
+        assertNull(abortStatus(fenced));
+        verify(controller).check(1L, 3L);
+
+        // A test event only writes a log row: never fenced, even for the running session.
+        when(execution.runningSessionId()).thenReturn(7L);
+        clearInvocations(controller);
+        var event = request(1, "POST", "game-sessions/7/events/test");
+        filter.filter(event);
+        assertNull(abortStatus(event));
+        verify(controller, never()).check(anyLong(), any());
     }
 }

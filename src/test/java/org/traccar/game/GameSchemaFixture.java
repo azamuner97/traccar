@@ -50,8 +50,9 @@ public final class GameSchemaFixture {
     }
 
     /**
-     * Applies the master changelog without model 2: the schema of model 1. Applying {@link #MASTER} afterwards runs
-     * only model 2, as the switchover does on an existing database.
+     * Applies the master changelog without model 2 and the changelogs after it: the schema of model 1. Applying
+     * {@link #MASTER} afterwards runs only model 2 and its successors, as the switchover does on an existing
+     * database.
      */
     public static void model1(DataSource source) throws Exception {
         String master = Files.readString(SCHEMA.resolve(MASTER));
@@ -59,8 +60,10 @@ public final class GameSchemaFixture {
         if (!master.contains(include)) {
             throw new IllegalStateException("The master changelog does not include " + MODEL_2);
         }
+        // Model 1 is everything before the model-2 include; the changelogs after it build on model 2.
+        String model1 = master.substring(0, master.indexOf(include)) + "</databaseChangeLog>\n";
         Path directory = Files.createTempDirectory("game-model-1");
-        Files.writeString(directory.resolve(MODEL_1_MASTER), master.replace(include, ""));
+        Files.writeString(directory.resolve(MODEL_1_MASTER), model1);
         try {
             apply(source, MODEL_1_MASTER, new CompositeResourceAccessor(
                     new DirectoryResourceAccessor(directory), new DirectoryResourceAccessor(SCHEMA)));

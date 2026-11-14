@@ -492,13 +492,14 @@ public abstract class GameSchemaTest {
             assertEquals(1, number(connection, "SELECT COUNT(*) FROM tc_users WHERE id = ?", account));
             assertEquals(1, number(connection, "SELECT COUNT(*) FROM tc_devices WHERE id = ?", tracker));
             assertEquals(7, number(connection, "SELECT epoch FROM tc_game_controller WHERE id = 1"));
-            assertEquals(-1, number(connection, "SELECT gamesessionid FROM tc_game_controller WHERE id = 1"));
+            // The lease names no executing session any more (game execution, phase 0).
+            assertThrows(SQLException.class,
+                    () -> number(connection, "SELECT COUNT(gamesessionid) FROM tc_game_controller"));
             assertEquals(1, number(connection, "SELECT COUNT(*) FROM tc_drawings WHERE ownerid = ?", account));
             assertThrows(SQLException.class,
                     () -> number(connection, "SELECT COUNT(sessiondeviceid) FROM tc_drawings"));
 
-            long session = session(connection);
-            execute(connection, "UPDATE tc_game_controller SET gamesessionid = ? WHERE id = 1", session);
+            session(connection);
         }
     }
 

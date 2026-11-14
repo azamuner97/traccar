@@ -11,8 +11,10 @@ import org.junit.jupiter.api.function.Executable;
 import org.traccar.api.security.PermissionsService;
 import org.traccar.game.GameAccessRule;
 import org.traccar.game.GameBindingHook;
+import org.traccar.game.GameControllerService;
 import org.traccar.game.GameDocumentService;
 import org.traccar.game.GameEffectsService;
+import org.traccar.game.GameExecutionService;
 import org.traccar.game.GameJokerRepository;
 import org.traccar.game.GameJokerService;
 import org.traccar.game.GameLogService;
@@ -96,7 +98,9 @@ public abstract class GameApiTest extends GameTestBase {
                 new GameTimetableService(transactions, mapper, publisher),
                 new GameDocumentService(transactions, mapper, cipher()), new GameLogService(transactions),
                 new GameEffectsService(transactions, mapper, publisher),
-                new GameNotificationService(transactions, publisher), new GameProximityService(transactions, publisher)));
+                new GameNotificationService(transactions, publisher), new GameProximityService(transactions, publisher),
+                new GameExecutionService(transactions, new GameControllerService(source, clock, 30, 5, null,
+                        publisher), publisher)));
         sessionsApi = wire(new GameSessionResource() {
             @Override
             protected long getUserId() {
@@ -253,8 +257,8 @@ public abstract class GameApiTest extends GameTestBase {
 
     @Test
     void operatorsManageSessionsMembersAndResources() throws Exception {
-        assertEquals(new GameSessionResource.Capabilities(5), sessionsApi.capabilities());
-        assertEquals(5, GameSessionService.API_VERSION);
+        assertEquals(new GameSessionResource.Capabilities(6), sessionsApi.capabilities());
+        assertEquals(6, GameSessionService.API_VERSION);
         String name = "api-" + UUID.randomUUID();
         JsonNode created = sessionsApi.create(new GameSessionResource.CreateRequest(name, 5, null,
                 json("{\"game_settings\": " + SETTINGS + "}")));
@@ -342,7 +346,7 @@ public abstract class GameApiTest extends GameTestBase {
         assertEquals("sent", sessionsApi.timetable(session).get("entries").get(0).get("status").asText());
         sessionsApi.appendLogs(session, new GameSessionResource.LogAppend(List.of(new GameLogService.LogInput(
                 "speedhunt", T0.toString(), "Started"))));
-        JsonNode logs = sessionsApi.logs(session, null, 0, "speedhunt");
+        JsonNode logs = sessionsApi.logs(session, null, 0, "speedhunt", false);
         assertEquals("Started", logs.get("items").get(0).get("message").asText());
         assertEquals(T0.toString(), logs.get("items").get(0).get("occurredAt").asText());
 
@@ -372,7 +376,7 @@ public abstract class GameApiTest extends GameTestBase {
                 () -> sessionsApi.get(session), () -> sessionsApi.snapshot(session),
                 () -> sessionsApi.members(session), () -> sessionsApi.jokerOverview(session),
                 () -> sessionsApi.listRequests(session, null, 0), () -> sessionsApi.timetable(session),
-                () -> sessionsApi.credentials(session), () -> sessionsApi.logs(session, null, 0, null),
+                () -> sessionsApi.credentials(session), () -> sessionsApi.logs(session, null, 0, null, false),
                 () -> grant(session, game.anna(), GameJokerRepository.FAKE_PING, 1),
                 () -> deliver(session, List.of(), ping(game.anna(), 1)),
                 () -> notificationsApi.history(session, null, 0), () -> notificationsApi.initialize(session),
@@ -427,7 +431,8 @@ public abstract class GameApiTest extends GameTestBase {
         assertEquals(0, sessionsApi.reconcileJokers(session).size());
         JsonNode snapshot = (JsonNode) sessionsApi.snapshot(session).getEntity();
         assertEquals(2, snapshot.path("state").path("runs").size());
-        assertEquals(EPOCH, snapshot.get("executingEpoch").asLong());
+        assertEquals("running", snapshot.path("game").path("state").asText());
+        assertEquals("running", sessionsApi.state(session).path("state").asText());
     }
 
     // Members -----------------------------------------------------------------------------------------------
@@ -446,7 +451,7 @@ public abstract class GameApiTest extends GameTestBase {
         assertEquals(observable(anna), observable(ben));
         assertEquals(game.ben().id(), ben.get("memberId").asLong());
         assertEquals("player", ben.get("role").asText());
-        assertTrue(ben.get("controllerActive").asBoolean());
+        assertTrue(ben.get("running").asBoolean());
         assertEquals(T0.toString(), ben.get("serverTime").asText());
         assertTrue(ben.get("hash").asText().matches("[0-9a-f]{32}"));
         assertTrue(ben.path("status").path("speedhunt").path("active").asBoolean());

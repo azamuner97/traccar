@@ -190,6 +190,26 @@ public class GameEffectsService {
         });
     }
 
+    /**
+     * The recorded outcome of a delivery, as a replay with the current push states, whatever epoch recorded it;
+     * 404 when the session has no delivery with this ID. Read-only.
+     */
+    public Outcome lookup(long sessionId, String deliveryId) throws Exception {
+        if (deliveryId == null || !deliveryId.matches("[A-Za-z0-9_-]{8,64}")) {
+            throw GameErrors.invalid("Invalid delivery ID");
+        }
+        return transactions.read(transaction -> {
+            GameDocumentService.sessionExists(transaction, sessionId);
+            var stored = transaction.first("SELECT id, outcome FROM tc_game_deliveries WHERE gamesessionid = ?"
+                    + " AND deliveryid = ?", rows -> new Object[] {rows.getLong(1), rows.getString(2)},
+                    sessionId, deliveryId);
+            if (stored.isEmpty()) {
+                throw GameErrors.notFound("Delivery not recorded");
+            }
+            return replay(transaction, (long) stored.get()[0], (String) stored.get()[1]);
+        });
+    }
+
     private Outcome replay(GameTransaction transaction, long rowId, String json) throws Exception {
         Outcome outcome = objectMapper.readValue(json, Outcome.class);
         Map<Long, PushOutcome> current = new LinkedHashMap<>();

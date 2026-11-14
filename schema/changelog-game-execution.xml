@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<databaseChangeLog xmlns="http://www.liquibase.org/xml/ns/dbchangelog"
+  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+  xsi:schemaLocation="http://www.liquibase.org/xml/ns/dbchangelog http://www.liquibase.org/xml/ns/dbchangelog/dbchangelog-3.4.xsd">
+
+  <!--
+    Game execution, phase 0 (Claude outputs/game-execution-plan.md, B0, B1 and B5). It follows the rules of
+    changelog-game-model-2.xml (gm prefix, UTC DATETIME(3), "at most one active" marker columns, no referential
+    action between game tables).
+
+    - tc_game_session_state: the game state of a session (running or stopped), set only with the Tool's Start and
+      Stop game buttons. runningkey is 1 while running and null otherwise, so its unique constraint allows at most
+      one running session per server. A session without a row is stopped.
+    - The lease no longer names an executing session: tc_game_controller loses gamesessionid.
+    - Requests no longer expire: tc_game_requests loses expiresat (its status 'expired' stays valid for history).
+    - Execution events: tc_game_session_logs gets a nullable data column (validated JSON, at most 4 KB).
+  -->
+  <changeSet author="traccar-tool" id="game-execution-1-session-state">
+    <createTable tableName="tc_game_session_state">
+      <column name="gamesessionid" type="BIGINT">
+        <constraints primaryKey="true" primaryKeyName="pk_gm_session_state" nullable="false" />
+      </column>
+      <column name="state" type="VARCHAR(16)"><constraints nullable="false" /></column>
+      <column name="changedat" type="DATETIME(3)"><constraints nullable="false" /></column>
+      <column name="changedby" type="VARCHAR(128)" />
+      <column name="runningkey" type="INT" />
+    </createTable>
+    <addForeignKeyConstraint baseTableName="tc_game_session_state" baseColumnNames="gamesessionid"
+      referencedTableName="tc_game_sessions" referencedColumnNames="id" constraintName="fk_gm_session_state_session" />
+    <addUniqueConstraint tableName="tc_game_session_state" columnNames="runningkey"
+      constraintName="uq_gm_session_state_running" />
+  </changeSet>
+
+  <changeSet author="traccar-tool" id="game-execution-1-session-state-check">
+    <sql>
+      ALTER TABLE tc_game_session_state ADD CONSTRAINT ck_gm_session_state
+        CHECK ((state = 'running' AND runningkey IS NOT NULL AND runningkey = 1)
+          OR (state = 'stopped' AND runningkey IS NULL));
+    </sql>
+  </changeSet>
+
+  <changeSet author="traccar-tool" id="game-execution-1-lease-session">
+    <dropForeignKeyConstraint baseTableName="tc_game_controller" constraintName="fk_gm_controller_session" />
+    <dropColumn tableName="tc_game_controller" columnName="gamesessionid" />
+  </changeSet>
+
+  <changeSet author="traccar-tool" id="game-execution-1-request-expiry">
+    <dropIndex tableName="tc_game_requests" indexName="idx_gm_requests_status_expiry" />
+    <dropColumn tableName="tc_game_requests" columnName="expiresat" />
+  </changeSet>
+
+  <changeSet author="traccar-tool" id="game-execution-1-log-data">
+    <addColumn tableName="tc_game_session_logs">
+      <column name="data" type="CLOB" />
+    </addColumn>
+  </changeSet>
+
+</databaseChangeLog>

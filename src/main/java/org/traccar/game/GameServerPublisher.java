@@ -33,6 +33,7 @@ import java.util.Set;
  * accounts of the named members, or of every active member of the session, and always the operators
  * (administrators). Proximity circles concern hunters and the spectator only: a session-wide {@code game-proximity}
  * reaches those roles, and players and supporters learn about their own access through {@link #proximityAccess}.</li>
+ * <li>Execution events ({@link GameEvent}) reach administrators only.</li>
  * </ul>
  */
 @Singleton
@@ -124,6 +125,15 @@ public class GameServerPublisher implements GamePublisher {
             connectionManager.updateGameUsers(true, userIds, topic);
         } catch (RuntimeException error) {
             LOGGER.warn("Game invalidation {} could not be published", topic, error);
+        }
+    }
+
+    @Override
+    public void gameEvents(List<GameEvent> events) {
+        try {
+            connectionManager.updateGameEvents(true, events);
+        } catch (RuntimeException error) {
+            LOGGER.warn("Game events could not be published", error);
         }
     }
 

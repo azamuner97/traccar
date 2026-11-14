@@ -25,6 +25,7 @@ import jakarta.ws.rs.core.Response;
 import org.traccar.game.GameControllerService;
 import org.traccar.game.GameDocumentService;
 import org.traccar.game.GameEffectsService;
+import org.traccar.game.GameExecutionService;
 import org.traccar.game.GameJokerService;
 import org.traccar.game.GameLogService;
 import org.traccar.game.GameRequestService;
@@ -45,7 +46,8 @@ import java.util.Map;
  *
  * <p>{@code GameControllerFilter} fences writes by path: effects, timetable progress, {@code members/*},
  * {@code resources/*}, {@code checkpoints/*}, {@code requests/*} and {@code jokers/*} always, and every write of the
- * executing session.
+ * running session. The game state ({@code state}) is fenced too, except a stop without an epoch while no lease is
+ * active; a test event ({@code events/test}) is never fenced.
  */
 @Path("game-sessions")
 @Produces(MediaType.APPLICATION_JSON)
@@ -103,6 +105,13 @@ public class GameSessionResource extends GameApiResource {
     public record LogAppend(List<GameLogService.LogInput> entries) {
     }
 
+    /** The requested game state: {@code running} or {@code stopped}. */
+    public record StateChange(String state) {
+    }
+
+    public record TestEvent(String message) {
+    }
+
     public record RequestDecision(String decision, String message, String detail) {
     }
 
@@ -136,6 +145,9 @@ public class GameSessionResource extends GameApiResource {
 
     @Inject
     private GameSnapshotService snapshots;
+
+    @Inject
+    private GameExecutionService execution;
 
     private static long expected(Long value) {
         if (value == null || value < 0) {
@@ -212,6 +224,37 @@ public class GameSessionResource extends GameApiResource {
         required(request, "Settings required");
         return json(sessions.updateSettings(id, expected(request.expectedRevision()),
                 required(request.schemaVersion(), "schemaVersion is required"), request.document()));
+    }
+
+    /** The session's game state: running or stopped. */
+    @GET
+    @Path("{id}/state")
+    public JsonNode state(@PathParam("id") long id) throws Exception {
+        checkOperator();
+        return json(execution.get(id));
+    }
+
+    /**
+     * Starts or stops the session's game. Fenced; without an epoch only a stop is accepted, while no lease is
+     * active. Starting is refused while another session's game runs.
+     */
+    @PUT
+    @Path("{id}/state")
+    public JsonNode changeState(@PathParam("id") long id,
+                                @HeaderParam(GameControllerService.EPOCH_HEADER) String header,
+                                StateChange request) throws Exception {
+        checkOperator();
+        required(request, "State required");
+        return json(execution.change(id, required(request.state(), "state is required"), getUserId(),
+                GameControllerService.parseEpoch(header)));
+    }
+
+    /** Writes a {@code game} test event and pushes it to administrators (for outage drills). */
+    @POST
+    @Path("{id}/events/test")
+    public JsonNode testEvent(@PathParam("id") long id, TestEvent request) throws Exception {
+        checkOperator();
+        return json(execution.testEvent(id, request == null ? null : request.message(), getUserId()));
     }
 
     /** Everything the Tool loads and recovers a session from, at one database snapshot. */
@@ -484,9 +527,10 @@ public class GameSessionResource extends GameApiResource {
     @GET
     @Path("{id}/logs")
     public JsonNode logs(@PathParam("id") long id, @QueryParam("after") String after, @QueryParam("limit") int limit,
-                         @QueryParam("category") String category) throws Exception {
+                         @QueryParam("category") String category, @QueryParam("events") boolean events)
+            throws Exception {
         checkOperator();
-        return json(logs.list(id, after, limit, category));
+        return json(logs.list(id, after, limit, category, events));
     }
 
     @POST
@@ -580,6 +624,18 @@ public class GameSessionResource extends GameApiResource {
                                  GameEffectsService.Delivery delivery) throws Exception {
         checkOperator();
         return json(effects.apply(id, epoch(header, "Effects"), delivery));
+    }
+
+    /**
+     * The recorded outcome of a delivery (as a replay), under any epoch, or 404 when it was never recorded. After
+     * re-acquiring control the Tool reconciles each uncertain delivery from it instead of sending it again.
+     */
+    @GET
+    @Path("{id}/effects/{deliveryId}")
+    public JsonNode effectsOutcome(@PathParam("id") long id, @PathParam("deliveryId") String deliveryId)
+            throws Exception {
+        checkOperator();
+        return json(effects.lookup(id, deliveryId));
     }
 
 }

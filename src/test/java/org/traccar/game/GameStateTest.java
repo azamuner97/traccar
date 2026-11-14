@@ -342,7 +342,7 @@ public abstract class GameStateTest extends GameTestBase {
                 .map(GameStateService.LiveShare::memberId).toList());
         state.apply(session, EPOCH + 1, List.of(new GameOperation.Catch(anna.id(), null)));
         assertTrue(state.liveShares(session).isEmpty());
-        execute("DELETE FROM tc_game_controller WHERE id = 1");
+        stopGame(session);
         assertTrue(state.liveShares(session).isEmpty());
 
         assertStatus(409, () -> apply(session, upload(GameState.MANUAL, carla, true, null)));

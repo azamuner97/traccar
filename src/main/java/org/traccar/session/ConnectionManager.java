@@ -503,6 +503,25 @@ public class ConnectionManager implements BroadcastInterface {
         }
     }
 
+    /** Pushes execution events to administrators only, with the same check as {@link #updateGameAdmin}. */
+    @Override
+    public synchronized void updateGameEvents(boolean local, java.util.List<org.traccar.game.GameEvent> events) {
+        if (local) {
+            broadcastService.updateGameEvents(true, events);
+        }
+        for (var entry : listeners.entrySet()) {
+            try {
+                User user = storage.getObject(User.class, new Request(
+                        new Columns.Include("administrator"), new Condition.Equals("id", entry.getKey())));
+                if (user != null && user.getAdministrator()) {
+                    entry.getValue().forEach(listener -> listener.onGameEvents(events));
+                }
+            } catch (StorageException error) {
+                LOGGER.warn("Game events failed", error);
+            }
+        }
+    }
+
     @Override
     public synchronized void updateGameUsers(boolean local, Set<Long> userIds, String resource) {
         if (local) {
@@ -528,6 +547,8 @@ public class ConnectionManager implements BroadcastInterface {
     public interface UpdateListener {
         /** Sends {@code {"invalidate": [resource]}} for a game resource. */
         default void onUpdateGameAdmin(String resource) { }
+        /** Sends {@code {"gameEvents": [...]}}; administrators only. */
+        default void onGameEvents(java.util.List<org.traccar.game.GameEvent> events) { }
         default void onUpdateDeviceAccess() { }
         void onKeepalive();
         void onUpdateDevice(Device device);

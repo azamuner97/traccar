@@ -30,14 +30,16 @@ import java.util.Set;
 /**
  * Self-service game requests of data model 2 (model-1 Stage 3 rules, with members and typed state).
  *
- * <p>Members submit requests while the controlling Tool executes their session. The server authorizes them from
- * membership and validates them against the typed tables: "a speedhunt is running" means an active run or an active
- * live speedhunt ping, a member is caught while a catch is open, and on a break while an active break has not
- * reached its deadline. A participant has at most one open request per joker type; the hunters' speedhunt actions
- * on one participant are serialized and carry the participant's member state revision. Requests awaiting approval
- * or execution expire after two minutes. Whether a request needs the operator's approval comes from the session
- * settings ({@code request_approvals}); the controlling Tool decides, claims and completes requests, and their
- * outcomes commit inside effects deliveries together with joker accounting.
+ * <p>Members submit requests while their session's game runs ({@link GameExecutionService}), whether or not a Tool
+ * controls it right now. The server authorizes them from membership and validates them against the typed tables: "a
+ * speedhunt is running" means an active run or an active live speedhunt ping, a member is caught while a catch is
+ * open, and on a break while an active break has not reached its deadline. A participant has at most one open
+ * request per joker type; the hunters' speedhunt actions on one participant are serialized and carry the
+ * participant's member state revision. Requests never expire: they stay open until the Tool handles them, the member
+ * cancels them or the game stops; a change of control returns a request still executing under an older epoch to
+ * {@code approved}. Whether a request needs the operator's approval comes from the session settings
+ * ({@code request_approvals}); the controlling Tool decides, claims and completes requests, and their outcomes commit
+ * inside effects deliveries together with joker accounting.
  *
  * <p>Answers never reveal whom a speedhunt targets: a break request during any speedhunt gets the same message for
  * every participant.
@@ -45,7 +47,6 @@ import java.util.Set;
 @Singleton
 public class GameRequestService {
 
-    public static final int EXPIRY_SECONDS = 120;
     /** The same answer for every participant, so it never reveals whom a speedhunt targets. */
     public static final String BREAK_UNAVAILABLE = GameOperations.BREAK_UNAVAILABLE;
     public static final String BREAK_OVERLAP = "This break would overlap another break of yours";
@@ -128,7 +129,7 @@ public class GameRequestService {
                 request.requesterRole(), request.targetMemberId(),
                 labels == null ? request.targetLabel() : labels.get(request.targetMemberId()),
                 request.baseRevision(), request.parameters(), request.status(), request.approvalRequired(),
-                labels == null ? request.message() : null, null, null, request.createdAt(), request.expiresAt(),
+                labels == null ? request.message() : null, null, null, request.createdAt(),
                 request.decidedAt(), request.completedAt(), request.updatedAt());
     }
 
@@ -256,7 +257,7 @@ public class GameRequestService {
                     throw GameErrors.invalid("Participant and speedhunt revision required");
                 }
             }
-            if (GameStateRepository.executingEpoch(transaction, sessionId) == null) {
+            if (!GameExecutionService.running(transaction, sessionId)) {
                 throw GameErrors.conflict(NOT_RUNNING);
             }
             Instant now = transaction.now();
@@ -289,8 +290,7 @@ public class GameRequestService {
             boolean approval = settings.approvalRequired(GameRequest.APPROVAL_SETTINGS.get(submission.type()))
                     || consecutive;
             long id = GameRequestRepository.insert(transaction, sessionId, submission.type(), requester, target,
-                    joker ? null : submission.baseRevision(), objectMapper.writeValueAsString(parameters), approval,
-                    now.plusSeconds(EXPIRY_SECONDS));
+                    joker ? null : submission.baseRevision(), objectMapper.writeValueAsString(parameters), approval);
             GameRequestRepository.Settled settled = GameRequestRepository.Settled.none();
             boolean pool = false;
             if (joker) {
@@ -553,20 +553,13 @@ public class GameRequestService {
         });
     }
 
-    /** Claims a pending or approved request for execution; an expired request can no longer be claimed. */
+    /** Claims a pending or approved request for execution under the controller epoch that fenced the call. */
     public GameRequest claim(long sessionId, long id, long epoch) throws Exception {
         return transactions.write(transaction -> {
             transaction.lockSession(sessionId);
             GameRequest request = load(transaction, sessionId, id);
             if (!GameRequest.PENDING.equals(request.status()) && !GameRequest.APPROVED.equals(request.status())) {
                 throw GameErrors.conflict("The request is no longer open");
-            }
-            if (!request.expiresAt().isAfter(transaction.now())) {
-                var settled = GameRequestRepository.finish(transaction, request, GameRequest.EXPIRED,
-                        "No one handled this request in time", null, false);
-                transaction.bumpSession();
-                publishRequests(transaction, sessionId, settled);
-                return load(transaction, sessionId, id);
             }
             transaction.update("UPDATE tc_game_requests SET status = ?, epoch = ?, updatedat = ?"
                     + " WHERE gamesessionid = ? AND id = ?", GameRequest.EXECUTING, epoch, transaction.now(),
@@ -635,40 +628,31 @@ public class GameRequestService {
         return result;
     }
 
-    // Expiry and change of control --------------------------------------------------------------------------
+    // Change of control -------------------------------------------------------------------------------------
 
-    /** Ends open requests of every session in one transaction per session, with their jokers. */
-    private Set<Long> endOpen(String condition, Instant before, String message) throws Exception {
-        List<Long> sessions = transactions.read(transaction -> transaction.list(
-                "SELECT DISTINCT gamesessionid FROM tc_game_requests WHERE " + condition + " ORDER BY gamesessionid",
-                rows -> rows.getLong(1), before == null ? new Object[0] : new Object[] {before}));
+    /**
+     * Returns the requests still {@code executing} under an epoch older than {@code epoch} to {@code approved}, one
+     * transaction per session, after a change of control. Their delivery was not recorded: a recorded one ended
+     * the request with it, and the epoch fence rejects anything the old controller sends later. The new controller
+     * decides them again. Returns the affected sessions.
+     */
+    public Set<Long> returnExecuting(long epoch) throws Exception {
+        List<Long> sessions = transactions.read(transaction -> transaction.list("SELECT DISTINCT gamesessionid"
+                + " FROM tc_game_requests WHERE status = ? AND (epoch IS NULL OR epoch < ?) ORDER BY gamesessionid",
+                rows -> rows.getLong(1), GameRequest.EXECUTING, epoch));
         Set<Long> affected = new LinkedHashSet<>();
         for (long sessionId : sessions) {
             try {
                 boolean changed = transactions.write(transaction -> {
                     transaction.lockSession(sessionId);
-                    var settled = GameRequestRepository.Settled.none();
-                    boolean pool = false;
-                    boolean any = false;
-                    for (GameRequest request : GameRequestRepository.open(transaction, sessionId)) {
-                        boolean expiring = GameRequest.PENDING.equals(request.status())
-                                || GameRequest.APPROVED.equals(request.status());
-                        if (before != null && (!expiring || request.expiresAt().isAfter(before))) {
-                            continue;
-                        }
-                        String status = expiring ? GameRequest.EXPIRED : GameRequest.FAILED;
-                        var outcome = GameRequestRepository.finish(transaction, request, status, message, null,
-                                false);
-                        settled.add(outcome);
-                        pool |= outcome.pool();
-                        any = true;
-                    }
-                    if (any) {
+                    int count = transaction.update("UPDATE tc_game_requests SET status = ?, epoch = NULL,"
+                            + " updatedat = ? WHERE gamesessionid = ? AND status = ? AND (epoch IS NULL OR epoch < ?)",
+                            GameRequest.APPROVED, transaction.now(), sessionId, GameRequest.EXECUTING, epoch);
+                    if (count > 0) {
                         transaction.bumpSession();
-                        publishRequests(transaction, sessionId,
-                                new GameRequestRepository.Settled(settled.members(), pool));
+                        publishRequests(transaction, sessionId, GameRequestRepository.Settled.none());
                     }
-                    return any;
+                    return count > 0;
                 });
                 if (changed) {
                     affected.add(sessionId);
@@ -678,21 +662,6 @@ public class GameRequestService {
             }
         }
         return affected;
-    }
-
-    /** Expires requests awaiting approval or execution past their deadline; returns the affected sessions. */
-    public Set<Long> expire() throws Exception {
-        Instant now = transactions.now();
-        return endOpen("status IN ('pending', 'approved') AND expiresat <= ?", now,
-                "No one handled this request in time");
-    }
-
-    /**
-     * Ends every open request when control of the game changes: waiting ones expire and executing ones fail. Their
-     * history is kept.
-     */
-    public Set<Long> invalidateOpen(String reason) throws Exception {
-        return endOpen("status IN ('pending', 'approved', 'executing')", null, reason);
     }
 
 }

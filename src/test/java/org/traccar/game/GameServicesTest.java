@@ -342,9 +342,9 @@ public abstract class GameServicesTest {
         execute("INSERT INTO tc_game_timetable_entries (gamesessionid, memberid, scheduledat, content, active, revision,"
                 + " status) VALUES (?, ?, ?, 'content', TRUE, 1, 'scheduled')", session, player, T0);
         long request = insert("INSERT INTO tc_game_requests (gamesessionid, type, requestermemberid, requesterrole,"
-                + " targetmemberid, parameters, status, createdat, expiresat, updatedat)"
-                + " VALUES (?, 'speedhunt', ?, 'hunter', ?, '{}', 'succeeded', ?, ?, ?)",
-                session, hunter, player, T0, T0, T0);
+                + " targetmemberid, parameters, status, createdat, updatedat)"
+                + " VALUES (?, 'speedhunt', ?, 'hunter', ?, '{}', 'succeeded', ?, ?)",
+                session, hunter, player, T0, T0);
         execute("INSERT INTO tc_game_jokers (gamesessionid, memberid, type, granted, used, updatedat)"
                 + " VALUES (?, ?, 'break', 1, 1, ?)", session, supporter, T0);
         execute("INSERT INTO tc_game_joker_pools (gamesessionid, type, granted, used, updatedat)"
@@ -394,8 +394,10 @@ public abstract class GameServicesTest {
                 delivery, session, player, account, T0);
         execute("INSERT INTO tc_drawings (ownerid, gamesessionid, type, geometry, color)"
                 + " VALUES (?, ?, 'line', 'LINESTRING (0 0, 1 1)', '#000000')", account, session);
+        execute("INSERT INTO tc_game_session_state (gamesessionid, state, changedat) VALUES (?, 'stopped', ?)",
+                session, T0);
         return insert("INSERT INTO tc_game_controller_history (epoch, event, gamesessionid, occurredat)"
-                + " VALUES (1, 'acquired', ?, ?)", session, T0);
+                + " VALUES (1, 'gameStopped', ?, ?)", session, T0);
     }
 
     private long rows(String table, long session) throws SQLException {
@@ -408,7 +410,6 @@ public abstract class GameServicesTest {
         long kept = session();
         long history = populate(deleted);
         populate(kept);
-        execute("UPDATE tc_game_controller SET gamesessionid = ? WHERE id = 1", deleted);
         for (String table : GameSessionRepository.DELETE_ORDER) {
             assertTrue(rows(table, deleted) > 0, table);
         }
@@ -423,7 +424,6 @@ public abstract class GameServicesTest {
         assertEquals(0, number("SELECT COUNT(*) FROM tc_game_sessions WHERE id = ?", deleted));
         assertEquals(0, rows("tc_drawings", deleted));
         assertEquals(1, rows("tc_drawings", kept));
-        assertEquals(-1, number("SELECT gamesessionid FROM tc_game_controller WHERE id = 1"));
         assertEquals(-1, number("SELECT gamesessionid FROM tc_game_controller_history WHERE id = ?", history));
         assertEquals(users, number("SELECT COUNT(*) FROM tc_users"));
         assertEquals(404, status(() -> sessions.delete(deleted)));
@@ -444,8 +444,8 @@ public abstract class GameServicesTest {
                 }
             }
         }
-        // These follow their foreign keys: drawings cascade, the lease and controller history clear the reference.
-        scoped.removeAll(Set.of("tc_drawings", "tc_game_controller", "tc_game_controller_history"));
+        // These follow their foreign keys: drawings cascade, the controller history clears the reference.
+        scoped.removeAll(Set.of("tc_drawings", "tc_game_controller_history"));
         assertEquals(scoped, new TreeSet<>(GameSessionRepository.DELETE_ORDER));
         assertEquals(GameSessionRepository.DELETE_ORDER.size(),
                 new HashSet<>(GameSessionRepository.DELETE_ORDER).size());

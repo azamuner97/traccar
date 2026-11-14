@@ -158,24 +158,54 @@ bound to the operator and a unique app instance and lasts
 `gameController.renewSeconds` (default 5). Every acquisition gets a larger
 `controllerEpoch`, stored in `tc_game_controller`, so it keeps increasing across
 restarts. `/api/game-controller` acquires, renews, releases and force-takes over
-the lease, sets the session the controller executes, and lists the history
-(`tc_game_controller_history`). A server restart ends an active lease, so the
-Tool must resume explicitly. A change of control (acquisition, takeover,
-release, expiry, server restart) ends every open game request after its commit:
-waiting ones expire and executing ones fail.
+the lease, and lists the history (`tc_game_controller_history`). The lease
+decides only which Tool may make decisions. A server restart ends an active
+lease; a Tool that lost control re-acquires it automatically by naming its last
+epoch (`resumeEpoch`), which is granted only while nobody acquired control
+since. A change of control ends no request: a new epoch returns requests still
+`executing` under an older one to `approved`.
+
+### Game state
+
+Each session has a game state (`tc_game_session_state`): `running` or
+`stopped`, changed only with the Tool's Start and Stop game buttons
+(`PUT /api/game-sessions/{id}/state`) and never by the lease, so a dropped,
+closed or crashed Tool leaves the game running. At most one session runs per
+server (a unique `runningkey`). While it runs, members may submit requests and
+see "running"; the server will execute timetables, live uploads and break
+timers for it (later phases of `Claude outputs/game-execution-plan.md`).
+Changing the state is fenced, except that any administrator may stop a game
+without an epoch while no lease is active. Stopping ends the open requests
+(waiting ones are cancelled, executing ones fail; their jokers return) and the
+active live uploads and relays (`gameStopped`) in one transaction. Each start
+and stop is recorded in the controller history (`gameStarted`,
+`gameStopped`) and written as a `game` execution event.
+
+Execution events are session log rows with a `data` column (JSON, at most
+4 KB) in the categories `game`, `timetable`, `live`, `relay` and `break`. After
+commit they are pushed to administrators only as
+`{"gameEvents": [{"id", "gameSessionId", "category", "occurredAt", "message",
+"data"}]}`; members never receive them. The Tool catches up with
+`GET /api/game-sessions/{id}/logs?events=true&after=<id>`.
+`POST /api/game-sessions/{id}/events/test` writes a `game` test event (never
+fenced) for outage drills. `GET /api/game-sessions/{id}/effects/{deliveryId}`
+returns a delivery's recorded outcome under any epoch (404 when never
+recorded), so the Tool reconciles uncertain deliveries instead of sending them
+again under a new epoch.
 
 Fenced requests carry the epoch in `X-Game-Controller-Epoch` and are refused
 with HTTP 423 otherwise (`GameControllerFilter`):
 
 - for any session: effects, timetable progress, `members/*`, `resources/*`,
-  `checkpoints/*`, `requests/*` and `jokers/*`; every write of the executing
-  session. Configuration of a session that is not executing (name, settings,
-  credentials, geofence plans, timetable, logs) needs only its revision check;
+  `checkpoints/*`, `requests/*` and `jokers/*`; every write of the running
+  session and the game state (except the administrator stop described above).
+  Configuration of a session that is not running (name, settings, credentials,
+  geofence plans, timetable, logs) needs only its revision check;
 - writes to `/api/game-notifications` and `/api/game-proximity`;
 - while a lease is held, standard mutations (devices, groups, users,
   permissions, geofences, `DELETE /api/positions`) of the Traccar resources any
   session owns (`GameOwnershipService`), and `/api/notifications/send/*`
-  reaching a member of the executing session. While no lease is held,
+  reaching a member of the running session. While no lease is held,
   administrators may make them; each is recorded and reported to the Tool on its
   next acquisition. Users may always update their own account;
 - the filter judges the object the resource will change: path IDs are read as
@@ -225,7 +255,7 @@ receive them.
 - A binding change tells the session's members and both accounts, the one it
   bound and the one it removed, so an account learns at once that it gained or
   lost membership. Deleting a session tells its accounts. A settings change and a
-  change of the executing session or lease tell the session's members.
+  change of the game state tell the session's members.
 - Operators receive `game-sessions` (create, rename, delete) and
   `game-controller` (lease changes).
 
@@ -236,9 +266,9 @@ members. Hunters' speedhunt requests carry the target's member state revision
 (`tc_game_member_state.revision`), which the server advances with every change
 hunters can observe; players and supporters never receive it. The controlling
 Tool decides (`await`, `approve`, `reject`) and claims them through fenced
-endpoints and records their outcomes in effects deliveries. The server expires
-requests awaiting approval or execution after two minutes
-(`TaskGameController`).
+endpoints and records their outcomes in effects deliveries. Requests never
+expire: they stay open until the Tool handles them, the member cancels them or
+the game stops.
 
 Jokers are held per member (`tc_game_jokers`); the hunters' speedhunt pool has
 its own table (`tc_game_joker_pools`). Reservations (`tc_game_joker_reservations`)
@@ -392,8 +422,8 @@ reads only the member endpoints, so it shows nothing the server did not
 already filter for the signed-in member:
 
 - `GET /api/game-status`: the caller's membership (`gameSessionId`,
-  `memberId`, `role`, `number`, `displayName`), whether a Tool runs the game
-  (`controllerActive`), the server's clock (`serverTime`), a `hash` of the
+  `memberId`, `role`, `number`, `displayName`), whether the game runs
+  (`running`, its game state), the server's clock (`serverTime`), a `hash` of the
   projection, and the role-filtered status (players and supporters: the
   anonymous speedhunt status, the catch roster, the own break, the own armed
   fakes and planned breaks; hunters: every participant's speedhunt state with
@@ -431,16 +461,16 @@ chooses the coordinate (converted to WGS84 whatever the map style uses), then
 one of their own upcoming pings that can carry a fake or a ping number of the
 next speedhunt (1 to `pingsPerSpeedhunt`).
 
-The page shows whether the game runs, is paused (no Tool controls it) or the
+The page shows whether the game runs, is stopped or the
 page is disconnected; the anonymous speedhunt status; the own break with its
 absolute end and a countdown computed from the server's clock, shown as
 ending once its deadline has passed but no Tool has ended it yet; jokers with
 available, reserved and used (including uses beyond the allocation); held
 reservations, armed fakes and fakes bound to a speedhunt; and the own requests
-with their state, message and expiry countdown. Players and supporters use
+with their state and message. Players and supporters use
 "Get hunter positions" and break jokers there (after a confirmation), cancel
 their open requests and cancel unbound fakes. Buttons are disabled only for
-reasons every participant sees alike (no Tool, no joker left, an open request
+reasons every participant sees alike (game stopped, no joker left, an open request
 of the same joker, the own break, any speedhunt running, no ping that can
 carry a fake, an unbound speedhunt fake); the server checks everything again.
 Pings past their time that are still scheduled show as due while a Tool runs
@@ -592,7 +622,7 @@ repository-safety contract.
 3. Deploy the combined server and web build. Its migration drops the model-1
    game tables and their data; it keeps Traccar users, devices, ordinary
    drawings and the controller epoch.
-4. Release the matching Traccar Tool (game-session API version 5) and run
+4. Release the matching Traccar Tool (game-session API version 6) and run
    Device Setup for every new session: it plans members before it creates
    devices and accounts.
 5. Confirm managed devices have category `person`, integer

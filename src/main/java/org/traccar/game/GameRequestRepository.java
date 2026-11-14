@@ -26,7 +26,7 @@ public final class GameRequestRepository {
 
     private static final String SELECT = "SELECT id, gamesessionid, type, requestermemberid, requesterlabel,"
             + " requesterrole, targetmemberid, targetlabel, baserevision, parameters, status, approvalrequired,"
-            + " message, detail, epoch, createdat, expiresat, decidedat, completedat, updatedat FROM tc_game_requests";
+            + " message, detail, epoch, createdat, decidedat, completedat, updatedat FROM tc_game_requests";
 
     /** What a settlement changed: the members whose jokers changed, and whether the hunters' pool did. */
     public record Settled(Set<Long> members, boolean pool) {
@@ -57,8 +57,7 @@ public final class GameRequestRepository {
                 rows.getString("targetlabel"), GameTransaction.longOrNull(rows, "baserevision"), parameters,
                 rows.getString("status"), approvalRequired, rows.getString("message"), rows.getString("detail"),
                 GameTransaction.longOrNull(rows, "epoch"), GameTime.get(rows, "createdat"),
-                GameTime.get(rows, "expiresat"), GameTime.get(rows, "decidedat"), GameTime.get(rows, "completedat"),
-                GameTime.get(rows, "updatedat"));
+                GameTime.get(rows, "decidedat"), GameTime.get(rows, "completedat"), GameTime.get(rows, "updatedat"));
     }
 
     public static Optional<GameRequest> find(GameTransaction transaction, long sessionId, long id)
@@ -68,15 +67,14 @@ public final class GameRequestRepository {
     }
 
     public static long insert(GameTransaction transaction, long sessionId, String type, GameMember requester,
-                              GameMember target, Long baseRevision, String parameters, boolean approvalRequired,
-                              Instant expiresAt) throws SQLException {
+                              GameMember target, Long baseRevision, String parameters, boolean approvalRequired)
+            throws SQLException {
         Instant now = transaction.now();
         return transaction.insert("INSERT INTO tc_game_requests (gamesessionid, type, requestermemberid,"
                 + " requesterlabel, requesterrole, targetmemberid, targetlabel, baserevision, parameters, status,"
-                + " approvalrequired, createdat, expiresat, updatedat) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,"
-                + " ?)", sessionId, type, requester.id(), requester.displayName(), requester.role(), target.id(),
-                target.displayName(), baseRevision, parameters, GameRequest.PENDING, approvalRequired, now,
-                expiresAt, now);
+                + " approvalrequired, createdat, updatedat) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                sessionId, type, requester.id(), requester.displayName(), requester.role(), target.id(),
+                target.displayName(), baseRevision, parameters, GameRequest.PENDING, approvalRequired, now, now);
     }
 
     /** Requests of a session, newest first, filtered by an SQL condition. */

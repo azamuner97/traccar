@@ -46,6 +46,7 @@ public class AsyncSocket implements Session.Listener.AutoDemanding, ConnectionMa
     private static final String KEY_EVENTS = "events";
     private static final String KEY_LOGS = "logs";
     private static final String KEY_INVALIDATE = "invalidate";
+    private static final String KEY_GAME_EVENTS = "gameEvents";
 
     private static final String RESOURCE_GEOFENCES = "geofences";
     private static final String RESOURCE_DRAWINGS = "drawings";
@@ -145,6 +146,11 @@ public class AsyncSocket implements Session.Listener.AutoDemanding, ConnectionMa
     @Override
     public void onUpdateGameAdmin(String resource) {
         sendData(Map.of(KEY_INVALIDATE, List.of(resource)));
+    }
+
+    @Override
+    public void onGameEvents(List<org.traccar.game.GameEvent> events) {
+        sendData(Map.of(KEY_GAME_EVENTS, events));
     }
 
     @Override

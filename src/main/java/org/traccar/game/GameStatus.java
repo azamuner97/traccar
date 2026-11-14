@@ -32,12 +32,13 @@ public final class GameStatus {
     }
 
     /**
-     * A member's status: the caller's own membership, whether a Tool controls the game, the server time for
-     * countdowns, and the role projection. {@code hash} identifies the content of the projection (not the session
-     * revision, which members never see), so it changes only with what this member can observe.
+     * A member's status: the caller's own membership, whether the game runs (its game state, never whether a Tool
+     * is connected), the server time for countdowns, and the role projection. {@code hash} identifies the content of
+     * the projection (not the session revision, which members never see), so it changes only with what this member
+     * can observe.
      */
     public record Status(long gameSessionId, long memberId, String role, int number, String displayName,
-                         boolean controllerActive, String serverTime, String hash, Projection status) {
+                         boolean running, String serverTime, String hash, Projection status) {
     }
 
     /** One of the role projections. */

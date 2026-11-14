@@ -24,6 +24,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.traccar.api.security.UserPrincipal;
 import org.traccar.game.GameControllerService;
+import org.traccar.game.GameExecutionService;
 import org.traccar.game.GameOwnershipService;
 import org.traccar.game.GameTransactions;
 
@@ -40,13 +41,20 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * Fences mutations with the game controller lease.
  * <ul>
  * <li>Game endpoints that change execution state require the current {@code controllerEpoch}: effects, timetable
- * progress, members, resource rows, checkpoints, requests and jokers of any session, every write of the executing
- * session, and every write of game notifications and proximity. Configuration edits of a stored session that is not
- * executing (name, settings, credentials, geofence plans, timetable, logs) need only their revision check.</li>
+ * progress, members, resource rows, checkpoints, requests and jokers of any session, every write of the running
+ * session (its game state, {@code running}), and every write of game notifications and proximity. Configuration
+ * edits of a stored session that is not running (name, settings, credentials, geofence plans, timetable, logs)
+ * need only their revision check. Without a controller nobody changes a running session, while the server's own
+ * execution goes on.</li>
+ * <li>The game state ({@code PUT game-sessions/{id}/state}) is fenced, with one exception: without an epoch, any
+ * administrator may stop a game while no lease is active ({@link GameExecutionService#change} accepts only a stop
+ * then, and records who stopped it). A test event ({@code POST game-sessions/{id}/events/test}) is never fenced: it
+ * only writes a log row.</li>
  * <li>Standard mutations of the Traccar resources that any session owns ({@link GameOwnershipService}: members'
- * accounts and trackers, mirrors, groups and geofences), and pushes that reach members of the executing session,
+ * accounts and trackers, mirrors, groups and geofences), and pushes that reach members of the running session,
  * require the epoch while a lease is held. While no lease is held, administrators may make them; the change is
- * recorded for Tool to report on its next acquisition.</li>
+ * recorded for Tool to report on its next acquisition. Pushes that reach members of the running session count as
+ * such changes.</li>
  * <li>A request that carries an epoch must carry the current one, whatever it changes.</li>
  * </ul>
  * Users updating their own account are never fenced: participants register push tokens and save preferences
@@ -67,8 +75,10 @@ public class GameControllerFilter implements ContainerRequestFilter, ContainerRe
     private static final Set<String> ALWAYS_FENCED_PARTS = Set.of("timetable/progress", "effects");
     private static final Set<String> ALWAYS_FENCED_SEGMENTS = Set.of(
             "members", "resources", "checkpoints", "requests", "jokers");
+    private static final String STATE_PART = "state";
+    private static final String TEST_EVENT_PART = "events/test";
 
-    private enum Decision { NONE, REQUIRED, OWNED, STANDARD }
+    private enum Decision { NONE, REQUIRED, OWNED, STANDARD, GAME_STATE }
 
     /** One shared hold of the fence, released exactly once by the response filter or the servlet fallback. */
     public static final class Hold {
@@ -90,6 +100,9 @@ public class GameControllerFilter implements ContainerRequestFilter, ContainerRe
 
     @Inject
     private GameControllerService controller;
+
+    @Inject
+    private GameExecutionService execution;
 
     @Inject
     private GameOwnershipService ownership;
@@ -150,6 +163,13 @@ public class GameControllerFilter implements ContainerRequestFilter, ContainerRe
                 case STANDARD -> {
                     if (epoch != null) {
                         fence(request, userId, epoch);
+                    }
+                }
+                case GAME_STATE -> {
+                    if (epoch != null) {
+                        fence(request, userId, epoch);
+                    } else if (controller.status().active()) {
+                        request.abortWith(locked("Tool controls the game; stop it in Tool, or release control first"));
                     }
                 }
                 case OWNED -> {
@@ -223,12 +243,18 @@ public class GameControllerFilter implements ContainerRequestFilter, ContainerRe
                 }
                 Long id = number(path.get(1));
                 String part = String.join("/", path.subList(2, path.size()));
+                if (STATE_PART.equals(part)) {
+                    return Decision.GAME_STATE;
+                }
+                if (TEST_EVENT_PART.equals(part)) {
+                    return Decision.NONE;
+                }
                 if (ALWAYS_FENCED_PARTS.contains(part)
                         || path.size() > 2 && ALWAYS_FENCED_SEGMENTS.contains(path.get(2))) {
                     return Decision.REQUIRED;
                 }
-                Long executing = controller.executingSessionId();
-                return id != null && id.equals(executing) ? Decision.REQUIRED : Decision.NONE;
+                Long running = execution.runningSessionId();
+                return id != null && id.equals(running) ? Decision.REQUIRED : Decision.NONE;
             }
             case "permissions" -> {
                 return owned(permissionTargets(request)) ? Decision.OWNED : Decision.STANDARD;
@@ -246,11 +272,11 @@ public class GameControllerFilter implements ContainerRequestFilter, ContainerRe
                 if (path.size() < 2 || !"send".equals(path.get(1))) {
                     return Decision.NONE;
                 }
-                Long executing = controller.executingSessionId();
-                if (executing == null) {
+                Long running = execution.runningSessionId();
+                if (running == null) {
                     return Decision.STANDARD;
                 }
-                Set<Long> members = memberAccounts(executing);
+                Set<Long> members = memberAccounts(running);
                 List<String> recipients = request.getUriInfo().getQueryParameters().get("userId");
                 boolean reachesMember = recipients == null || recipients.isEmpty()
                         ? !members.isEmpty()

@@ -109,25 +109,25 @@ public abstract class GameScheduleTest extends GameTestBase {
                 new GameLogService.LogInput("operation", "2026-05-01T10:00:00Z", "first"),
                 new GameLogService.LogInput(GameLogService.SPEEDHUNT, "2026-05-01T10:00:01.250Z", "second"),
                 new GameLogService.LogInput("operation", "2026-05-01T10:00:02Z", "third")));
-        var page = logs.list(session, null, 2, null);
+        var page = logs.list(session, null, 2, null, false);
         assertEquals(List.of("first", "second"), page.items().stream().map(GameLogService.LogEntry::message)
                 .toList());
         assertTrue(page.hasMore());
         assertEquals(Instant.parse("2026-05-01T10:00:01.250Z"), page.items().get(1).occurredAt());
-        var rest = logs.list(session, page.nextCursor(), 2, null);
+        var rest = logs.list(session, page.nextCursor(), 2, null, false);
         assertEquals(List.of("third"), rest.items().stream().map(GameLogService.LogEntry::message).toList());
         assertFalse(rest.hasMore());
-        assertEquals(List.of("second"), logs.list(session, null, 10, GameLogService.SPEEDHUNT).items().stream()
+        assertEquals(List.of("second"), logs.list(session, null, 10, GameLogService.SPEEDHUNT, false).items().stream()
                 .map(GameLogService.LogEntry::message).toList());
-        assertTrue(logs.list(session(), null, 10, null).items().isEmpty());
+        assertTrue(logs.list(session(), null, 10, null, false).items().isEmpty());
         assertStatus(400, () -> logs.append(session, List.of(
                 new GameLogService.LogInput("bad category", "2026-05-01T10:00:00Z", "x"))));
         assertStatus(400, () -> logs.append(session, List.of(
                 new GameLogService.LogInput("operation", "yesterday", "x"))));
         assertStatus(400, () -> logs.append(session, List.of()));
-        assertStatus(400, () -> logs.list(session, "abc", 10, null));
-        assertStatus(404, () -> logs.list(-1, null, 10, null));
-        assertEquals(3, logs.list(session, null, 0, null).items().size());
+        assertStatus(400, () -> logs.list(session, "abc", 10, null, false));
+        assertStatus(404, () -> logs.list(-1, null, 10, null, false));
+        assertEquals(3, logs.list(session, null, 0, null, false).items().size());
     }
 
     // Timetables --------------------------------------------------------------------------------------------

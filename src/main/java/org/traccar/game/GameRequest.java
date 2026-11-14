@@ -14,13 +14,14 @@ import java.util.Set;
 
 /**
  * A self-service game request (tc_game_requests). {@code baseRevision} is the target's member state revision that a
- * hunter's request was based on. Labels are snapshots taken when the request was made.
+ * hunter's request was based on. Labels are snapshots taken when the request was made. Requests never expire with
+ * time; {@code expired} marks a waiting request that lapsed because its requester or target left the game.
  */
 public record GameRequest(long id, long gameSessionId, String type, Long requesterMemberId, String requesterLabel,
                           String requesterRole, Long targetMemberId, String targetLabel, Long baseRevision,
                           JsonNode parameters, String status, Boolean approvalRequired, String message,
-                          String detail, Long epoch, Instant createdAt, Instant expiresAt, Instant decidedAt,
-                          Instant completedAt, Instant updatedAt) {
+                          String detail, Long epoch, Instant createdAt, Instant decidedAt, Instant completedAt,
+                          Instant updatedAt) {
 
     public static final String PENDING = "pending";
     public static final String APPROVED = "approved";

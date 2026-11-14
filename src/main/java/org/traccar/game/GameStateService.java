@@ -189,20 +189,20 @@ public class GameStateService {
     }
 
     /**
-     * Hunter live shares, derived from the active live uploads that reach hunters, while the controller executes
-     * this session. Uploads of an earlier controller epoch are stale and not shown; nor are members who are caught
-     * or protected by a break, or uploads past their deadline.
+     * Hunter live shares, derived from the active live uploads that reach hunters, while the session's game runs.
+     * Until the server runs live uploads (phase 2), uploads sampled under an earlier controller epoch are stale and
+     * not shown; nor are members who are caught or protected by a break, or uploads past their deadline.
      */
     public List<LiveShare> liveShares(long sessionId) throws Exception {
         return read(sessionId, transaction -> liveShares(transaction, sessionId));
     }
 
     static List<LiveShare> liveShares(GameTransaction transaction, long sessionId) throws SQLException {
-        Long epoch = GameStateRepository.executingEpoch(transaction, sessionId);
         List<LiveShare> result = new ArrayList<>();
-        if (epoch == null) {
+        if (!GameExecutionService.running(transaction, sessionId)) {
             return result;
         }
+        long epoch = GameStateRepository.controllerEpoch(transaction);
         Instant now = transaction.now();
         Set<Long> included = new HashSet<>();
         for (GameState.LiveUpload upload : GameStateRepository.activeUploads(transaction, sessionId)) {

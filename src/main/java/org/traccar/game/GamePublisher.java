@@ -64,6 +64,10 @@ public interface GamePublisher {
         @Override
         public void operators(String topic) {
         }
+
+        @Override
+        public void gameEvents(List<GameEvent> events) {
+        }
     };
 
     /**
@@ -88,5 +92,8 @@ public interface GamePublisher {
 
     /** A resource only operators read changed, such as the controller lease. */
     void operators(String topic);
+
+    /** Execution events were committed: pushed to administrators only ({@code {"gameEvents": [...]}}). */
+    void gameEvents(List<GameEvent> events);
 
 }

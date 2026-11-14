@@ -6,9 +6,12 @@
  */
 package org.traccar.game;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.inject.Inject;
 import jakarta.inject.Singleton;
 
+import java.nio.charset.StandardCharsets;
 import java.sql.SQLException;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -17,6 +20,9 @@ import java.util.List;
 /**
  * The append-only session log (tc_game_session_logs), read by operators. It also holds what model 1 kept as
  * {@code speedhunt_events} in the Tool runtime: those entries use the category {@link #SPEEDHUNT}.
+ *
+ * <p>Rows with {@code data} are execution events ({@link GameEvent}): the server writes them for its own execution
+ * steps and pushes them to administrators after commit. Lines the Tool appends never carry data.
  */
 @Singleton
 public class GameLogService {
@@ -29,11 +35,14 @@ public class GameLogService {
     public record LogInput(String category, String occurredAt, String message) {
     }
 
-    public record LogEntry(long id, String category, Instant occurredAt, String message) {
+    /** A log row; {@code data} is set on execution events only. */
+    public record LogEntry(long id, String category, Instant occurredAt, String message, JsonNode data) {
     }
 
     public record LogPage(List<LogEntry> items, String nextCursor, boolean hasMore) {
     }
+
+    private static final ObjectMapper JSON = new ObjectMapper();
 
     private final GameTransactions transactions;
 
@@ -77,8 +86,53 @@ public class GameLogService {
         }
     }
 
-    /** One page of the log in insertion order, optionally of one category, after {@code cursor}. */
-    public LogPage list(long sessionId, String cursor, int requestedLimit, String category) throws Exception {
+    /**
+     * Writes an execution event inside a transaction that holds the session lock, and pushes it to administrators
+     * after commit. {@code data} is a JSON object of at most {@value GameEvent#MAX_DATA} bytes.
+     */
+    public static GameEvent event(GameTransaction transaction, GamePublisher publisher, long sessionId,
+                                  String category, String message, JsonNode data) throws SQLException {
+        if (!GameEvent.CATEGORIES.contains(category)) {
+            throw new IllegalArgumentException("Unknown game event category " + category);
+        }
+        if (data == null || !data.isObject()) {
+            throw new IllegalArgumentException("Game event data must be a JSON object");
+        }
+        String json;
+        try {
+            json = JSON.writeValueAsString(data);
+        } catch (com.fasterxml.jackson.core.JsonProcessingException error) {
+            throw new IllegalArgumentException(error);
+        }
+        if (json.getBytes(StandardCharsets.UTF_8).length > GameEvent.MAX_DATA) {
+            throw new IllegalArgumentException("Game event data exceeds " + GameEvent.MAX_DATA + " bytes");
+        }
+        String text = message.length() > MAX_MESSAGE ? message.substring(0, MAX_MESSAGE) : message;
+        Instant now = transaction.now();
+        long id = transaction.insert("INSERT INTO tc_game_session_logs (gamesessionid, category, occurredat, message,"
+                + " data) VALUES (?, ?, ?, ?, ?)", sessionId, category, now, text, json);
+        GameEvent event = new GameEvent(id, sessionId, category, now.toString(), text, data.deepCopy());
+        transaction.afterCommit(() -> publisher.gameEvents(List.of(event)));
+        return event;
+    }
+
+    private static JsonNode data(String value) {
+        if (value == null) {
+            return null;
+        }
+        try {
+            return JSON.readTree(value);
+        } catch (com.fasterxml.jackson.core.JsonProcessingException error) {
+            return null;
+        }
+    }
+
+    /**
+     * One page of the log in insertion order, optionally of one category, after {@code cursor}. With {@code events}
+     * only execution events (rows with data) are listed, so the Tool catches up by the last event ID it showed.
+     */
+    public LogPage list(long sessionId, String cursor, int requestedLimit, String category, boolean events)
+            throws Exception {
         int limit = requestedLimit == 0 ? 500 : requestedLimit;
         if (limit < 1 || limit > 1000 || cursor != null && !cursor.matches("[0-9]{1,18}")) {
             throw GameErrors.invalid("Invalid log pagination");
@@ -87,11 +141,12 @@ public class GameLogService {
         long after = cursor == null ? 0 : Long.parseLong(cursor);
         return transactions.read(transaction -> {
             GameDocumentService.sessionExists(transaction, sessionId);
-            List<LogEntry> items = transaction.list("SELECT id, category, occurredat, message"
+            List<LogEntry> items = transaction.list("SELECT id, category, occurredat, message, data"
                     + " FROM tc_game_session_logs WHERE gamesessionid = ? AND id > ?"
+                    + (events ? " AND data IS NOT NULL" : "")
                     + (filter == null ? "" : " AND category = ?") + " ORDER BY id", limit + 1,
                     rows -> new LogEntry(rows.getLong("id"), rows.getString("category"),
-                            GameTime.get(rows, "occurredat"), rows.getString("message")),
+                            GameTime.get(rows, "occurredat"), rows.getString("message"), data(rows.getString("data"))),
                     filter == null ? new Object[] {sessionId, after} : new Object[] {sessionId, after, filter});
             boolean more = items.size() > limit;
             List<LogEntry> page = more ? items.subList(0, limit) : items;

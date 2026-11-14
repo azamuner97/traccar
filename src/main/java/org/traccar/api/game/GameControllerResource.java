@@ -13,7 +13,6 @@ import jakarta.ws.rs.ForbiddenException;
 import jakarta.ws.rs.GET;
 import jakarta.ws.rs.HeaderParam;
 import jakarta.ws.rs.POST;
-import jakarta.ws.rs.PUT;
 import jakarta.ws.rs.Path;
 import jakarta.ws.rs.Produces;
 import jakarta.ws.rs.QueryParam;
@@ -22,18 +21,19 @@ import org.traccar.api.BaseResource;
 import org.traccar.game.GameControllerService;
 
 /**
- * The server-wide game controller lease: status, acquisition, renewal, release, forced takeover, the executing
- * session, and history. Operators are Traccar administrators in this version. {@link GameControllerService}
- * announces every change after its commit ({@value GameControllerService#INVALIDATION} to operators, and
- * {@code game-status} to the sessions that start or stop executing).
+ * The server-wide game controller lease: status, acquisition (with {@code resumeEpoch} after a loss of control),
+ * renewal, release, forced takeover, and history. Operators are Traccar administrators in this version. Whether a
+ * session's game runs is its game state ({@code PUT /game-sessions/{id}/state}), not the lease.
+ * {@link GameControllerService} announces every change after its commit ({@value GameControllerService#INVALIDATION}
+ * to operators).
  */
 @Path("game-controller")
 @Produces(MediaType.APPLICATION_JSON)
 @Consumes(MediaType.APPLICATION_JSON)
 public class GameControllerResource extends BaseResource {
 
-    public record InstanceRequest(String instanceId, String label) { }
-    public record SessionRequest(Long gameSessionId) { }
+    /** {@code resumeEpoch}: the epoch this instance held when it lost control (acquisition only). */
+    public record InstanceRequest(String instanceId, String label, Long resumeEpoch) { }
 
     @Inject
     private GameControllerService controller;
@@ -71,7 +71,8 @@ public class GameControllerResource extends BaseResource {
     @Path("acquire")
     public GameControllerService.Acquisition acquire(InstanceRequest request) throws Exception {
         checkOperator();
-        return controller.acquire(getUserId(), instance(request).instanceId(), request.label());
+        return controller.acquire(getUserId(), instance(request).instanceId(), request.label(),
+                request.resumeEpoch());
     }
 
     @POST
@@ -96,18 +97,6 @@ public class GameControllerResource extends BaseResource {
             throws Exception {
         checkOperator();
         return controller.release(getUserId(), epoch(header));
-    }
-
-    @PUT
-    @Path("session")
-    public GameControllerService.Lease session(
-            @HeaderParam(GameControllerService.EPOCH_HEADER) String header, SessionRequest request)
-            throws Exception {
-        checkOperator();
-        if (request == null) {
-            throw new BadRequestException("Executing session required");
-        }
-        return controller.setExecuting(getUserId(), epoch(header), request.gameSessionId());
     }
 
     @GET

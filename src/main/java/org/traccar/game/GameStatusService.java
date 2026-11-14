@@ -90,17 +90,17 @@ public class GameStatusService {
     }
 
     /**
-     * Anonymous progress of the speedhunt in the executing session, without ping history: of the given session
-     * (a member's), or of whichever session executes when it is null (administrators). Inactive while no Tool
-     * executes that session.
+     * Anonymous progress of the speedhunt in the running session, without ping history: of the given session
+     * (a member's), or of whichever session runs when it is null (administrators). Inactive while that session's
+     * game is stopped.
      */
     public GameStatus.SpeedhuntProgress speedhunt(Long sessionId) throws Exception {
         return transactions.read(transaction -> {
-            Optional<Long> executing = GameStateRepository.executingSession(transaction);
-            if (executing.isEmpty() || sessionId != null && !sessionId.equals(executing.get())) {
+            Optional<Long> running = GameExecutionService.runningSession(transaction);
+            if (running.isEmpty() || sessionId != null && !sessionId.equals(running.get())) {
                 return GameStatus.SpeedhuntProgress.INACTIVE;
             }
-            return new View(transaction, executing.get()).progress(false);
+            return new View(transaction, running.get()).progress(false);
         });
     }
 
@@ -118,11 +118,11 @@ public class GameStatusService {
                 hash(member.role(), view.active, projection), projection);
     }
 
-    /** A hash of what the member observes: role, control and projection; no identity, time or revision. */
-    static String hash(String role, boolean controllerActive, GameStatus.Projection projection) throws Exception {
+    /** A hash of what the member observes: role, game state and projection; no identity, time or revision. */
+    static String hash(String role, boolean running, GameStatus.Projection projection) throws Exception {
         Map<String, Object> content = new LinkedHashMap<>();
         content.put("role", role);
-        content.put("controllerActive", controllerActive);
+        content.put("running", running);
         content.put("status", projection);
         byte[] digest = MessageDigest.getInstance("SHA-256").digest(
                 CANONICAL.writeValueAsString(content).getBytes(StandardCharsets.UTF_8));
@@ -151,7 +151,7 @@ public class GameStatusService {
             this.transaction = transaction;
             this.session = session;
             this.now = transaction.now();
-            this.active = GameStateRepository.executingEpoch(transaction, session) != null;
+            this.active = GameExecutionService.running(transaction, session);
             this.settings = GameSettings.read(transaction, session);
             for (GameMember member : GameMemberRepository.list(transaction, session)) {
                 // A participant is an active player or supporter with a tracker, like model 1's published list.
@@ -202,7 +202,7 @@ public class GameStatusService {
             return livePings.isEmpty() ? null : livePings.keySet().iterator().next();
         }
 
-        /** Anonymous progress, the same for every member; inactive while no Tool controls the game. */
+        /** Anonymous progress, the same for every member; inactive while the game is stopped. */
         GameStatus.SpeedhuntProgress progress(boolean history) {
             Long target = active ? current() : null;
             if (target == null) {

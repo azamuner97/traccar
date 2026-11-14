@@ -40,10 +40,16 @@ import java.util.concurrent.locks.StampedLock;
  * and acquisition, release and takeover take it exclusively, so a request that passed the check completes
  * before the lease changes hands. Only one server instance uses the database.
  *
- * <p>A change of control ends every open game request ({@link GameRequestService#invalidateOpen}) after its commit,
- * while acquisition, release and takeover still hold the fence, so no fenced request of the new holder runs before.
- * Every change of the lease or of the executing session announces itself to operators ({@value #INVALIDATION}) and
- * changes the status (its {@code controllerActive}) of the sessions that stop or start executing.
+ * <p>The lease decides only which Tool may send fenced writes; whether a session's game runs is its game state
+ * ({@link GameExecutionService}), which no change of control touches. A change of control ends no request: a new
+ * epoch returns the requests still {@code executing} under an older epoch to {@code approved}
+ * ({@link GameRequestService#returnExecuting}), after its commit and while acquisition and takeover still hold the
+ * fence, so no fenced request of the new holder runs before. A request whose delivery was recorded already ended
+ * with that delivery. Every change of the lease announces itself to operators ({@value #INVALIDATION}).
+ *
+ * <p>A Tool that lost the lease re-acquires it without a takeover by naming its last epoch ({@code resumeEpoch}):
+ * granted while the lease is free and nobody acquired control since that epoch (a lease ended by a server restart is
+ * free), refused otherwise.
  */
 @Singleton
 public class GameControllerService {
@@ -56,9 +62,8 @@ public class GameControllerService {
     public static final String INVALIDATION = "game-controller";
 
     public record Holder(Long userId, String userLabel, String instanceId, String label) { }
-    public record Lease(long epoch, String state, boolean active, Holder holder, Long gameSessionId,
-                        String acquiredAt, String renewedAt, String expiresAt, String serverTime,
-                        int leaseSeconds, int renewSeconds) { }
+    public record Lease(long epoch, String state, boolean active, Holder holder, String acquiredAt,
+                        String renewedAt, String expiresAt, String serverTime, int leaseSeconds, int renewSeconds) { }
     public record HistoryEntry(long id, long epoch, String event, Long userId, String userLabel,
                                String instanceId, String label, Long gameSessionId, String detail,
                                String occurredAt) { }
@@ -66,7 +71,7 @@ public class GameControllerService {
     public record HistoryPage(List<HistoryEntry> items, String nextCursor, boolean hasMore) { }
 
     private record Row(long epoch, String state, Long userId, String userLabel, String instanceId, String label,
-                       Long gameSessionId, Instant acquiredAt, Instant renewedAt, Instant expiresAt) {
+                       Instant acquiredAt, Instant renewedAt, Instant expiresAt) {
         boolean active(Instant now) {
             return STATE_ACTIVE.equals(state) && expiresAt != null && expiresAt.isAfter(now);
         }
@@ -215,7 +220,7 @@ public class GameControllerService {
                 }
                 return new Row(rows.getLong("epoch"), rows.getString("state"), nullableLong(rows, "userid"),
                         rows.getString("userlabel"), rows.getString("instanceid"), rows.getString("label"),
-                        nullableLong(rows, "gamesessionid"), instant(rows, "acquiredat"),
+                        instant(rows, "acquiredat"),
                         instant(rows, "renewedat"), instant(rows, "expiresat"));
             }
         }
@@ -226,9 +231,8 @@ public class GameControllerService {
         String state = STATE_ACTIVE.equals(row.state()) && !active ? "expired" : row.state();
         Holder holder = row.instanceId() == null ? null
                 : new Holder(row.userId(), row.userLabel(), row.instanceId(), row.label());
-        return new Lease(row.epoch(), state, active, holder, active ? row.gameSessionId() : null,
-                iso(row.acquiredAt()), iso(row.renewedAt()), iso(row.expiresAt()), now.toString(),
-                leaseSeconds, renewSeconds);
+        return new Lease(row.epoch(), state, active, holder, iso(row.acquiredAt()), iso(row.renewedAt()),
+                iso(row.expiresAt()), now.toString(), leaseSeconds, renewSeconds);
     }
 
     private static String userLabel(Connection connection, long userId) throws SQLException {
@@ -269,36 +273,29 @@ public class GameControllerService {
     private void historyFor(Connection connection, Row row, String event, String detail, Instant at)
             throws SQLException {
         history(connection, row.epoch(), event, row.userId(), row.userLabel(), row.instanceId(), row.label(),
-                row.gameSessionId(), detail, at);
+                null, detail, at);
     }
 
-    static final String CONTROL_CHANGED = "Control of the game changed before this request was handled";
-
     /**
-     * After a committed change of control: ends the open requests, when control changed hands or ended, and
-     * announces the change. Failures are logged; the lease change itself is committed.
+     * After a committed change of control: a new {@code epoch} returns the requests still executing under an older
+     * one to {@code approved}; then the change is announced. Failures are logged; the lease change itself is
+     * committed, and the next acquisition returns what this one could not.
      */
-    private void changed(boolean controlChanged, Long executingBefore, Long executingAfter) {
-        if (controlChanged && requests != null) {
+    private void changed(Long epoch) {
+        if (epoch != null && requests != null) {
             try {
-                requests.invalidateOpen(CONTROL_CHANGED);
+                requests.returnExecuting(epoch);
             } catch (Exception error) {
-                LOGGER.warn("Open game requests could not be ended after a change of control", error);
+                LOGGER.warn("Executing game requests could not be returned after a change of control", error);
             }
         }
-        if (publisher == null) {
-            return;
-        }
-        publisher.operators(INVALIDATION);
-        for (Long session : new java.util.LinkedHashSet<>(java.util.Arrays.asList(executingBefore, executingAfter))) {
-            if (session != null) {
-                publisher.invalidate(new GamePublisher.Invalidation(session, GamePublisher.STATUS, null));
-            }
+        if (publisher != null) {
+            publisher.operators(INVALIDATION);
         }
     }
 
     private void end(Connection connection, String state, Instant at) throws SQLException {
-        try (var query = connection.prepareStatement("UPDATE tc_game_controller SET state = ?, gamesessionid = NULL,"
+        try (var query = connection.prepareStatement("UPDATE tc_game_controller SET state = ?,"
                 + " endedat = ? WHERE id = 1")) {
             query.setString(1, state);
             setTime(query, 2, at);
@@ -320,7 +317,10 @@ public class GameControllerService {
                 iso(instant(rows, "occurredat")));
     }
 
-    /** Unfenced administrator edits of game-owned resources since the previous acquisition. */
+    /**
+     * Unfenced administrator changes since the previous acquisition: edits of game-owned resources, and games
+     * stopped without control.
+     */
     private List<HistoryEntry> drift(Connection connection, long acquisitionId) throws SQLException {
         long since = 0;
         try (var query = connection.prepareStatement("SELECT MAX(id) FROM tc_game_controller_history"
@@ -334,7 +334,8 @@ public class GameControllerService {
         }
         List<HistoryEntry> result = new ArrayList<>();
         try (var query = connection.prepareStatement("SELECT * FROM tc_game_controller_history"
-                + " WHERE event = 'unfencedEdit' AND id > ? AND id < ? ORDER BY id")) {
+                + " WHERE (event = 'unfencedEdit' OR event = 'gameStopped' AND instanceid IS NULL)"
+                + " AND id > ? AND id < ? ORDER BY id")) {
             query.setLong(1, since);
             query.setLong(2, acquisitionId);
             query.setMaxRows(200);
@@ -371,12 +372,6 @@ public class GameControllerService {
         });
     }
 
-    /** The executing session of the active lease, or {@code null}. */
-    public Long executingSessionId() throws Exception {
-        Lease lease = status();
-        return lease.active() ? lease.gameSessionId() : null;
-    }
-
     private Acquisition start(Connection connection, Row current, long userId, String instanceId, String label,
                               boolean force, Instant now) throws Exception {
         String event = "acquired";
@@ -395,7 +390,7 @@ public class GameControllerService {
         String user = userLabel(connection, userId);
         Instant expires = now.plusSeconds(leaseSeconds);
         try (var query = connection.prepareStatement("UPDATE tc_game_controller SET epoch = ?, state = ?,"
-                + " userid = ?, userlabel = ?, instanceid = ?, label = ?, gamesessionid = NULL, acquiredat = ?,"
+                + " userid = ?, userlabel = ?, instanceid = ?, label = ?, acquiredat = ?,"
                 + " renewedat = ?, expiresat = ?, endedat = NULL WHERE id = 1")) {
             query.setLong(1, epoch);
             query.setString(2, STATE_ACTIVE);
@@ -418,14 +413,22 @@ public class GameControllerService {
         return row.label() == null || row.label().isBlank() ? who : who + " on " + row.label();
     }
 
+    public Acquisition acquire(long userId, String instanceId, String label) throws Exception {
+        return acquire(userId, instanceId, label, null);
+    }
+
     /**
      * Acquires a free or expired lease. Repeating the call from the instance that already holds the active
      * lease returns that lease unchanged, so a lost response can be retried safely.
+     *
+     * <p>With {@code resumeEpoch} (the epoch this instance held when it lost control) the lease is granted only if
+     * nobody acquired control since: the lease still carries that epoch, of this instance and account, and is no
+     * longer active (expired, released or ended by a server restart). Otherwise it answers 409, and the operator
+     * resumes or takes over explicitly.
      */
-    public Acquisition acquire(long userId, String instanceId, String label) throws Exception {
+    public Acquisition acquire(long userId, String instanceId, String label, Long resumeEpoch) throws Exception {
         instanceId(instanceId);
         return exclusive(() -> {
-            Long[] before = new Long[1];
             Acquisition result = transaction(connection -> {
                 Instant now = now();
                 Row current = row(connection, true);
@@ -433,11 +436,16 @@ public class GameControllerService {
                         && current.userId() != null && current.userId() == userId) {
                     return new Acquisition(lease(current, now), false, List.of());
                 }
-                before[0] = current.active(now) ? current.gameSessionId() : null;
+                if (resumeEpoch != null && !current.active(now) && (current.epoch() != resumeEpoch
+                        || !instanceId.equals(current.instanceId()) || current.userId() == null
+                        || current.userId() != userId)) {
+                    throw GameErrors.conflict("Control of the game changed since controller epoch " + resumeEpoch
+                            + " (now " + current.epoch() + "); resume control explicitly");
+                }
                 return start(connection, current, userId, instanceId, label, false, now);
             });
             if (result.acquired()) {
-                changed(true, before[0], null);
+                changed(result.lease().epoch());
             }
             return result;
         });
@@ -447,13 +455,11 @@ public class GameControllerService {
     public Acquisition takeover(long userId, String instanceId, String label) throws Exception {
         instanceId(instanceId);
         return exclusive(() -> {
-            Long[] before = new Long[1];
             Acquisition result = transaction(connection -> {
                 Row current = row(connection, true);
-                before[0] = current.active(now()) ? current.gameSessionId() : null;
                 return start(connection, current, userId, instanceId, label, true, now());
             });
-            changed(true, before[0], null);
+            changed(result.lease().epoch());
             return result;
         });
     }
@@ -482,13 +488,11 @@ public class GameControllerService {
     /** Releases the lease if {@code epoch} still holds it; releasing an already ended lease is a no-op. */
     public Lease release(long userId, long epoch) throws Exception {
         return exclusive(() -> {
-            Long[] before = new Long[1];
             boolean[] released = new boolean[1];
             Lease result = transaction(connection -> {
                 Instant now = now();
                 Row row = row(connection, true);
                 if (row.active(now) && row.epoch() == epoch && row.userId() != null && row.userId() == userId) {
-                    before[0] = row.gameSessionId();
                     historyFor(connection, row, "released", null, now);
                     end(connection, "released", now);
                     released[0] = true;
@@ -496,67 +500,24 @@ public class GameControllerService {
                 return lease(row(connection, false), now);
             });
             if (released[0]) {
-                changed(true, before[0], null);
+                changed(null);
             }
             return result;
         });
     }
 
-    /** Marks which stored session the controller executes ({@code null} stops execution). */
-    public Lease setExecuting(long userId, Long epoch, Long gameSessionId) throws Exception {
-        long stamp = lockShared();
-        try {
-            check(userId, epoch);
-            Long[] before = new Long[1];
-            boolean[] modified = new boolean[1];
-            Lease result = transaction(connection -> {
-                Instant now = now();
-                Row row = row(connection, true);
-                if (gameSessionId != null) {
-                    try (var query = connection.prepareStatement("SELECT id FROM tc_game_sessions WHERE id = ?")) {
-                        query.setLong(1, gameSessionId);
-                        try (var rows = query.executeQuery()) {
-                            if (!rows.next()) {
-                                throw new jakarta.ws.rs.NotFoundException("Game session not found");
-                            }
-                        }
-                    }
-                }
-                if (java.util.Objects.equals(row.gameSessionId(), gameSessionId)) {
-                    return lease(row, now);
-                }
-                before[0] = row.gameSessionId();
-                modified[0] = true;
-                try (var query = connection.prepareStatement(
-                        "UPDATE tc_game_controller SET gamesessionid = ? WHERE id = 1")) {
-                    setLong(query, 1, gameSessionId);
-                    query.executeUpdate();
-                }
-                history(connection, row.epoch(), gameSessionId == null ? "stoppedExecuting" : "executing",
-                        row.userId(), row.userLabel(), row.instanceId(), row.label(),
-                        gameSessionId == null ? row.gameSessionId() : gameSessionId, null, now);
-                return lease(row(connection, false), now);
-            });
-            if (modified[0]) {
-                changed(false, before[0], gameSessionId);
-            }
-            return result;
-        } finally {
-            unlockShared(stamp);
-        }
-    }
-
-    /** Ends a lease that survived a server restart; its holder must resume explicitly. */
+    /**
+     * Ends a lease that survived a server restart. Its holder re-acquires it automatically ({@code resumeEpoch}),
+     * since nobody acquired control meanwhile.
+     */
     public boolean endAfterRestart() throws Exception {
         return exclusive(() -> {
-            Long[] before = new Long[1];
             boolean ended = transaction(connection -> {
                 Instant now = now();
                 Row row = row(connection, true);
                 if (!STATE_ACTIVE.equals(row.state())) {
                     return false;
                 }
-                before[0] = row.gameSessionId();
                 if (row.active(now)) {
                     historyFor(connection, row, "serverRestart", null, now);
                     end(connection, "restarted", now);
@@ -567,7 +528,7 @@ public class GameControllerService {
                 return true;
             });
             if (ended) {
-                changed(true, before[0], null);
+                changed(null);
             }
             return ended;
         });
@@ -580,19 +541,17 @@ public class GameControllerService {
             return false;
         }
         return exclusive(() -> {
-            Long[] before = new Long[1];
             boolean expired = transaction(connection -> {
                 Row row = row(connection, true);
                 if (!STATE_ACTIVE.equals(row.state()) || row.active(now())) {
                     return false;
                 }
-                before[0] = row.gameSessionId();
                 historyFor(connection, row, "expired", null, row.expiresAt());
                 end(connection, "expired", row.expiresAt());
                 return true;
             });
             if (expired) {
-                changed(true, before[0], null);
+                changed(null);
             }
             return expired;
         });
