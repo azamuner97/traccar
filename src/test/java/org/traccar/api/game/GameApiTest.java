@@ -260,8 +260,8 @@ public abstract class GameApiTest extends GameTestBase {
 
     @Test
     void operatorsManageSessionsMembersAndResources() throws Exception {
-        assertEquals(new GameSessionResource.Capabilities(8), sessionsApi.capabilities());
-        assertEquals(8, GameSessionService.API_VERSION);
+        assertEquals(new GameSessionResource.Capabilities(9), sessionsApi.capabilities());
+        assertEquals(9, GameSessionService.API_VERSION);
         String name = "api-" + UUID.randomUUID();
         JsonNode created = sessionsApi.create(new GameSessionResource.CreateRequest(name, 5, null,
                 json("{\"game_settings\": " + SETTINGS + "}")));

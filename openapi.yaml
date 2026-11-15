@@ -84,7 +84,7 @@ tags:
   - name: Game Sessions
     description: >-
       Sessions, settings, members, resource rows, documents, timetable and logs (operators only). The game endpoints
-      describe game data model 2 (game-session API version 8): each participant is a member with a stable ID, typed
+      describe game data model 2 (game-session API version 9): each participant is a member with a stable ID, typed
       tables hold the game state, and the server computes every member's status. Operators are Traccar
       administrators. Members are resolved from the caller's account; an account without membership gets 403 from
       every member endpoint. Every time is an ISO-8601 instant in UTC. Players and supporters never receive member
@@ -3971,7 +3971,7 @@ paths:
   /game-sessions/capabilities:
     get:
       operationId: getGameCapabilities
-      summary: The game-session API version (7)
+      summary: The game-session API version (9)
       tags: [Game Sessions]
       responses:
         '200':
@@ -6880,7 +6880,15 @@ components:
             overAllocated} when a relay used its joker; waitingForLocation (once, when a tick finds no position at
             all) adds detail; ended adds endReason (deadline, caught, retired, runEnded, noJoker, rejected,
             gameStopped, or the Tool's own), detail, audiences, lastSampleAt, reason, for live speedhunt pings
-            pingDelivered, pingFailed and runCompleted (the completed run's ID), and for relays jokerUsed.
+            pingDelivered, pingFailed and runCompleted (the completed run's ID), and for relays jokerUsed. break
+            (break timers the server runs): started (a planned break started), waiting (a planned break reached its
+            start but cannot start yet; once per wait and reason), ended (an active break reached its deadline),
+            missed (a planned break's planned end passed before it could start; its joker returned). Every break
+            event has breakId, memberId, displayName, trackerId, plannedBy, reservationId, requestId and plannedStart
+            where known; started adds startedAt, deadline, late (its start passed while the game was not running,
+            so it ends at its planned end), waited, overAllocated and releasedFakes (armed timetable fakes inside
+            it); waiting adds reason (speedhunt, onBreak, refused) and detail (the refusal); ended adds endReason
+            (deadline), startedAt and deadline; missed adds plannedEnd and reason.
     GameLiveUpload:
       type: object
       description: >-
@@ -6950,7 +6958,7 @@ components:
       properties:
         apiVersion:
           type: integer
-          const: 8
+          const: 9
     GameSessionSummary:
       type: object
       properties:
@@ -7746,12 +7754,17 @@ components:
         (pings_per_speedhunt); one that ends without reaching anyone returns the pool joker armed for it.
         liveUploadEnded (liveUploadId, endReason) is the Tool's stop; endReason replaced (restarting with other
         audiences) neither fails the live ping nor completes its run. A catch ends the member's uploads and the
-        relays to them, runEnded ends the target's live ping (runEnded).
+        relays to them, runEnded ends the target's live ping (runEnded). breakStarted (requestId, optional
+        deadline) starts the immediate break of a jokerBreak request that succeeds in the same delivery; an active
+        break of the member past its deadline ends first. breakPlanned (memberId, plannedStart, overAllocate) and
+        breakCancelled (breakId, detail) plan and cancel a planned break. Planned breaks start, wait and are missed
+        on the server, and active breaks end at their deadline on the server, while the game runs (execution events
+        of category break); there is no operation for them.
       properties:
         type:
           type: string
           enum: [catch, release, pingDelivered, pingFailed, runEnded, liveUploadStarted, liveUploadEnded,
-                 breakPlanned, breakWaiting, breakStarted, breakEnded, breakCancelled, breakMissed, checkpoint]
+                 breakPlanned, breakStarted, breakCancelled, checkpoint]
       additionalProperties: true
     GameEffectsDelivery:
       type: object

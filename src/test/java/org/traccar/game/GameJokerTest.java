@@ -412,7 +412,7 @@ public abstract class GameJokerTest extends GameTestBase {
         // A break that starts now is used with its request's outcome and published with it.
         var now = submit(carla, GameRequest.BREAK, null);
         long revision = memberRevision(carla.id());
-        succeed(session, now.id(), new GameOperation.BreakStarted(null, now.id(), null));
+        succeed(session, now.id(), new GameOperation.BreakStarted(now.id(), null));
         assertEquals(revision + 1, memberRevision(carla.id()));
         var active = state.snapshot(session).breaks().stream().filter(GameState.Break::active).findFirst()
                 .orElseThrow();
@@ -421,7 +421,7 @@ public abstract class GameJokerTest extends GameTestBase {
         assertEquals(1, inventory(carla, GameJokerRepository.BREAK).used());
         grant(session, carla, GameJokerRepository.BREAK, 1);
         assertEquals("You are already on a break", message(() -> submit(carla, GameRequest.BREAK, null)));
-        assertStatus(409, () -> deliver(session, List.of(), new GameOperation.BreakStarted(null, now.id(), null)));
+        assertStatus(409, () -> deliver(session, List.of(), new GameOperation.BreakStarted(now.id(), null)));
         GameMember hunter = bound(session, "hunter");
         // Anna's speedhunt used one pool joker beyond the allocation.
         grant(session, null, GameJokerRepository.SPEEDHUNT, 2);
@@ -478,7 +478,7 @@ public abstract class GameJokerTest extends GameTestBase {
         // A plan whose start passed starts at once, with its full duration.
         clock.set(start.plusSeconds(5));
         long breakId = operatorPlan.plannedBreak().breakId();
-        apply(session, new GameOperation.BreakStarted(breakId, null, null));
+        breakTick(session);
         var started = state.breaks(session).stream().filter(item -> item.id() == breakId).findFirst()
                 .orElseThrow();
         assertEquals(start.plusSeconds(605), started.deadline());
@@ -582,7 +582,7 @@ public abstract class GameJokerTest extends GameTestBase {
                 anna.id()).id())).id();
         succeed(session, armed);
         var breakRequest = submit(anna, GameRequest.BREAK, null);
-        succeed(session, breakRequest.id(), new GameOperation.BreakStarted(null, breakRequest.id(), null));
+        succeed(session, breakRequest.id(), new GameOperation.BreakStarted(breakRequest.id(), null));
         assertEquals(0, inventory(anna, GameJokerRepository.FAKE_PING).reserved());
         assertEquals(0, inventory(anna, GameJokerRepository.FAKE_PING).used());
         assertTrue(message(() -> submit(anna, GameRequest.FAKE_PING, "{\"pingNumber\": 9, \"latitude\": 1,"
@@ -726,7 +726,7 @@ public abstract class GameJokerTest extends GameTestBase {
         grant(session, null, GameJokerRepository.SPEEDHUNT, 1);
 
         var breakRequest = submit(anna, GameRequest.BREAK, null);
-        succeed(session, breakRequest.id(), new GameOperation.BreakStarted(null, breakRequest.id(), null));
+        succeed(session, breakRequest.id(), new GameOperation.BreakStarted(breakRequest.id(), null));
         succeed(session, submit(anna, GameRequest.FAKE_PING, nextSpeedhunt(1, 47)).id());
         succeed(session, submit(anna, GameRequest.BREAK, "{\"startsAt\": \""
                 + clock.instant().plusSeconds(7200) + "\"}").id());
@@ -857,11 +857,15 @@ public abstract class GameJokerTest extends GameTestBase {
 
         // Access granted behind the server's back keeps the break from starting.
         execute("INSERT INTO tc_user_device (userid, deviceid) VALUES (?, ?)", hunter.userId(), anna.trackerId());
-        long breakId = plan.plannedBreak().breakId();
-        assertStatus(409, () -> apply(session, new GameOperation.BreakStarted(breakId, null, null)));
-        assertEquals(GameState.PLANNED, state.breaks(session).getFirst().state());
+        // The server's break timer waits with the refusal and starts the break once the access is gone.
+        breakTick(session);
+        assertEquals(GameState.WAITING, state.breaks(session).getFirst().state());
+        var waiting = publisher.events.stream().filter(event -> event.category().equals(GameEvent.BREAK))
+                .map(GameEvent::data).toList().getLast();
+        assertEquals(GameBreakEvents.REFUSED, waiting.get("reason").asText());
+        assertTrue(waiting.get("detail").asText().startsWith("The break cannot start"));
         execute("DELETE FROM tc_user_device WHERE userid = ?", hunter.userId());
-        apply(session, new GameOperation.BreakStarted(breakId, null, null));
+        breakTick(session);
         assertEquals(GameState.ACTIVE, state.breaks(session).getFirst().state());
         assertStatus(422, () -> rule.check(direct));
         assertReconciled(session);

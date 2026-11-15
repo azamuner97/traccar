@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.ws.rs.WebApplicationException;
 import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.TestInstance;
 import org.junit.jupiter.api.function.Executable;
@@ -261,6 +262,12 @@ public abstract class GameTestBase {
         createServices();
     }
 
+    /** Every test starts at {@link #T0}: the clock is shared by the tests of a class. */
+    @AfterEach
+    void resetClock() {
+        clock.set(T0);
+    }
+
     @AfterAll
     void restoreZone() {
         TimeZone.setDefault(zone);
@@ -419,13 +426,26 @@ public abstract class GameTestBase {
         startGame(session);
     }
 
-    /** Makes {@code session}'s game the running one, stopping any other, without the effects of a stop. */
+    /**
+     * Makes {@code session}'s game the running one since now, stopping any other, without the effects of a stop.
+     */
     protected void startGame(long session) throws SQLException {
         execute("UPDATE tc_game_session_state SET state = 'stopped', runningkey = NULL WHERE runningkey = 1");
-        if (execute("UPDATE tc_game_session_state SET state = 'running', runningkey = 1 WHERE gamesessionid = ?",
-                session) == 0) {
+        if (execute("UPDATE tc_game_session_state SET state = 'running', runningkey = 1, changedat = ?"
+                + " WHERE gamesessionid = ?", clock.instant(), session) == 0) {
             execute("INSERT INTO tc_game_session_state (gamesessionid, state, changedat, runningkey)"
-                    + " VALUES (?, 'running', ?, 1)", session, T0);
+                    + " VALUES (?, 'running', ?, 1)", session, clock.instant());
+        }
+    }
+
+    /**
+     * Runs the server's break timers once for {@code session}, as an execution tick does while its game runs: ends
+     * breaks past their deadline, starts, waits or misses planned breaks at their start ({@link GameBreakRunner}).
+     */
+    protected void breakTick(long session) throws Exception {
+        GameBreakRunner runner = new GameBreakRunner(transactions, publisher);
+        for (GameBreakRunner.Work work : runner.due(session, clock.instant())) {
+            runner.run(session, work);
         }
     }
 

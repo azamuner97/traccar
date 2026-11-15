@@ -83,6 +83,12 @@ public class GameExecutionService {
                 sessionId);
     }
 
+    /** Since when the session's game runs (its last start), or empty while it is stopped. */
+    public static Optional<Instant> runningSince(GameTransaction transaction, long sessionId) throws SQLException {
+        return transaction.first("SELECT changedat FROM tc_game_session_state WHERE gamesessionid = ?"
+                + " AND runningkey = 1", rows -> GameTime.get(rows, "changedat"), sessionId);
+    }
+
     /** The session whose game runs, if any (at most one per server). */
     public static Optional<Long> runningSession(GameTransaction transaction) throws SQLException {
         return transaction.first("SELECT gamesessionid FROM tc_game_session_state WHERE runningkey = 1",

@@ -58,11 +58,11 @@ answers it, and a Tool built for another version stops at connection.
   hidden game-state device.
 - **Typed operations.** The Tool decides and sends typed operations
   (`catch`, `release`, `pingDelivered`, `pingFailed`, `runEnded`,
-  `liveUploadStarted`, `liveUploadEnded`, `breakStarted`, `breakWaiting`,
-  `breakEnded`, `breakCancelled`, `breakMissed`, `checkpoint`) and ping intents
+  `liveUploadStarted`, `liveUploadEnded`, `breakPlanned`, `breakStarted`,
+  `breakCancelled`, `checkpoint`) and ping intents
   through `POST /api/game-sessions/{id}/effects`. The server validates every
   lifecycle transition (409 for an illegal one) and executes what has to happen
-  on time (the timetable, live uploads and relays; see below).
+  on time (the timetable, live uploads and relays, break timers; see below).
 - **Resource rows.** The Traccar resources a session owns are rows: members'
   accounts and trackers, mirrors (`tc_game_mirrors`), groups
   (`tc_game_session_groups`) and managed geofences
@@ -173,8 +173,12 @@ Each session has a game state (`tc_game_session_state`): `running` or
 closed or crashed Tool leaves the game running. At most one session runs per
 server (a unique `runningkey`). While it runs, members may submit requests and
 see "running"; the server executes its timetable (when the timetable toggle is
-on), its live uploads and relays, and will execute break timers for it (a later
-phase of `Claude outputs/game-execution-plan.md`).
+on), its live uploads and relays, and its break timers (`GameBreakRunner`):
+active breaks end at their deadline, planned breaks start at their start (they
+wait while any speedhunt runs or the member is still on a break), a start that
+passed while the game was stopped starts late and ends at its planned end, and
+a planned break whose planned end passed before it could start is missed and
+returns its joker. Stopping the game moves no break deadline.
 Changing the state is fenced, except that any administrator may stop a game
 without an epoch while no lease is active. Stopping ends the open requests
 (waiting ones are cancelled, executing ones fail; their jokers return) and the
@@ -290,7 +294,10 @@ ledger.
   `cancelled`, `missed`). A break that starts now is started in the delivery of
   its request's success. A break is refused while any speedhunt runs, while the
   member is caught and during another break. Planned breaks are private to their
-  owners (`status.plannedBreaks`) and operators.
+  owners (`status.plannedBreaks`) and operators. The server starts planned
+  breaks and ends breaks at their deadline (`break` execution events); a
+  participant's plan approved after its start time is planned from its
+  approval, so it starts at once with its full duration.
 - Fake plans have their own table (`tc_game_fake_ping_plans`): exactly one of a
   timetable entry or a speedhunt ping number, at most one fake per timetable
   entry and one unbound speedhunt fake per member. Owners cancel unbound fakes
@@ -677,7 +684,7 @@ repository-safety contract.
 3. Deploy the combined server and web build. Its migration drops the model-1
    game tables and their data; it keeps Traccar users, devices, ordinary
    drawings and the controller epoch.
-4. Release the matching Traccar Tool (game-session API version 8) and run
+4. Release the matching Traccar Tool (game-session API version 9) and run
    Device Setup for every new session: it plans members before it creates
    devices and accounts.
 5. Confirm managed devices have category `person`, integer

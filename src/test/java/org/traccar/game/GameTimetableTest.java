@@ -410,9 +410,8 @@ public abstract class GameTimetableTest extends GameTestBase {
         // A planned break of 10 minutes starts now: the 5-minute ping falls inside it, the 1-hour one does not.
         jokers.change(game.session(), new GameJokerService.Change(game.anna().id(), GameJokerRepository.BREAK, 1,
                 null), "Operator");
-        long planned = deliver(game.session(), new GameOperation.BreakPlanned(game.anna().id(), null, false))
-                .operations().getFirst().id();
-        deliver(game.session(), new GameOperation.BreakStarted(planned, null, null));
+        deliver(game.session(), new GameOperation.BreakPlanned(game.anna().id(), null, false));
+        breakTick(game.session());
         assertEquals(GameJokerRepository.RELEASED, reservationStatus(inside));
         assertEquals(GameJokerRepository.RESERVED, reservationStatus(after));
         // A catch releases every armed plan of the caught member.

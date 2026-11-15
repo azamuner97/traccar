@@ -404,7 +404,7 @@ public abstract class GameEffectsTest extends GameTestBase {
                 T0.toString(), "UTC", "Your break started", game.ben().id(), game.ben().id());
         String id = id();
         var delivery = new GameEffectsService.Delivery(id, List.of(),
-                List.of(new GameOperation.BreakStarted(null, request.id(), null)), null,
+                List.of(new GameOperation.BreakStarted(request.id(), null)), null,
                 new GameEffectsService.NotificationInput(generation, List.of(alert)),
                 List.of(new GameEffectsService.PushInput(game.ben().id(), "Break", "Your break started", null,
                                 alert.id()),

@@ -9,6 +9,7 @@ package org.traccar.schedule;
 import jakarta.inject.Inject;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.traccar.game.GameBreakRunner;
 import org.traccar.game.GameExecutionRunner;
 import org.traccar.game.GameExecutionService;
 import org.traccar.game.GameLiveUploadRunner;
@@ -25,8 +26,8 @@ import java.util.concurrent.ScheduledExecutorService;
  * than the shared schedule pool, it asks each runner what is due for the running session and runs it. Only the
  * running session executes, whatever the controller lease does; a stopped game executes nothing. Waits are
  * scheduled continuations on the same thread, never sleeps. The runners: the timetable, then live uploads and
- * relays. Only one server instance uses the database, so this in-process scheduler plus the session lock is
- * enough; a secondary instance does not run it.
+ * relays, then break timers. Only one server instance uses the database, so this in-process scheduler plus the
+ * session lock is enough; a secondary instance does not run it.
  */
 public class TaskGameExecution implements ScheduleTask {
 
@@ -39,8 +40,8 @@ public class TaskGameExecution implements ScheduleTask {
 
     @Inject
     public TaskGameExecution(GameTransactions transactions, GameScheduler scheduler, GameTimetableRunner timetable,
-                             GameLiveUploadRunner liveUploads) {
-        this(transactions, scheduler, List.of(timetable, liveUploads));
+                             GameLiveUploadRunner liveUploads, GameBreakRunner breaks) {
+        this(transactions, scheduler, List.of(timetable, liveUploads, breaks));
     }
 
     public TaskGameExecution(GameTransactions transactions, GameScheduler scheduler,

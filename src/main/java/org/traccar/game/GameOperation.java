@@ -28,11 +28,8 @@ import com.fasterxml.jackson.databind.JsonNode;
     @JsonSubTypes.Type(value = GameOperation.LiveUploadStarted.class, name = "liveUploadStarted"),
     @JsonSubTypes.Type(value = GameOperation.LiveUploadEnded.class, name = "liveUploadEnded"),
     @JsonSubTypes.Type(value = GameOperation.BreakPlanned.class, name = "breakPlanned"),
-    @JsonSubTypes.Type(value = GameOperation.BreakWaiting.class, name = "breakWaiting"),
     @JsonSubTypes.Type(value = GameOperation.BreakStarted.class, name = "breakStarted"),
-    @JsonSubTypes.Type(value = GameOperation.BreakEnded.class, name = "breakEnded"),
     @JsonSubTypes.Type(value = GameOperation.BreakCancelled.class, name = "breakCancelled"),
-    @JsonSubTypes.Type(value = GameOperation.BreakMissed.class, name = "breakMissed"),
     @JsonSubTypes.Type(value = GameOperation.Checkpoint.class, name = "checkpoint"),
 })
 public sealed interface GameOperation {
@@ -112,27 +109,16 @@ public sealed interface GameOperation {
     record BreakPlanned(long memberId, String plannedStart, Boolean overAllocate) implements GameOperation {
     }
 
-    /** A planned break reached its start while a speedhunt runs: it waits. */
-    record BreakWaiting(long breakId) implements GameOperation {
-    }
-
     /**
-     * A break starts: a planned or waiting break ({@code breakId}), or the immediate break of a {@code jokerBreak}
-     * request that succeeds in the same delivery ({@code requestId}). The deadline defaults to the configured break
-     * duration from now.
+     * The immediate break of a {@code jokerBreak} request that succeeds in the same delivery ({@code requestId}). The
+     * deadline defaults to the configured break duration from now. Planned breaks start, wait, end and are missed on
+     * the server ({@link GameBreakRunner}).
      */
-    record BreakStarted(Long breakId, Long requestId, String deadline) implements GameOperation {
-    }
-
-    record BreakEnded(long breakId) implements GameOperation {
+    record BreakStarted(Long requestId, String deadline) implements GameOperation {
     }
 
     /** A planned or waiting break is cancelled by an operator; its joker returns. */
     record BreakCancelled(long breakId, String detail) implements GameOperation {
-    }
-
-    /** A planned or waiting break was missed (its planned end passed before it could start); its joker returns. */
-    record BreakMissed(long breakId) implements GameOperation {
     }
 
     /** A component checkpoint written with the delivery. */

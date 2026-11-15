@@ -144,7 +144,8 @@ public abstract class GameStatusTest extends GameTestBase {
     private long breakFor(long session, GameMember member) throws Exception {
         long planned = apply(session, new GameOperation.BreakPlanned(member.id(), null, true)).results().getFirst()
                 .id();
-        apply(session, new GameOperation.BreakStarted(planned, null, null));
+        // The server starts a planned break at its start.
+        breakTick(session);
         return planned;
     }
 

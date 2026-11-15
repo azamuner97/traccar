@@ -186,18 +186,13 @@ public final class GameOperations {
                 case GameOperation.LiveUploadEnded item -> GameStateRepository.upload(transaction, session,
                         item.liveUploadId()).ifPresent(upload -> result.add(upload.memberId()));
                 case GameOperation.BreakPlanned item -> result.add(item.memberId());
-                case GameOperation.BreakWaiting item -> breakMember(transaction, session, item.breakId(), result);
                 case GameOperation.BreakStarted item -> {
-                    if (item.breakId() != null) {
-                        breakMember(transaction, session, item.breakId(), result);
-                    } else if (item.requestId() != null) {
+                    if (item.requestId() != null) {
                         GameRequestRepository.find(transaction, session, item.requestId())
                                 .map(GameRequest::targetMemberId).ifPresent(result::add);
                     }
                 }
-                case GameOperation.BreakEnded item -> breakMember(transaction, session, item.breakId(), result);
                 case GameOperation.BreakCancelled item -> breakMember(transaction, session, item.breakId(), result);
-                case GameOperation.BreakMissed item -> breakMember(transaction, session, item.breakId(), result);
                 case GameOperation.Checkpoint item -> {
                 }
             }
@@ -281,13 +276,8 @@ public final class GameOperations {
             case GameOperation.LiveUploadSample item -> liveUploadSample(index, item);
             case GameOperation.LiveUploadEnded item -> liveUploadEnded(index, item);
             case GameOperation.BreakPlanned item -> breakPlanned(index, item);
-            case GameOperation.BreakWaiting item -> breakWaiting(index, item);
             case GameOperation.BreakStarted item -> breakStarted(index, item);
-            case GameOperation.BreakEnded item -> breakEnded(index, item);
-            case GameOperation.BreakCancelled item -> breakReturned(index, item, item.breakId(),
-                    GameState.CANCELLED, item.detail() == null ? "Cancelled by an operator" : item.detail());
-            case GameOperation.BreakMissed item -> breakReturned(index, item, item.breakId(), GameState.MISSED,
-                    "The planned break was missed");
+            case GameOperation.BreakCancelled item -> breakCancelled(index, item);
             case GameOperation.Checkpoint item -> {
                 var checkpoint = GameDocumentService.putCheckpoint(transaction, objectMapper, session,
                         item.component(), item.expectedRevision(), item.schemaVersion(), item.document());
@@ -741,117 +731,150 @@ public final class GameOperations {
         result(index, item, id, null, null, null, GameState.PLANNED);
     }
 
-    private void breakWaiting(int index, GameOperation.BreakWaiting item) throws Exception {
-        GameState.Break pause = pendingOrActiveBreak(item.breakId());
-        if (!GameState.PLANNED.equals(pause.state())) {
-            throw GameErrors.conflict("Only a planned break can wait; break " + pause.id() + " is " + pause.state());
-        }
-        GameStateRepository.waitBreak(transaction, session, pause.id());
-        result(index, item, pause.id(), null, null, null, GameState.WAITING);
-    }
-
-    private void checkBreakCanStart(GameMember member) throws SQLException {
+    /**
+     * Why the member's break cannot start now, or null; an active break of the member that is past its deadline (it
+     * no longer protects) ends first, as the deadline ends it ({@link #endBreak}).
+     */
+    String breakBlocked(GameMember member) throws Exception {
         if (caught(member.id())) {
-            throw GameErrors.conflict("The " + member.label() + " is out of the game");
+            return "The " + member.label() + " is out of the game";
         }
-        if (GameStateRepository.activeBreak(transaction, session, member.id()).isPresent()) {
-            throw GameErrors.conflict("The " + member.label() + " is already on a break");
+        Optional<GameState.Break> active = GameStateRepository.activeBreak(transaction, session, member.id());
+        if (active.isPresent() && !active.get().protects(transaction.now())) {
+            endBreak(active.get());
+            active = Optional.empty();
+        }
+        if (active.isPresent()) {
+            return "The " + member.label() + " is already on a break";
         }
         if (GameStateRepository.speedhuntRunning(transaction, session)) {
-            throw GameErrors.conflict(BREAK_UNAVAILABLE);
+            return BREAK_UNAVAILABLE;
+        }
+        return null;
+    }
+
+    private void checkBreakCanStart(GameMember member) throws Exception {
+        String blocked = breakBlocked(member);
+        if (blocked != null) {
+            throw GameErrors.conflict(blocked);
         }
         // A break protects only while hunters see the participant through mirrors.
         GameAccessRule.checkBreakStart(transaction, session, member.id());
     }
 
-    private void breakStarted(int index, GameOperation.BreakStarted item) throws Exception {
-        if ((item.breakId() == null) == (item.requestId() == null)) {
-            throw GameErrors.invalid("A break start names either a planned break or a break request");
-        }
-        Instant deadline = deadline(item.deadline(), "break deadline");
-        long breakId;
-        long memberId;
-        if (item.breakId() != null) {
-            GameState.Break pause = pendingOrActiveBreak(item.breakId());
-            if (!pause.pending()) {
-                throw GameErrors.conflict("Break " + pause.id() + " is " + pause.state() + " and cannot start");
-            }
-            GameMember member = participant(pause.memberId());
-            checkBreakCanStart(member);
-            if (deadline == null) {
-                deadline = transaction.now().plusSeconds(breakSeconds());
-            }
-            var reservation = GameJokerRepository.reservation(transaction, session, pause.reservationId())
-                    .orElseThrow();
-            GameJokerRepository.consume(transaction, reservation, "Tool", "The planned break started");
-            GameStateRepository.startBreak(transaction, session, pause, deadline);
-            breakId = pause.id();
-            memberId = member.id();
-        } else {
-            GameRequest request = GameRequestRepository.find(transaction, session, item.requestId())
-                    .orElseThrow(() -> GameErrors.invalid("Request " + item.requestId() + " not found"));
-            if (!GameRequest.BREAK.equals(request.type()) || request.plannedBreak()) {
-                throw GameErrors.invalid("Request " + request.id() + " is not a break that starts now");
-            }
-            if (!GameRequest.SUCCEEDED.equals(request.status())) {
-                throw GameErrors.conflict("Request " + request.id() + " did not succeed");
-            }
-            if (GameStateRepository.breaks(transaction, session).stream()
-                    .anyMatch(other -> java.util.Objects.equals(other.requestId(), request.id()))) {
-                throw GameErrors.conflict("The break of request " + request.id() + " already started");
-            }
-            GameMember member = participant(request.targetMemberId());
-            checkBreakCanStart(member);
-            if (deadline == null) {
-                deadline = transaction.now().plusSeconds(breakSeconds());
-            }
-            Long reservationId = GameJokerRepository.ofRequest(transaction, session, request.id()).stream()
-                    .map(GameJokerRepository.Reservation::id).findFirst().orElse(null);
-            breakId = GameStateRepository.insertActiveBreak(transaction, session, member.id(), deadline,
-                    GameState.BY_PARTICIPANT, request.id(), reservationId);
-            immediateBreaks.add(request.id());
-            memberId = member.id();
-        }
-        // Armed timetable fakes inside the break are released when it starts.
+    /**
+     * What every break start does besides its row: armed timetable fakes of the member inside the break are released,
+     * and the member's jokers and status change (hunters see it).
+     *
+     * @return the number of timetable fakes released
+     */
+    private int breakBegins(long memberId, Instant deadline) throws SQLException {
+        int released = 0;
         for (var plan : GameJokerRepository.plans(transaction, session, "p.memberid = ? AND p.timetableentryid IS NOT"
                 + " NULL AND " + GameJokerRepository.ARMED, memberId)) {
             var entry = GameTimetableRepository.find(transaction, session, plan.timetableEntryId());
             if (entry.isPresent() && !entry.get().scheduledAt().isAfter(deadline)) {
                 GameJokerRepository.release(transaction,
                         GameJokerRepository.reservation(transaction, session, plan.reservationId()).orElseThrow(),
-                        "Tool", "Its timetable ping falls inside a break");
+                        actor, "Its timetable ping falls inside a break");
                 fakes.add(new FakeOutcome(plan.reservationId(), GameJokerRepository.RELEASED));
+                released++;
             }
         }
         jokerMembers.add(memberId);
         visible(memberId);
+        return released;
+    }
+
+    /** The immediate break of a {@code jokerBreak} request that succeeds with this delivery. */
+    private void breakStarted(int index, GameOperation.BreakStarted item) throws Exception {
+        if (item.requestId() == null) {
+            throw GameErrors.invalid("A break start names the break request it starts");
+        }
+        Instant deadline = deadline(item.deadline(), "break deadline");
+        GameRequest request = GameRequestRepository.find(transaction, session, item.requestId())
+                .orElseThrow(() -> GameErrors.invalid("Request " + item.requestId() + " not found"));
+        if (!GameRequest.BREAK.equals(request.type()) || request.plannedBreak()) {
+            throw GameErrors.invalid("Request " + request.id() + " is not a break that starts now");
+        }
+        if (!GameRequest.SUCCEEDED.equals(request.status())) {
+            throw GameErrors.conflict("Request " + request.id() + " did not succeed");
+        }
+        if (GameStateRepository.breaks(transaction, session).stream()
+                .anyMatch(other -> java.util.Objects.equals(other.requestId(), request.id()))) {
+            throw GameErrors.conflict("The break of request " + request.id() + " already started");
+        }
+        GameMember member = participant(request.targetMemberId());
+        checkBreakCanStart(member);
+        if (deadline == null) {
+            deadline = transaction.now().plusSeconds(breakSeconds());
+        }
+        Long reservationId = GameJokerRepository.ofRequest(transaction, session, request.id()).stream()
+                .map(GameJokerRepository.Reservation::id).findFirst().orElse(null);
+        long breakId = GameStateRepository.insertActiveBreak(transaction, session, member.id(), deadline,
+                GameState.BY_PARTICIPANT, request.id(), reservationId);
+        immediateBreaks.add(request.id());
+        breakBegins(member.id(), deadline);
         result(index, item, breakId, null, null, null, GameState.ACTIVE);
     }
 
-    private void breakEnded(int index, GameOperation.BreakEnded item) throws Exception {
+    private void breakCancelled(int index, GameOperation.BreakCancelled item) throws Exception {
         GameState.Break pause = pendingOrActiveBreak(item.breakId());
-        if (!pause.active()) {
-            throw GameErrors.conflict("Break " + pause.id() + " is " + pause.state() + " and cannot end");
-        }
-        GameStateRepository.finishBreak(transaction, session, pause.id(), GameState.ENDED);
-        visible(pause.memberId());
-        result(index, item, pause.id(), null, null, null, GameState.ENDED);
-    }
-
-    private void breakReturned(int index, GameOperation operation, long breakId, String state, String detail)
-            throws Exception {
-        GameState.Break pause = pendingOrActiveBreak(breakId);
         if (!pause.pending()) {
             throw GameErrors.conflict("Break " + pause.id() + " is " + pause.state() + " and cannot become "
-                    + state);
+                    + GameState.CANCELLED);
         }
+        returnBreak(pause, GameState.CANCELLED, item.detail() == null ? "Cancelled by an operator" : item.detail());
+        result(index, item, pause.id(), null, null, null, GameState.CANCELLED);
+    }
+
+    /** A planned or waiting break that never started ends ({@code cancelled} or {@code missed}); its joker returns. */
+    private void returnBreak(GameState.Break pause, String state, String detail) throws SQLException {
         GameStateRepository.finishBreak(transaction, session, pause.id(), state);
         var reservation = GameJokerRepository.reservation(transaction, session, pause.reservationId()).orElseThrow();
         if (reservation.reserved()) {
-            GameJokerRepository.release(transaction, reservation, "Tool", detail);
+            GameJokerRepository.release(transaction, reservation, actor, detail);
         }
         jokerMembers.add(pause.memberId());
-        result(index, operation, pause.id(), null, null, null, state);
+    }
+
+    // Breaks the server runs ({@link GameBreakRunner}) ------------------------------------------------------------
+
+    /**
+     * An active break ends ({@code ended}): at its deadline, or before a new break of its member once the deadline
+     * has passed. Hunters see it; an {@code ended} event is written.
+     */
+    void endBreak(GameState.Break pause) throws SQLException {
+        GameStateRepository.finishBreak(transaction, session, pause.id(), GameState.ENDED);
+        visible(pause.memberId());
+        GameBreakEvents.ended(transaction, publisher, session, pause);
+    }
+
+    /** A planned break waits at its start: it becomes {@code waiting} (members see that it waits). */
+    void waitBreak(GameState.Break pause) throws SQLException {
+        if (GameState.PLANNED.equals(pause.state())) {
+            GameStateRepository.waitBreak(transaction, session, pause.id());
+            jokerMembers.add(pause.memberId());
+        }
+    }
+
+    /** A planned or waiting break whose planned end passed before it could start is missed; its joker returns. */
+    void missBreak(GameState.Break pause) throws SQLException {
+        returnBreak(pause, GameState.MISSED, "The planned break was missed");
+    }
+
+    /**
+     * A planned or waiting break starts and lasts until {@code deadline}: its joker is used, and it takes effect like
+     * every break start ({@link #breakBegins}). The caller checked that it can start ({@link #breakBlocked} and the
+     * access rule).
+     *
+     * @return the number of armed timetable fakes it released
+     */
+    int startPlannedBreak(GameState.Break pause, Instant deadline) throws SQLException {
+        var reservation = GameJokerRepository.reservation(transaction, session, pause.reservationId()).orElseThrow();
+        GameJokerRepository.consume(transaction, reservation, actor, "The planned break started");
+        GameStateRepository.startBreak(transaction, session, pause, deadline);
+        return breakBegins(pause.memberId(), deadline);
     }
 
 }

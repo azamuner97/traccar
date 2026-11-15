@@ -229,6 +229,7 @@ public abstract class GameStateTest extends GameTestBase {
     @Test
     void breaksFollowTheirLifecycleAndOnlyStartAndEndAreVisible() throws Exception {
         long session = session("{\"break_duration_minutes\": 10}");
+        startGame(session);
         GameMember anna = bound(session, "player");
         GameMember ben = bound(session, "player");
         jokers.change(session, new GameJokerService.Change(anna.id(), GameJokerRepository.BREAK, 2, null),
@@ -238,39 +239,41 @@ public abstract class GameStateTest extends GameTestBase {
 
         long planned = applyId(session, new GameOperation.BreakPlanned(anna.id(), later.toString(), false));
         assertEquals(1, jokers.own(anna).reservations().size());
-        apply(session, new GameOperation.BreakWaiting(planned));
-        assertStatus(409, () -> apply(session, new GameOperation.BreakWaiting(planned)));
-        assertStatus(409, () -> apply(session, new GameOperation.BreakEnded(planned)));
-        // Planned and waiting breaks are private: hunters see no revision change.
-        assertEquals(revision, memberRevision(anna.id()));
+        breakTick(session);
+        assertEquals(GameState.PLANNED, pause(session, planned).state());
 
-        // No break starts while a speedhunt runs; the answer is the same for everyone.
+        // At its start a speedhunt runs: the server's timer makes it wait. Planned and waiting breaks are private:
+        // hunters see no revision change.
         long upload = applyId(session, upload(GameState.SPEEDHUNT_PING, ben, true, null));
-        assertEquals(GameOperations.BREAK_UNAVAILABLE, assertThrows(jakarta.ws.rs.WebApplicationException.class,
-                () -> apply(session, new GameOperation.BreakStarted(planned, null, null))).getMessage());
+        clock.set(later);
+        breakTick(session);
+        assertEquals(GameState.WAITING, pause(session, planned).state());
+        assertEquals(revision, memberRevision(anna.id()));
         apply(session, new GameOperation.LiveUploadEnded(upload, null));
 
-        apply(session, new GameOperation.BreakStarted(planned, null, null));
+        clock.set(later.plusSeconds(60));
+        breakTick(session);
         assertEquals(revision + 1, memberRevision(anna.id()));
         var active = state.snapshot(session).breaks().stream().filter(GameState.Break::active).findFirst()
                 .orElseThrow();
-        assertEquals(clock.instant().plusSeconds(600), active.deadline());
+        assertEquals(later.plusSeconds(660), active.deadline());
         assertEquals(1, jokers.own(anna).inventories().stream()
                 .filter(item -> item.type().equals(GameJokerRepository.BREAK)).findFirst().orElseThrow().used());
         assertStatus(409, () -> apply(session, new GameOperation.BreakCancelled(planned, null)));
-        assertStatus(409, () -> apply(session, new GameOperation.BreakStarted(planned, null, null)));
         assertStatus(409, () -> apply(session, ping(anna, 1)));
 
         long second = applyId(session, new GameOperation.BreakPlanned(anna.id(), later.plusSeconds(3600).toString(),
                 false));
-        assertStatus(409, () -> apply(session, new GameOperation.BreakStarted(second, null, null)));
-        apply(session, new GameOperation.BreakEnded(planned));
+        clock.set(later.plusSeconds(660));
+        breakTick(session);
+        assertEquals(GameState.ENDED, pause(session, planned).state());
         assertEquals(revision + 2, memberRevision(anna.id()));
-        assertStatus(409, () -> apply(session, new GameOperation.BreakEnded(planned)));
-        assertStatus(409, () -> apply(session, new GameOperation.BreakStarted(second, null,
-                clock.instant().minusSeconds(1).toString())));
-        apply(session, new GameOperation.BreakMissed(second));
-        assertStatus(409, () -> apply(session, new GameOperation.BreakMissed(second)));
+        // The game is stopped over the second break's start and runs again only after its planned end: missed.
+        stopGame(session);
+        clock.set(later.plusSeconds(3600 + 601));
+        startGame(session);
+        breakTick(session);
+        assertEquals(GameState.MISSED, pause(session, second).state());
         long third = applyId(session, new GameOperation.BreakPlanned(anna.id(), later.plusSeconds(9000).toString(),
                 false));
         apply(session, new GameOperation.BreakCancelled(third, null));
@@ -278,13 +281,29 @@ public abstract class GameStateTest extends GameTestBase {
 
         assertEquals(List.of(GameState.ENDED, GameState.MISSED, GameState.CANCELLED),
                 state.breaks(session).stream().map(GameState.Break::state).toList());
+        assertEquals(List.of(GameBreakEvents.WAITING, GameBreakEvents.STARTED, GameBreakEvents.ENDED,
+                GameBreakEvents.MISSED), publisher.events.stream()
+                .filter(event -> event.category().equals(GameEvent.BREAK))
+                .map(event -> event.data().get("type").asText()).toList());
         var inventory = jokers.own(anna).inventories().stream()
                 .filter(item -> item.type().equals(GameJokerRepository.BREAK)).findFirst().orElseThrow();
         assertEquals(1, inventory.used());
         assertEquals(1, inventory.available());
         assertEquals(List.of(), jokers.reconcile(session));
-        assertStatus(400, () -> apply(session, new GameOperation.BreakStarted(null, null, null)));
-        assertStatus(400, () -> apply(session, new GameOperation.BreakEnded(-1)));
+        assertStatus(400, () -> apply(session, new GameOperation.BreakStarted(null, null)));
+        // Planned starts, waits, deadline ends and misses are the server's own: the JSON API knows them no more.
+        for (String type : List.of("breakWaiting", "breakEnded", "breakMissed")) {
+            assertThrows(Exception.class, () -> mapper.readValue("{\"type\": \"" + type + "\", \"breakId\": "
+                    + planned + "}", GameOperation.class));
+        }
+        assertThrows(Exception.class, () -> mapper.readValue("{\"type\": \"breakStarted\", \"breakId\": "
+                + second + "}", GameOperation.class));
+        assertInstanceOf(GameOperation.BreakStarted.class, mapper.readValue("{\"type\": \"breakStarted\","
+                + " \"requestId\": 5}", GameOperation.class));
+    }
+
+    private GameState.Break pause(long session, long breakId) throws Exception {
+        return state.breaks(session).stream().filter(item -> item.id() == breakId).findFirst().orElseThrow();
     }
 
     @Test
@@ -296,11 +315,12 @@ public abstract class GameStateTest extends GameTestBase {
         long session = session("{\"break_duration_minutes\": 0.5}");
         GameMember ben = bound(session, "supporter");
         assertStatus(409, () -> apply(session, new GameOperation.BreakPlanned(ben.id(), null, false)));
-        long planned = applyId(session, new GameOperation.BreakPlanned(ben.id(), null, true));
+        applyId(session, new GameOperation.BreakPlanned(ben.id(), null, true));
         // A plan without a start, or with one that has passed, is due now; another break would overlap it.
         assertStatus(409, () -> apply(session, new GameOperation.BreakPlanned(ben.id(),
                 clock.instant().plusSeconds(10).toString(), true)));
-        apply(session, new GameOperation.BreakStarted(planned, null, null));
+        startGame(session);
+        breakTick(session);
         var inventory = jokers.own(ben).inventories().stream()
                 .filter(item -> item.type().equals(GameJokerRepository.BREAK)).findFirst().orElseThrow();
         assertEquals(1, inventory.used());

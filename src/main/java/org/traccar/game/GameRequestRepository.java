@@ -13,6 +13,7 @@ import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -139,9 +140,12 @@ public final class GameRequestRepository {
                     || request.plannedBreak()) {
                 GameJokerRepository.arm(transaction, reservation, null);
                 if (request.plannedBreak()) {
+                    // A plan approved after its start time starts now, with its full duration.
+                    Instant start = GameTime.parse(request.parameters().get("startsAt").asText(), "break start");
+                    Instant now = transaction.now();
+                    Instant from = (start.isAfter(now) ? start : now).truncatedTo(ChronoUnit.SECONDS);
                     GameStateRepository.insertPlannedBreak(transaction, request.gameSessionId(),
-                            request.targetMemberId(), GameTime.parse(request.parameters().get("startsAt").asText(),
-                                    "break start"), GameState.BY_PARTICIPANT, request.id(), reservation.id());
+                            request.targetMemberId(), from, GameState.BY_PARTICIPANT, request.id(), reservation.id());
                 }
             } else {
                 GameJokerRepository.consume(transaction, reservation, null, null);
