@@ -1,15 +1,20 @@
-"""Phase-0 outage drill of game execution (Claude outputs/game-execution-plan.md), automated with the Tool's code.
+"""Outage drill of game execution (Claude outputs/game-execution-plan.md, phases 0 and 2), automated with the Tool's code.
 
 A Tool (the Tool's own ``ControllerLease``, ``GameSessionApi`` and ``GameExecutionGateway``) controls a running game
-with an open request and a hunter circle. Its network then drops for 60 seconds: it stops renewing, so the lease
-expires. During the gap a member submits another request and an administrator writes a test event. After the gap
-the Tool reconnects and is expected to
+with an open request, a hunter circle, a speedhunt Live Ping and a live hunter relay (both started with the Tool's
+``liveUploadStarted`` intents). Its network then drops for 60 seconds: it stops renewing, so the lease expires.
+During the gap a member submits another request, an administrator writes a test event, and the participants'
+real trackers send positions. After the gap the Tool reconnects and is expected to
 
 - find the game still running,
 - re-acquire control on its own (``resumeEpoch``, no takeover),
 - find every open request untouched (nothing expired or ended),
 - find the hunter circle still published (120 s lifetime),
-- show the test event exactly once in its upload log, from the catch-up by event ID and a duplicate socket push.
+- find that the server kept running the Live Ping and the relay without it: the Live Ping counted ping 1 with
+  its first sample of a real position, the hunters' mirror and the relay mirror kept receiving positions, the
+  relay used its joker once,
+- show the test event and the live and relay events exactly once in its upload log, from the catch-up by event ID
+  and a duplicate socket push.
 
 It also checks that ``gameEvents`` reach administrators only. Run against the full Docker profile with Python that
 has ``websocket-client`` and ``requests``, for example Traccar Tool's virtual environment::
@@ -21,6 +26,7 @@ Creates and removes only its own fixtures; never resets volumes. ``--gap`` short
 """
 
 import argparse
+from datetime import datetime, timedelta, timezone
 import json
 import sys
 import time
@@ -56,6 +62,7 @@ def main(tool_source, gap):
     from traccar_game_manager.infrastructure.traccar.game_execution import GameExecutionGateway
     from traccar_game_manager.infrastructure.traccar.game_sessions import GameSessionApi
     from traccar_game_manager.infrastructure.traccar.transport import RequestsTransport
+    from traccar_game_manager.application.tracking.live_uploads import live_upload_ended, live_upload_started
     from traccar_game_manager.ui.live_session.game_state import LiveGameStateController
 
     api.wait_for_server()
@@ -73,14 +80,22 @@ def main(tool_source, gap):
         if snapshot.state != CONTROLLING:
             raise RuntimeError("Another Tool controls the development server; release control before the drill.")
         api.CONTROLLER["epoch"] = snapshot.epoch
-        session_id = api.create_game_session("drill")
-        members, credentials = {}, {}
+        session_id = api.create_game_session("drill", {"pings_per_speedhunt": 3})
+        members, credentials, trackers = {}, {}, {}
         for key, role in (("anna", "player"), ("ben", "player"), ("hunter", "hunter")):
             members[key] = api.plan(session_id, role, key)
             user, credentials[key] = fixtures.account("d-" + api.PREFIX[-16:] + "-" + key, readonly=True)
             api.bind_account(session_id, members[key]["id"], user["id"])
-            tracker = fixtures.device(api.PREFIX + "-" + key)
-            members[key] = api.bind_tracker(session_id, members[key]["id"], tracker["id"])
+            trackers[key] = fixtures.device(api.PREFIX + "-" + key)
+            members[key] = api.bind_tracker(session_id, members[key]["id"], trackers[key]["id"])
+        # Anna's hunters' mirror and the hunter's mirror relayed to Ben.
+        to_hunters = fixtures.device(api.PREFIX + "-anna-to-hunters", attributes={"traccarToolMirror": True})
+        api.add_mirror(session_id, to_hunters["id"], members["anna"]["id"], destination_role="hunter")
+        to_ben = fixtures.device(api.PREFIX + "-hunter-to-ben", attributes={"traccarToolMirror": True})
+        api.add_mirror(session_id, to_ben["id"], members["hunter"]["id"], destination_member_id=members["ben"]["id"])
+        for member_id, joker in ((None, "speedhunt"), (members["ben"]["id"], "hunterPositions")):
+            api.request("POST", f"/game-sessions/{session_id}/jokers/change", {
+                "memberId": member_id, "type": joker, "quantity": 1, "reason": "drill"})
 
         gateway = GameExecutionGateway(tool, session_id)
         assert gateway.start()["state"] == "running"
@@ -103,13 +118,23 @@ def main(tool_source, gap):
         api.request("PUT", f"/game-proximity/session/{session_id}", circle)
         before = gateway.events_after()
         last_shown = before[-1]["id"]
+        # A Live Ping on Anna and a live relay to Ben, started with the Tool's intents; the server runs both.
+        started = api.effects(session_id, operations=[
+            live_upload_started("speedhuntPing", member_id=members["anna"]["id"], audiences=("hunters",),
+                                interval_seconds=3, deadline=datetime.now(timezone.utc) + timedelta(minutes=4)),
+            live_upload_started("hunterRelay", member_id=members["ben"]["id"], interval_seconds=3, use_joker=True)])
+        live_id, relay_id = [item["id"] for item in started["operations"]]
         game_events(admin_socket, 0.5)
         game_events(member_socket, 0.5)
 
         # The drop: no renewal from now on. The lease expires after 30 s; the game keeps running.
         dropped = time.monotonic()
+        gap_started = datetime.now(timezone.utc)
         api.CONTROLLER["epoch"] = None
+        api.upload(trackers["anna"]["uniqueId"], 47.01, 8.01)
+        api.upload(trackers["hunter"]["uniqueId"], 47.11, 8.11)
         time.sleep(32)
+        api.upload(trackers["anna"]["uniqueId"], 47.02, 8.02)
         assert api.request("GET", "/game-controller")["active"] is False
         assert api.request("GET", f"/game-sessions/{session_id}/state")["state"] == "running"
         second = api.request("POST", "/game-requests", {"type": "speedhuntTerminate",
@@ -119,7 +144,7 @@ def main(tool_source, gap):
         test = api.request("POST", f"/game-sessions/{session_id}/events/test", {"message": "Outage drill"},
                            epoch=False)
         pushed = game_events(admin_socket, 3)
-        assert [item["id"] for item in pushed] == [test["id"]], pushed
+        assert test["id"] in [item["id"] for item in pushed], pushed
         assert game_events(member_socket, 1) == [], "members never receive execution events"
         time.sleep(max(0.0, gap - (time.monotonic() - dropped)))
 
@@ -140,6 +165,24 @@ def main(tool_source, gap):
         circles = api.request("GET", f"/game-proximity/session/{session_id}")["circles"]
         assert [item["id"] for item in circles] == ["drill-circle"], circles
 
+        # The server ran the Live Ping and the relay through the gap.
+        def positions(device_id, since):
+            return api.request("GET", f"/positions?deviceId={device_id}&from={api.iso(since)}"
+                                      f"&to={api.iso(minutes=1)}")
+        shared = positions(to_hunters["id"], gap_started)
+        assert [item["latitude"] for item in shared][:1] == [47.01] and shared[-1]["latitude"] == 47.02, shared
+        assert len(shared) >= 5, len(shared)
+        # A relayed position keeps the hunter's own fix time (whole seconds), sent at the start of the gap.
+        relayed = positions(to_ben["id"], gap_started - timedelta(seconds=5))
+        assert relayed and all(item["latitude"] == 47.11 for item in relayed), relayed
+        status = api.request("GET", "/game-status", credentials=credentials["hunter"])["status"]
+        anna = next(item for item in status["participants"] if item["memberId"] == members["anna"]["id"])
+        assert anna["speedhunt"]["running"] and anna["speedhunt"]["live"] and anna["speedhunt"]["pings"] == 1, anna
+        ben_jokers = api.request("GET", "/game-jokers", credentials=credentials["ben"])["inventories"]
+        assert next(item for item in ben_jokers if item["type"] == "hunterPositions")["used"] == 1, ben_jokers
+        api.effects(session_id, operations=[live_upload_ended(live_id, "stopped"),
+                                            live_upload_ended(relay_id, "stopped")])
+
         # The upload log: the catch-up by ID and a duplicate socket push show the test event once.
         shown = []
         owner = SimpleNamespace(
@@ -152,11 +195,20 @@ def main(tool_source, gap):
         window.attach(gateway, gateway.state(), last_event_id=last_shown)
         window.on_events([], reconnected=True)
         window.on_events(pushed, reconnected=False)
-        assert shown == ["Server test event: Outage drill (sent by " + test["data"]["sentBy"] + ")."], shown
+        test_line = "Server test event: Outage drill (sent by " + test["data"]["sentBy"] + ")."
+        assert shown.count(test_line) == 1, shown
+        assert sum(line.startswith("Ping 1 of 3 at ") and "(Live Ping to hunters" in line for line in shown) == 1, \
+            shown
+        assert sum(line.startswith("\nHunter live relay enabled for ben") for line in shown) == 1, shown
+        assert sum("One Get hunter positions joker of ben used." in line for line in shown) == 1, shown
+        assert len(shown) == len(set(shown)), shown
         print(f"Outage drill passed ({round(time.monotonic() - dropped)} s without the Tool): the game kept "
               "running, control was re-acquired automatically with a new epoch, both requests stayed open (one "
-              "submitted during the gap), the hunter circle survived, and the test event written during the gap "
-              "appeared in the upload log exactly once; execution events reached administrators only.")
+              "submitted during the gap), the hunter circle survived, the server kept running the Live Ping (ping 1 "
+              f"counted from a real position sent during the gap, {len(shared)} samples to the hunters' mirror) and "
+              "the live relay (its joker used once), and the test event and the live and relay events written "
+              "during the gap appeared in the upload log exactly once; execution events reached administrators "
+              "only.")
     finally:
         fixtures.close_sockets()
         if session_id is not None:

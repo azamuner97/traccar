@@ -1,4 +1,4 @@
-"""Local MySQL/HTTP audit of game data model 2 (game-session API version 7) with isolated fixtures.
+"""Local MySQL/HTTP audit of game data model 2 (game-session API version 8) with isolated fixtures.
 
 Creates a temporary administrator and temporary members' accounts, exercises the game-session, controller, member,
 request, joker, timetable and status endpoints directly and, with ``--tool-source``, through Traccar Tool's model-2
@@ -173,7 +173,7 @@ def audit_http(fixtures, user_credentials):
     """Admin-only access, revisions, encryption at rest, timetable identity by member, logs, cascading deletion."""
     api.request("GET", "/game-sessions", credentials=user_credentials, expected=403)
     api.request("GET", "/game-sessions/capabilities", credentials=user_credentials, expected=403)
-    assert api.request("GET", "/game-sessions/capabilities") == {"apiVersion": 7}
+    assert api.request("GET", "/game-sessions/capabilities") == {"apiVersion": 8}
     session_id = api.create_game_session("http", {"pings_per_speedhunt": 4})
     api.request("POST", "/game-sessions", {"name": api.PREFIX + "-http", "schemaVersion": 5, "config": {}},
                 expected=409)
@@ -880,6 +880,84 @@ def audit_timetable_execution(game):
     game.reconcile()
 
 
+def positions_since(device_id, since):
+    """Every position of a device from ``since`` on, oldest first."""
+    return api.request("GET", f"/positions?deviceId={device_id}&from={_iso(since)}"
+                              f"&to={_iso(datetime.now(timezone.utc) + timedelta(minutes=1))}")
+
+
+def audit_live_uploads(game):
+    """The server runs live uploads and relays: a manual live upload and a live hunter relay keep running while no
+    Tool holds the lease, the relay uses its joker with its first tick that delivers, hunters keep seeing the live
+    share, each step is a live or relay execution event the Tool catches up on, and the stops end them."""
+    anna, ben, hunter = game.member_id("anna"), game.member_id("ben"), game.member_id("hunter")
+    relay_mirror = game.fixtures.device(api.PREFIX + "-hunter-to-ben", attributes={"traccarToolMirror": True})
+    api.add_mirror(game.id, relay_mirror["id"], hunter, destination_member_id=ben)
+    game.change("ben", "hunterPositions", 1)
+    used = game.inventory("ben", "hunterPositions")["used"]
+    last = api.request("GET", f"/game-sessions/{game.id}/timetable")["execution"]["lastEventId"] or 0
+    since = datetime.now(timezone.utc) - timedelta(seconds=1)
+    started = game.effects(operations=[
+        {"type": "liveUploadStarted", "purpose": "manual", "sourceMemberId": anna, "toHunters": True,
+         "toPlayers": False, "toSupporters": False, "intervalSeconds": 2, "deadline": api.iso(minutes=3),
+         "reason": "Audit share"},
+        {"type": "liveUploadStarted", "purpose": "hunterRelay", "recipientMemberId": ben, "toHunters": False,
+         "toPlayers": False, "toSupporters": False, "intervalSeconds": 2, "useJoker": True}])
+    live_id, relay_id = [item["id"] for item in started["operations"]]
+    # Samples are the server's own ticks; a live ping is delivered by the server too.
+    game.effects(expected=400, operations=[{"type": "liveUploadSample", "liveUploadId": live_id}])
+    game.effects(expected=400, operations=[{"type": "pingDelivered", "targetMemberId": anna, "number": 1,
+                                            "mode": "live", "source": "real", "liveUploadId": live_id}])
+
+    # The Tool drops out: no lease is held while the uploads run.
+    epoch = api.CONTROLLER["epoch"]
+    api.release_controller()
+    try:
+        assert not api.request("GET", "/game-controller")["active"]
+        api.upload(game.trackers["anna"]["uniqueId"], 46.91, 7.41)
+        api.upload(game.trackers["hunter"]["uniqueId"], 46.92, 7.42)
+        deadline = time.time() + 30
+        while time.time() < deadline:
+            shared = positions_since(game.mirrors["anna"]["id"], since)
+            relayed = positions_since(relay_mirror["id"], since)
+            if len(shared) >= 2 and relayed:
+                break
+            time.sleep(1)
+        assert len(shared) >= 2 and shared[-1]["latitude"] == 46.91, shared
+        assert relayed and relayed[-1]["latitude"] == 46.92, relayed
+        assert game.inventory("ben", "hunterPositions")["used"] == used + 1
+        shares = game.status("hunter")["status"]["liveShares"]
+        assert [(item["memberId"], item["reason"]) for item in shares] == [(anna, "Audit share")], shares
+        # A new position goes out with the next tick, still without a lease; the joker is used once.
+        api.upload(game.trackers["anna"]["uniqueId"], 46.93, 7.43)
+        deadline = time.time() + 15
+        while time.time() < deadline and positions_since(game.mirrors["anna"]["id"], since)[-1]["latitude"] != 46.93:
+            time.sleep(1)
+        assert positions_since(game.mirrors["anna"]["id"], since)[-1]["latitude"] == 46.93
+        time.sleep(3)
+        assert game.inventory("ben", "hunterPositions")["used"] == used + 1
+    finally:
+        api.acquire_controller(resume=epoch)
+    assert api.CONTROLLER["epoch"] == epoch + 1
+    game.effects(operations=[{"type": "liveUploadEnded", "liveUploadId": live_id, "endReason": "stopped"},
+                             {"type": "liveUploadEnded", "liveUploadId": relay_id, "endReason": "stopped"}])
+    state = api.request("GET", f"/game-sessions/{game.id}/snapshot")["state"]
+    rows = {item["id"]: item for item in state["liveUploads"]}
+    assert rows[live_id]["state"] == "ended" and rows[live_id]["endReason"] == "stopped", rows[live_id]
+    assert rows[relay_id]["reservationId"] and rows[relay_id]["lastSampleAt"], rows[relay_id]
+    assert "controllerEpoch" not in rows[live_id], rows[live_id]
+    events = api.request("GET", f"/game-sessions/{game.id}/logs?events=true&after={last}")["items"]
+    live = [item["data"]["type"] for item in events if item["data"].get("liveUploadId") == live_id]
+    relay = [item for item in events if item["data"].get("liveUploadId") == relay_id]
+    assert live[0] == "started" and live[-1] == "ended" and "sample" in live, live
+    assert all(item["category"] == "relay" for item in relay), relay
+    sample = next(item["data"] for item in relay if item["data"]["type"] == "sample")
+    assert sample["joker"]["overAllocated"] is False and sample["hunters"] >= 1, sample
+    assert relay[-1]["data"]["type"] == "ended" and relay[-1]["data"]["jokerUsed"] is True, relay[-1]
+    assert not game.status("hunter")["status"]["liveShares"]
+    game.reconcile()
+
+
 def audit_speedhunt_fakes(game):
     """Speedhunt fakes: armed for the next run, bound at its first ping, applied to the hunters' mirror, private."""
     game.change("anna", "fakePing", 1)
@@ -1355,13 +1433,14 @@ def main(tool_source=None):
         audit_mirror_only_access(game)
         audit_timetable_fakes(game)
         audit_timetable_execution(game)
+        audit_live_uploads(game)
         audit_speedhunt_fakes(game)
         audit_retired_target(game)
         audit_control_changes(game)
         audit_participant_privacy(fixtures)
         if tool_source:
             audit_tool(tool_source)
-        print("MySQL/HTTP game-session audit passed: admin-only access, API version 7, revision conflicts and "
+        print("MySQL/HTTP game-session audit passed: admin-only access, API version 8, revision conflicts and "
               "idempotent retries, credential encryption at rest, timetable changesets (cells keyed by slot and "
               "member, canonical content, 422 rejections, retries), logs, "
               "cascading deletion, controller lease with fenced game and standard endpoints (path and body IDs, "
@@ -1373,7 +1452,9 @@ def main(tool_source=None):
               "jokers, catch and release, planned, waiting, started and cancelled breaks, mirror-only hunter "
               "access for permissions, group and device moves and bindings, timetable fakes (released on moves, "
               "ineligible content and cancellation), a timetable slot the server executes while no lease is held "
-              "(fake used, events caught up by ID, completion), speedhunt fakes bound at a run's first ping and applied to the "
+              "(fake used, events caught up by ID, completion), a live upload and a live relay the server runs while "
+              "no lease is held (joker used with the first delivering tick, live share kept, events, stops), "
+              "speedhunt fakes bound at a run's first ping and applied to the "
               "hunters' mirror, a retired speedhunt target ending its run, requests and live uploads, participant privacy (identical status, hash, refusals and announcements for a "
               "speedhunt's target), and timetable pings without cell content"
               + (", plus the Tool's request processor, break service and repository round trip." if tool_source

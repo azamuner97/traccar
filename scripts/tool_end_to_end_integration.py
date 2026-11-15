@@ -20,6 +20,7 @@ import secrets
 import sys
 import tempfile
 import time
+from zoneinfo import ZoneInfo
 
 import game_notification_integration as api
 
@@ -348,45 +349,54 @@ def game_flow(connection, clients, session, name, session_id, accounts, profile,
     overview = api.request("GET", "/game-status", credentials=ben_view)["status"]["participantOverview"]
     assert next(item for item in overview if item["memberId"] == anna.id)["caught"] is False, overview
 
-    # A Live Ping: a live upload whose first delivered sample is ping 1 of a new run (a pool joker).
+    # A Live Ping: a live upload the server runs; its first delivered sample is ping 1 of a new run (a pool
+    # joker). The Tool only starts and stops it, with the intents its live window builds.
+    from traccar_game_manager.application.tracking.live_uploads import live_upload_ended, live_upload_started
+    from traccar_game_manager.domain.game.execution_events import describe
     requests.change_jokers(None, "speedhunt", 2, "audit")
-    deadline = api.iso(minutes=2)
-    started = client.deliver_effects(operations=[{
-        "type": "liveUploadStarted", "purpose": "speedhuntPing", "sourceMemberId": anna.id, "toHunters": True,
-        "toPlayers": False, "toSupporters": False, "intervalSeconds": 10, "deadline": deadline}])
+    after = connection.api.events_after(session_id, None)
+    last_event = after[-1]["id"] if after else None
+    started = client.deliver_effects(operations=[live_upload_started(
+        "speedhuntPing", member_id=anna.id, audiences=("hunters",), interval_seconds=2,
+        deadline=datetime.now(timezone.utc) + timedelta(minutes=2))])
     upload = next(item for item in started["operations"] if item["operation"] == "liveUploadStarted")["id"]
     hunters_mirror = mirrors["player_1_to_hunters"]
-    first = client.upload_positions([{"uniqueId": hunters_mirror, "latitude": 47.37, "longitude": 8.54}],
-                                    operations=[{"type": "pingDelivered", "targetMemberId": anna.id, "number": 1,
-                                                 "mode": "live", "source": "real", "toHunters": True,
-                                                 "toPlayers": False, "toSupporters": False,
-                                                 "liveUploadId": upload}])
-    assert first["operations"][0]["runId"], first
-    client.upload_positions([{"uniqueId": hunters_mirror, "latitude": 47.371, "longitude": 8.541}],
-                            operations=[{"type": "liveUploadSample", "liveUploadId": upload}])
-    target = next(item for item in api.request("GET", "/game-status", credentials=hunter_view)["status"][
-        "participants"] if item["memberId"] == anna.id)
+    anna_unique = api.request("GET", f"/devices?id={anna_tracker}")[0]["uniqueId"]
+    api.upload(anna_unique, 47.37, 8.54)
+    deadline = time.time() + 30
+    target = {}
+    while time.time() < deadline:
+        target = next(item for item in api.request("GET", "/game-status", credentials=hunter_view)["status"][
+            "participants"] if item["memberId"] == anna.id)
+        if target["speedhunt"]["pings"] == 1:
+            break
+        time.sleep(1)
     assert target["speedhunt"]["running"] and target["speedhunt"]["live"] and target["speedhunt"]["pings"] == 1, target
+    shared = api.request("GET", f"/devices?uniqueId={hunters_mirror}")[0]
+    assert api.request("GET", f"/positions?id={shared['positionId']}")[0]["latitude"] == 47.37, shared
+    zone = ZoneInfo(session.get("local_tz") or "UTC")
+    lines = [describe(item, time_zone=zone).strip() for item in connection.api.events_after(session_id, last_event)
+             if item["category"] == "live"]
+    assert lines[0].startswith("Live Ping started for"), lines
+    assert any(line.startswith("Ping 1") and "(Live Ping to hunters" in line for line in lines), lines
     for credentials in (ben_view, accounts[("player", 1)]):
         speedhunt = api.request("GET", "/game-status", credentials=credentials)["status"]["speedhunt"]
         assert speedhunt["active"] and speedhunt["pingCount"] == 1, speedhunt
-    client.deliver_effects(operations=[{"type": "liveUploadEnded", "liveUploadId": upload, "endReason": "stopped"},
+    client.deliver_effects(operations=[live_upload_ended(upload, "stopped"),
                                        {"type": "runEnded", "targetMemberId": anna.id, "outcome": "terminated",
                                         "reason": "audit"}])
     history = api.request("GET", "/game-status/speedhunt-history", credentials=hunter_view)
     assert history["runs"][0]["pings"][0]["mode"] == "live", history
 
     # Manual live tracking: hunters see the share with the operator's reason; players never do.
-    manual = client.deliver_effects(operations=[{
-        "type": "liveUploadStarted", "purpose": "manual", "sourceMemberId": anna.id, "toHunters": True,
-        "toPlayers": False, "toSupporters": False, "intervalSeconds": 15, "deadline": api.iso(minutes=5),
-        "reason": "Public transport"}])
+    manual = client.deliver_effects(operations=[live_upload_started(
+        "manual", member_id=anna.id, audiences=("hunters",), interval_seconds=15,
+        deadline=datetime.now(timezone.utc) + timedelta(minutes=5), reason="Public transport")])
     manual_id = next(item for item in manual["operations"] if item["operation"] == "liveUploadStarted")["id"]
     shares = api.request("GET", "/game-status", credentials=hunter_view)["status"]["liveShares"]
     assert [(item["memberId"], item["reason"]) for item in shares] == [(anna.id, "Public transport")], shares
     assert "Public transport" not in json.dumps(api.request("GET", "/game-status", credentials=ben_view))
-    client.deliver_effects(operations=[{"type": "liveUploadEnded", "liveUploadId": manual_id,
-                                        "endReason": "stopped"}])
+    client.deliver_effects(operations=[live_upload_ended(manual_id, "stopped")])
 
     # A hunter relay: the hunters' positions reach Anna through her hunter mirror, using her joker.
     requests.change_jokers(anna.id, "hunterPositions", 1, "audit")
@@ -447,8 +457,10 @@ def game_flow(connection, clients, session, name, session_id, accounts, profile,
         assert connection.api.game_state(session_id)["state"] == "running"
     finally:
         other.close(5)
-    print("Tool game flow passed: catch and release by member, a Live Ping as a live upload starting a run with "
-          "a pool joker, live samples and history, manual live tracking with the reason for hunters only, a "
+    print("Tool game flow passed: catch and release by member, a Live Ping the server runs (started with the "
+          "Tool's intent, ping 1 delivered by the server's first sample of a real position, starting a run with a "
+          "pool joker, its live events in the upload log's wording) and its history, manual live tracking with the "
+          "reason for hunters only, a "
           "hunter relay using the participant's joker, a server restart (control lost%s, re-acquired "
           "automatically with a new epoch, game still running, game state unchanged), and a controller handover "
           "with the previous holder refused while the game keeps running."
