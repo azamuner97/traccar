@@ -1300,7 +1300,7 @@ def audit_tool(tool_source):
         name = api.PREFIX + "-tool"
         draft = default_session_template(name)
         draft["user_passwords"]["player"] = "player-" + secrets.token_hex(4)
-        draft["ping_table_file"] = "/local/only.xlsx"
+        draft["device_list_path"] = "/local/only.xlsx"
         session = repository.create(name, validate_session_document(draft, name))
         session_id = repository.session_id(name)
         api.GAME_SESSION_IDS.append(session_id)
@@ -1321,7 +1321,7 @@ def audit_tool(tool_source):
             jobs=ServerJobQueue()).load(name)
         assert reloaded["game_settings"]["pings_per_speedhunt"] == 7
         assert reloaded["user_passwords"]["player"] == draft["user_passwords"]["player"]
-        assert reloaded["ping_table_file"] == "", "Local paths must not be stored centrally"
+        assert reloaded["device_list_path"] == "", "Local paths must not be stored centrally"
         assert "game_status" not in reloaded
         stored = api.request("GET", f"/game-sessions/{session_id}")
         assert api.PASSWORD not in json.dumps(stored), "The Traccar admin password must not be stored centrally"

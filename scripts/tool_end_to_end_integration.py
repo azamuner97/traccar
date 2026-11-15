@@ -6,8 +6,9 @@ Run against the full Docker profile with Traccar Tool's virtual environment:
         --tool-source ../../Traccar-Tool/src
 
 It drives the Tool's own composition, not HTTP calls of its own: the server connection with the controller lease,
-the session repository, device setup with member planning and the device-list import, the Traccar client with the
-session's effects and game state, and the game services that need no window. See ``game_notification_integration``
+the session repository, device setup with member planning and the device-list import, the timetable editor's
+document (changesets, server rejections, conflicts, Excel round trip, the execution toggle), the Traccar client with
+the session's effects and game state, and the game services that need no window. See ``game_notification_integration``
 for the environment and the temporary administrator. Pushes reach only fixture accounts without push tokens.
 """
 
@@ -186,6 +187,7 @@ def main(tool_source):
               "the device list, generated accounts bound to members (no model-1 markers, no administrators), "
               "trackers and mirrors with role and session markers, mirror and group rows, mirror-only hunter access, an idempotent "
               "second run, and a device-list import that rebinds a replaced tracker to the same member.")
+        timetable_flow(connection, name, session_id, tmp.name)
         game_flow(connection, clients, session, name, session_id, accounts, profile, tmp.name)
         return connection, clients, session, name, session_id, accounts, members
     finally:
@@ -200,6 +202,111 @@ def main(tool_source):
             api.CONTROLLER["epoch"] = None
             api.delete_admin(admin_id)
             tmp.cleanup()
+
+
+def timetable_flow(connection, name, session_id, tmp):
+    """The timetable editor's document against the server: the Tool's own load, diff, save, rejection marking,
+    reload-and-re-apply, Excel export and import, and the execution toggle with its events."""
+    from zoneinfo import ZoneInfo
+
+    from traccar_game_manager.app.live_session import create_timetable_document
+    from traccar_game_manager.application.grid_documents import CONFLICT, REJECTED, SAVED
+    from traccar_game_manager.domain.game.execution_events import describe
+
+    zone = ZoneInfo("UTC")
+
+    def document():
+        made = create_timetable_document(connection.timetable_for(name), session_name=name,
+                                         server_url=connection.api.web_url, time_zone=zone, controlling=lambda: True)
+        made.apply_load(made.load_task()())
+        return made
+
+    def save(made):
+        task = made.save_task()
+        if not callable(task):
+            return task
+        try:
+            result = task()
+        except Exception as error:  # noqa: BLE001 - the document maps the port's errors to an outcome
+            return made.save_failed(error)
+        outcome = made.apply_save(result)
+        made.apply_load(made.load_task()())
+        return outcome
+
+    editor = document()
+    _participants, candidates = editor.roster()
+    names = {label.split(" (")[0]: member_id for member_id, label in candidates}
+    assert set(names) == {"Anna", "Ben", "Sue"}, candidates
+    editor.set_participants([names["Anna"], names["Ben"], names["Sue"]])
+    soon = editor.server_now().replace(microsecond=0) + timedelta(seconds=40)
+    editor.insert_row(soon)
+    start = (editor.server_now() + timedelta(minutes=10)).replace(second=0, microsecond=0)
+    added, _skipped = editor.generate_rows(start.strftime("%Y-%m-%d %H:%M"),
+                                           (start + timedelta(minutes=10)).strftime("%Y-%m-%d %H:%M"), 5)
+    assert added == 3, added
+    later = [row.key for row in editor.draft.rows if row.slot_id is None and row.scheduled_at >= start]
+    editor.apply_edits({(later[0], names["Anna"]): " 2h ", (later[0], names["Ben"]): "", (later[1], names["Sue"]): "b"})
+    outcome = save(editor)
+    assert outcome.kind == SAVED, outcome
+    # Saved rows are keyed by their slot from now on.
+    by_time = {row.scheduled_at: row.key for row in editor.draft.rows}
+    later = [by_time[start + timedelta(minutes=minutes)] for minutes in (0, 5, 10)]
+    assert all(key.startswith("s") for key in later), later
+    stored = connection.api.get_timetable(session_id)
+    cells = {(slot["scheduledAt"][11:16], entry["memberId"]): entry["content"] for slot in stored["slots"]
+             for entry in slot["entries"]}
+    assert cells[(start.strftime("%H:%M"), names["Anna"])] == "2H", cells
+    assert cells[(start.strftime("%H:%M"), names["Ben"])] == "", "a blank cell is stored as a real ping"
+    assert len(stored["participants"]) == 3 and len(stored["slots"]) == 4, stored
+
+    # A row that locked on the server while this Tool's clock lagged is rejected, marked, and nothing is saved.
+    near = editor.draft.row_for_slot(min(slot["id"] for slot in stored["slots"]))
+    time.sleep(max(0.0, (near.scheduled_at - editor.server_now()).total_seconds() - 12))
+    editor._offset -= timedelta(minutes=2)
+    editor.apply_edits({(near.key, names["Anna"]): "b", (later[2], names["Sue"]): "2S"})
+    outcome = save(editor)
+    assert outcome.kind == REJECTED and "frozen" in outcome.message, outcome
+    assert (near.key, names["Anna"]) in editor.rejected, editor.rejected
+    assert connection.api.get_timetable(session_id)["revision"] == stored["revision"]
+    editor.apply_load(editor.load_task()())
+
+    # Another editor saves first: this one reloads and re-applies its changes; a removed row's change is listed.
+    other = document()
+    other.delete_rows([later[1]])
+    outcome = save(other)
+    assert outcome.kind == SAVED, outcome
+    editor.apply_edits({(later[1], names["Ben"]): "2P", (later[2], names["Anna"]): "47.1, 8.5 | 2p"})
+    assert save(editor).kind == CONFLICT
+    reapplied = editor.apply_reapply(editor.reapply_task()())
+    assert len(reapplied.skipped) == 1 and "removed meanwhile" in reapplied.skipped[0], reapplied
+    assert save(editor).kind == SAVED
+    contents = {entry["content"] for slot in connection.api.get_timetable(session_id)["slots"]
+                for entry in slot["entries"]}
+    assert "47.1,8.5|2P" in contents, contents
+
+    # Excel: the exported draft imports again onto the same slots, with nothing to save.
+    path = Path(tmp) / "timetable.xlsx"
+    editor.export_task(path)()
+    imported = editor.import_task(path)()
+    result = editor.apply_import(imported)
+    assert not result.unmatched, result
+    assert not editor.dirty(), (result, editor.status())
+
+    # The toggle writes timetable events the upload log shows in the Tool's wording; leave it off and empty.
+    timetable = connection.timetable_for(name)
+    after = max((item["id"] for item in connection.api.events_after(session_id)), default=None)
+    timetable.set_execution(True)
+    timetable.set_execution(False)
+    events = [item for item in connection.api.events_after(session_id, after) if item["category"] == "timetable"]
+    shown = [describe(item, time_zone=zone).strip() for item in events]
+    assert [line.split(" (")[0] for line in shown] == ["Automated upload started", "Automated upload stopped"], shown
+    editor.apply_load(editor.load_task()())
+    editor.delete_rows([row.key for row in editor.draft.rows])
+    assert save(editor).kind == SAVED
+    print("Tool timetable editor passed: participants and generated rows saved as one changeset with canonical "
+          "cells, a server rejection (row frozen while the Tool's clock lagged) marked without saving anything, a "
+          "conflict reloaded and re-applied with the change that no longer applies listed, an Excel export that "
+          "imports onto the same slots, and the execution toggle's events in the upload log's wording.")
 
 
 def game_flow(connection, clients, session, name, session_id, accounts, profile, tmp):

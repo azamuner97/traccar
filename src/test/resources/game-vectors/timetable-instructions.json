@@ -1,5 +1,5 @@
 {
-  "description": "Timetable cell grammar (plan 1.2). Run by the server's TimetableInstructionTest and by the Tool's tests/domain/test_shared_vectors.py against parse_timetable_instruction. 'audiences' receive the real position, 'fakeAudiences' the coordinate. 'tool' overrides the expectation where the Tool's parser differs (it rejects lowercase target codes).",
+  "description": "Timetable cell grammar (plan 1.2). Run by the server's TimetableInstructionTest and by the Tool's tests/domain/test_shared_timetable_vectors.py against parse_timetable_instruction and canonical_instruction. 'audiences' receive the real position, 'fakeAudiences' the coordinate; 'canonical' is the stored spelling.",
   "cases": [
     {
       "input": "x",
@@ -158,10 +158,7 @@
       ],
       "fakeEligible": true,
       "hunterFacing": true,
-      "tool": {
-        "kind": "invalid"
-      },
-      "note": "The server accepts target codes in any letter case"
+      "note": "Target codes are accepted in any letter case and stored in upper case"
     },
     {
       "input": "2p2s",
@@ -173,10 +170,7 @@
       ],
       "fakeEligible": false,
       "hunterFacing": false,
-      "tool": {
-        "kind": "invalid"
-      },
-      "note": "The server accepts target codes in any letter case"
+      "note": "Target codes are accepted in any letter case and stored in upper case"
     },
     {
       "input": "2H2P",
@@ -366,10 +360,7 @@
       ],
       "fakeEligible": false,
       "hunterFacing": true,
-      "tool": {
-        "kind": "invalid"
-      },
-      "note": "The server accepts target codes in any letter case"
+      "note": "Target codes are accepted in any letter case and stored in upper case"
     },
     {
       "input": "47.1,8.5|2P|2H",
