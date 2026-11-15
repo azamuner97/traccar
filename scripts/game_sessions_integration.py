@@ -1,4 +1,4 @@
-"""Local MySQL/HTTP audit of game data model 2 (game-session API version 8) with isolated fixtures.
+"""Local MySQL/HTTP audit of game data model 2 (game-session API version 9) with isolated fixtures.
 
 Creates a temporary administrator and temporary members' accounts, exercises the game-session, controller, member,
 request, joker, timetable and status endpoints directly and, with ``--tool-source``, through Traccar Tool's model-2
@@ -173,7 +173,7 @@ def audit_http(fixtures, user_credentials):
     """Admin-only access, revisions, encryption at rest, timetable identity by member, logs, cascading deletion."""
     api.request("GET", "/game-sessions", credentials=user_credentials, expected=403)
     api.request("GET", "/game-sessions/capabilities", credentials=user_credentials, expected=403)
-    assert api.request("GET", "/game-sessions/capabilities") == {"apiVersion": 8}
+    assert api.request("GET", "/game-sessions/capabilities") == {"apiVersion": 9}
     session_id = api.create_game_session("http", {"pings_per_speedhunt": 4})
     api.request("POST", "/game-sessions", {"name": api.PREFIX + "-http", "schemaVersion": 5, "config": {}},
                 expected=409)
@@ -558,13 +558,26 @@ def audit_speedhunt_jokers(game):
     game.reconcile()
 
 
+def break_events(game, after):
+    """The break execution events after an event ID, oldest first."""
+    return [item for item in api.request("GET", f"/game-sessions/{game.id}/logs?events=true&after={after}")["items"]
+            if item["category"] == "break"]
+
+
+def last_event_id(game):
+    return api.request("GET", f"/game-sessions/{game.id}/timetable")["execution"]["lastEventId"] or 0
+
+
 def audit_breaks(game, tool_source=None):
-    """Break jokers: a configured duration, one refusal for everyone during speedhunts, the computed break."""
+    """Break jokers: a configured duration, one refusal for everyone during speedhunts, the computed break, which
+    the server ends at its deadline."""
     grant = {"memberId": game.member_id("anna"), "type": "break", "quantity": 1, "reason": "audit"}
     change = f"/game-sessions/{game.id}/jokers/change"
     assert "break duration" in refusal(change, grant)
-    api.config(game.id, {"pings_per_speedhunt": 4, "break_duration_minutes": 15})
+    # A 15-second break, so the audit sees the server end it.
+    api.config(game.id, {"pings_per_speedhunt": 4, "break_duration_minutes": 0.25})
     game.change("anna", "break", 2)
+    last = last_event_id(game)
 
     pause = {"type": "jokerBreak"}
     # While any speedhunt runs, the answer is the same whether it targets the requester or someone else.
@@ -581,13 +594,13 @@ def audit_breaks(game, tool_source=None):
     assert request["targetMemberId"] == game.member_id("anna") and request["type"] == "jokerBreak", request
     assert game.inventory("anna", "break")["reserved"] == 1
     if tool_source:
-        run_break_through_tool(tool_source, game)
+        run_break_through_tool(tool_source, game, 0.25)
         active = [item for item in api.request("GET", f"/game-sessions/{game.id}/jokers")["reservations"]
                   if item["type"] == "break" and item["status"] == "reserved"]
         assert not active, active
     else:
         game.claim(request["id"])
-        game.succeed(request["id"], "Your break runs for 15 min.",
+        game.succeed(request["id"], "Your break runs for 15 s.",
                      operations=[{"type": "breakStarted", "requestId": request["id"]}])
     done = next(item for item in game.requests("anna") if item["id"] == request["id"])
     assert done["status"] == "succeeded", done
@@ -607,13 +620,24 @@ def audit_breaks(game, tool_source=None):
     assert refusal("/game-requests", pause, game.credentials["anna"]) == "You are already on a break"
     game.ping("anna", 1, expected=409)
 
-    # The Tool ends the break at its deadline: hunters may act on the participant again.
+    # The server ends the break at its deadline: hunters may act on the participant again. Ending, waiting, missing
+    # and starting a planned break are no Tool operations any more.
     snapshot = api.request("GET", f"/game-sessions/{game.id}/snapshot")
     active = [item for item in snapshot["state"]["breaks"] if item["state"] == "active"]
     assert len(active) == 1, snapshot["state"]["breaks"]
-    game.effects(operations=[{"type": "breakEnded", "breakId": active[0]["id"]}])
-    game.effects(operations=[{"type": "breakEnded", "breakId": active[0]["id"]}], expected=409)
+    break_id = active[0]["id"]
+    for operation in ({"type": "breakEnded", "breakId": break_id}, {"type": "breakWaiting", "breakId": break_id},
+                      {"type": "breakMissed", "breakId": break_id}, {"type": "breakStarted", "breakId": break_id}):
+        game.effects(operations=[operation], expected=400)
+    deadline = time.time() + 30
+    while time.time() < deadline and game.status("anna")["status"]["break"]["active"]:
+        time.sleep(1)
     assert not game.status("anna")["status"]["break"]["active"]
+    ended = [item for item in break_events(game, last) if item["data"]["breakId"] == break_id]
+    assert [item["data"]["type"] for item in ended] == ["ended"], ended
+    assert ended[0]["data"]["endReason"] == "deadline" and ended[0]["data"]["memberId"] == game.member_id("anna")
+    assert ended[0]["message"] == "The break of Anna ended (time is up).", ended[0]
+    api.config(game.id, {"pings_per_speedhunt": 4, "break_duration_minutes": 15})
     resumed = game.submit("hunter", {**ping, "baseRevision": game.revision("anna")})
     api.request("POST", f"/game-requests/{resumed['id']}/cancel", {}, credentials=game.credentials["hunter"])
     kinds = game.ledger("break")
@@ -674,21 +698,80 @@ def audit_planned_breaks(game, tool_source=None):
     first_break, second_break = by_start[_iso(later)]["breakId"], by_start[_iso(second_start)]["breakId"]
     assert first and second
     # Operator plans cannot be cancelled by the participant (no reservation of their own request).
-    # The planned start arrives while a speedhunt runs: the break waits, then starts when it ends.
-    game.effects(operations=[{"type": "breakWaiting", "breakId": first_break}])
-    assert next(item for item in plans() if item["breakId"] == first_break)["state"] == "waiting"
+    # The operator cancels both (the server starts, waits and misses planned breaks: audit_break_timers).
     game.end_run("ben")
-    game.effects(operations=[{"type": "breakStarted", "breakId": first_break}])
-    assert game.status("anna")["status"]["break"]["active"]
-    game.effects(operations=[{"type": "breakCancelled", "breakId": second_break, "detail": "Cancelled by the operator"}])
+    for break_id in (first_break, second_break):
+        game.effects(operations=[{"type": "breakCancelled", "breakId": break_id,
+                                  "detail": "Cancelled by the operator"}])
+    game.effects(operations=[{"type": "breakCancelled", "breakId": first_break}], expected=409)
     assert plans() == []
     inventory = game.inventory("anna", "break")
     assert inventory["reserved"] == 0 and inventory["overAllocated"] == 0, inventory
-    game.effects(operations=[{"type": "breakEnded", "breakId": first_break}])
     if tool_source:
         sys.path.insert(0, tool_source)
         from traccar_game_manager.application.game_actions.planned_breaks import planned_breaks as tool_plans
         assert tool_plans(api.request("GET", f"/game-sessions/{game.id}/jokers")) == {}
+    game.reconcile()
+
+
+def audit_break_timers(game):
+    """The server runs break timers while no Tool holds the lease: a break ends at its deadline, a planned break waits
+    while a speedhunt (a Live Ping) runs and starts with its full duration once it ended, each step a break event
+    the Tool catches up on by ID."""
+    api.config(game.id, {"pings_per_speedhunt": 4, "break_duration_minutes": 0.2})
+    ben, sue = game.member_id("ben"), game.member_id("sue")
+    game.change("ben", "break", 1)
+    game.change("sue", "break", 1)
+    # Dora's tracker never sends a position: her Live Ping reaches nobody and ends at its deadline.
+    dora = game.add("dora", "player", "Dora")["id"]
+    last = last_event_id(game)
+    request = game.submit("ben", {"type": "jokerBreak"})
+    game.claim(request["id"])
+    started = game.succeed(request["id"], "Your break runs for 12 s.",
+                           operations=[{"type": "breakStarted", "requestId": request["id"]}])
+    ben_break = started["operations"][0]["id"]
+    sue_start = datetime.now(timezone.utc).replace(microsecond=0) + timedelta(seconds=6)
+    api.request("POST", f"/game-sessions/{game.id}/jokers/breaks", {"memberId": sue, "startsAt": _iso(sue_start)})
+    sue_break = next(item["breakId"] for item in game.status("sue")["status"]["plannedBreaks"])
+    live = game.effects(operations=[{
+        "type": "liveUploadStarted", "purpose": "speedhuntPing", "sourceMemberId": dora, "toHunters": True,
+        "toPlayers": False, "toSupporters": False, "intervalSeconds": 2, "deadline": api.iso(seconds=16),
+        "overAllocate": True}])["operations"][0]["id"]
+
+    epoch = api.CONTROLLER["epoch"]
+    api.release_controller()
+    try:
+        assert not api.request("GET", "/game-controller")["active"]
+        deadline = time.time() + 60
+        events = []
+        while time.time() < deadline:
+            events = break_events(game, last)
+            if any(item["data"]["breakId"] == sue_break and item["data"]["type"] == "ended" for item in events):
+                break
+            time.sleep(1)
+        by_break = {}
+        for item in events:
+            by_break.setdefault(item["data"]["breakId"], []).append(item["data"])
+        assert [item["type"] for item in by_break.get(ben_break, ())] == ["ended"], by_break
+        assert [item["type"] for item in by_break.get(sue_break, ())] == ["waiting", "started", "ended"], by_break
+        waiting, start, end = by_break[sue_break]
+        assert waiting["reason"] == "speedhunt" and waiting["plannedStart"] == _iso(sue_start), waiting
+        assert start["waited"] is True and start["late"] is False and start["plannedBy"] == "operator", start
+        live_end = next(item for item in api.request("GET", f"/game-sessions/{game.id}/logs?events=true&after="
+                                                            f"{last}")["items"]
+                        if item["data"].get("liveUploadId") == live and item["data"]["type"] == "ended")
+        assert live_end["data"]["endReason"] == "deadline" and not live_end["data"].get("runCompleted"), live_end
+        assert start["startedAt"] >= live_end["occurredAt"][:19], (start, live_end)
+        length = (datetime.fromisoformat(start["deadline"].replace("Z", "+00:00"))
+                  - datetime.fromisoformat(start["startedAt"].replace("Z", "+00:00"))).total_seconds()
+        assert length == 12, start
+        assert end["endReason"] == "deadline", end
+        assert game.inventory("sue", "break")["used"] == 1 and game.inventory("ben", "break")["used"] == 1
+    finally:
+        api.acquire_controller(resume=epoch)
+    assert api.CONTROLLER["epoch"] == epoch + 1
+    api.config(game.id, {"pings_per_speedhunt": 4, "break_duration_minutes": 15})
+    api.request("POST", f"/game-sessions/{game.id}/members/{dora}/retire", {})
     game.reconcile()
 
 
@@ -1299,8 +1382,8 @@ def audit_tool_requests(tool_source, game):
     game.end_run("ben")
 
 
-def run_break_through_tool(tool_source, game):
-    """The Tool's request processor and break service approve the break, start it with the outcome and end it."""
+def run_break_through_tool(tool_source, game, minutes):
+    """The Tool's request processor and break service approve the break and start it with the outcome."""
     from traccar_game_manager.application.game_actions.breaks import BreakService
     from traccar_game_manager.application.game_requests.processor import (
         GameRequestProcessor, RequestCheck, RequestResult)
@@ -1311,7 +1394,7 @@ def run_break_through_tool(tool_source, game):
             return datetime.now(timezone.utc)
 
     client, gateway = tool_gateway(tool_source, game)
-    settings = normalize_game_settings({"break_duration_minutes": 15})
+    settings = normalize_game_settings({"break_duration_minutes": minutes})
     breaks = BreakService({}, clock=Clock())
     tracker = game.trackers["anna"]["id"]
     logs = []
@@ -1334,7 +1417,7 @@ def run_break_through_tool(tool_source, game):
                 result = next(entry for entry in outcome["operations"] if entry["operation"] == "breakStarted")
                 breaks.identify(item["id"], result["id"])
 
-            return RequestResult(True, "Your break runs for 15 min.", operations=(operation,),
+            return RequestResult(True, f"Your break runs for {minutes} min.", operations=(operation,),
                                  on_outcome=recorded)
 
     def revisions():
@@ -1430,6 +1513,7 @@ def main(tool_source=None):
         audit_jokers(game)
         audit_speedhunt_jokers(game)
         audit_breaks(game, tool_source)
+        audit_break_timers(game)
         audit_mirror_only_access(game)
         audit_timetable_fakes(game)
         audit_timetable_execution(game)
@@ -1440,7 +1524,7 @@ def main(tool_source=None):
         audit_participant_privacy(fixtures)
         if tool_source:
             audit_tool(tool_source)
-        print("MySQL/HTTP game-session audit passed: admin-only access, API version 8, revision conflicts and "
+        print("MySQL/HTTP game-session audit passed: admin-only access, API version 9, revision conflicts and "
               "idempotent retries, credential encryption at rest, timetable changesets (cells keyed by slot and "
               "member, canonical content, 422 rejections, retries), logs, "
               "cascading deletion, controller lease with fenced game and standard endpoints (path and body IDs, "
@@ -1449,7 +1533,9 @@ def main(tool_source=None):
               "running game), execution events, idempotent effects with latest-position and online status and "
               "their lookup, hunters' requests with role-filtered status, stale revisions, approval, claim, "
               "outcome, requests that survive a change of control and end when the game stops, ping numbering and private sources, hunter positions, speedhunt pool and break "
-              "jokers, catch and release, planned, waiting, started and cancelled breaks, mirror-only hunter "
+              "jokers, catch and release, planned and cancelled breaks, break timers the server runs while no "
+              "lease is held (a break ended at its deadline, a planned break waiting for a Live Ping and starting "
+              "with its full duration, events caught up by ID), mirror-only hunter "
               "access for permissions, group and device moves and bindings, timetable fakes (released on moves, "
               "ineligible content and cancellation), a timetable slot the server executes while no lease is held "
               "(fake used, events caught up by ID, completion), a live upload and a live relay the server runs while "
