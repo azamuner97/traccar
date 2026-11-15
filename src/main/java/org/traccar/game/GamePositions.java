@@ -13,7 +13,6 @@ import org.traccar.model.Position;
 import java.sql.SQLException;
 import java.sql.Timestamp;
 import java.time.Instant;
-import java.time.format.DateTimeParseException;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Date;
@@ -23,17 +22,17 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.ThreadLocalRandom;
 
 /**
- * The one insertion path of mirror positions, shared by effects deliveries and the ping engine: the uniform payload
- * the Tool has always uploaded, whole-second fix times, the same column conversions as Traccar's storage, and the
- * device's {@code positionid} moved to the newest fix. Positions are published after commit through a
- * {@link Written} collector. It also reads a tracker's latest real position like {@code /api/positions}.
+ * The one insertion path of mirror positions, used only by the ping engine (no client sends mirror positions): the
+ * uniform payload the Tool always uploaded, whole-second fix times, the same column conversions as Traccar's
+ * storage, and the device's {@code positionid} moved to the newest fix. Positions are published after commit through
+ * a {@link Written} collector. It also reads a tracker's latest real position like {@code /api/positions}.
  */
 public final class GamePositions {
 
     public static final String PROTOCOL = "osmand";
-    static final int MAX_ATTRIBUTES = 64;
 
     /** A tracker's position as the engine uses it: coordinate and fix time. */
     public record Fix(double latitude, double longitude, Instant fixTime) {
@@ -82,17 +81,6 @@ public final class GamePositions {
      * The fix time to store, in whole seconds. MySQL keeps {@code tc_positions.fixtime} to the second and rounds
      * fractions, so a millisecond fix time would be compared against a different stored value.
      */
-    static Instant fixTime(String value, Instant now) {
-        if (value == null) {
-            return now.truncatedTo(ChronoUnit.SECONDS);
-        }
-        try {
-            return fixTime(Instant.parse(value), now);
-        } catch (DateTimeParseException error) {
-            throw GameErrors.invalid("Invalid position fix time");
-        }
-    }
-
     static Instant fixTime(Instant value, Instant now) {
         Instant parsed = value.truncatedTo(ChronoUnit.SECONDS);
         if (parsed.isAfter(now.plusSeconds(60)) || parsed.isBefore(GameTime.MIN)) {
@@ -101,29 +89,34 @@ public final class GamePositions {
         return parsed;
     }
 
-    /** The uniform mirror payload the Tool has always uploaded, plus the caller's scalar extras. */
-    static Map<String, Object> attributes(Map<String, Object> extras) {
+    /** The uniform mirror payload: every mirror position carries it, fake or real. */
+    static Map<String, Object> attributes() {
         Map<String, Object> result = new LinkedHashMap<>();
         result.put(Position.KEY_EVENT, "location");
         result.put(Position.KEY_MOTION, false);
         result.put(Position.KEY_ODOMETER, 0);
         result.put("activity", "still");
         result.put(Position.KEY_BATTERY_LEVEL, 100);
-        if (extras != null) {
-            if (extras.size() > MAX_ATTRIBUTES) {
-                throw GameErrors.invalid("Too many position attributes");
-            }
-            for (var entry : extras.entrySet()) {
-                Object value = entry.getValue();
-                if (entry.getKey() == null || !entry.getKey().matches("[A-Za-z0-9_.-]{1,64}")
-                        || !(value instanceof String || value instanceof Number || value instanceof Boolean)
-                        || value instanceof String text && text.length() > 2048) {
-                    throw GameErrors.invalid("Invalid position attribute");
-                }
-                result.put(entry.getKey(), value);
-            }
-        }
         return result;
+    }
+
+    /**
+     * A joker fake's coordinate: as planned for a static ping, and moved by a new random 5–20 m in a random direction
+     * on every upload of a live ping.
+     */
+    static double[] fakeCoordinate(double latitude, double longitude, boolean live) {
+        if (!live) {
+            return new double[] {latitude, longitude};
+        }
+        var random = ThreadLocalRandom.current();
+        double angle = random.nextDouble(5, 20) / 6378137;
+        double bearing = random.nextDouble(0, 2 * Math.PI);
+        double lat = Math.toRadians(latitude);
+        double sinLatitude = Math.sin(lat) * Math.cos(angle) + Math.cos(lat) * Math.sin(angle) * Math.cos(bearing);
+        double newLat = Math.asin(Math.max(-1, Math.min(1, sinLatitude)));
+        double newLon = longitude + Math.toDegrees(Math.atan2(Math.sin(bearing) * Math.sin(angle) * Math.cos(lat),
+                Math.cos(angle) - Math.sin(lat) * Math.sin(newLat)));
+        return new double[] {Math.toDegrees(newLat), Math.IEEEremainder(newLon, 360)};
     }
 
     /** The fix time of a device's latest position (locking the device row), in whole seconds; null without one. */
@@ -144,8 +137,7 @@ public final class GamePositions {
      * older, and collects it for publication after commit.
      */
     static Written write(GameTransaction transaction, ObjectMapper objectMapper, long deviceId, double latitude,
-                         double longitude, Instant fix, Map<String, Object> extras, Collector collector)
-            throws Exception {
+                         double longitude, Instant fix, Collector collector) throws Exception {
         Instant previous = latestFix(transaction, deviceId);
         Position position = new Position(PROTOCOL);
         position.setDeviceId(deviceId);
@@ -156,7 +148,7 @@ public final class GamePositions {
         position.setValid(true);
         position.setLatitude(latitude);
         position.setLongitude(longitude);
-        position.setAttributes(new AttributeMap(attributes(extras)));
+        position.setAttributes(new AttributeMap(attributes()));
         position.setId(transaction.insert("INSERT INTO tc_positions (protocol, deviceid, servertime, devicetime,"
                 + " fixtime, valid, latitude, longitude, altitude, speed, course, address, attributes, accuracy,"
                 + " network, geofenceids) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, NULL, ?, 0, NULL, NULL)",

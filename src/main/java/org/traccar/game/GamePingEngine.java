@@ -16,6 +16,7 @@ import org.slf4j.LoggerFactory;
 import java.sql.SQLException;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -171,17 +172,26 @@ public class GamePingEngine {
      * The outcome of one intent: {@code status} ({@code sent}, {@code skipped}, {@code failed}) and {@code reason},
      * the audiences that received a position ({@code delivered}) and the ones a break withheld, the fake delivered
      * with its audiences, the joker fake, the position used, the delay after the scheduled time, the written mirror
-     * positions, the relayed hunters, and the results of the applied operations.
+     * positions, the relayed hunters, and what the applied effects did: the results of their operations, the
+     * requests they completed and the jokers they used.
      */
     @JsonInclude(JsonInclude.Include.NON_NULL)
     public record Outcome(String path, Long sourceMemberId, Long recipientMemberId, String status, String reason,
                           List<String> delivered, List<String> withheld, Fake fake, JokerFakeOutcome jokerFake,
                           PositionOutcome position, Double delaySeconds, String detail, List<Long> hunters,
-                          List<GamePositions.Written> positions, List<GameOperations.Result> operations) {
+                          List<GamePositions.Written> positions, List<GameOperations.Result> operations,
+                          List<GameEffectsService.RequestOutcome> requests,
+                          List<GameJokerService.UseOutcome> jokers) {
 
         public boolean deliveredAny() {
             return delivered != null && !delivered.isEmpty();
         }
+    }
+
+    /** What the chosen effects of an intent did. */
+    private record Applied(List<GameOperations.Result> operations, List<GameEffectsService.RequestOutcome> requests,
+                           List<GameJokerService.UseOutcome> jokers) {
+        static final Applied NONE = new Applied(List.of(), null, null);
     }
 
     // Policy ------------------------------------------------------------------------------------------------
@@ -481,12 +491,12 @@ public class GamePingEngine {
         Decision decision = decide(transaction, sessionId, source, intent, fix, joker != null);
 
         List<String> delivered = decision.delivered();
-        List<GameOperations.Result> results = effects(transaction, sessionId, applied,
+        Applied results = effects(transaction, sessionId, applied,
                 delivered.isEmpty() ? intent.onNotDelivered() : intent.onDelivered());
 
         List<GamePositions.Written> written = new ArrayList<>();
         if (!delivered.isEmpty()) {
-            Instant fixTime = GamePositions.fixTime((String) null, now);
+            Instant fixTime = now.truncatedTo(ChronoUnit.SECONDS);
             GameOperations.AppliedFake speedhuntFake = applied.appliedFakes().get(source.id());
             for (String audience : TimetableInstruction.AUDIENCES) {
                 double latitude;
@@ -504,7 +514,7 @@ public class GamePingEngine {
                     }
                     if (speedhuntFake != null && TimetableInstruction.HUNTERS.equals(audience)) {
                         // The target's own speedhunt fake reaches hunter destinations only.
-                        double[] coordinate = GameEffectsService.fakeCoordinate(speedhuntFake.latitude(),
+                        double[] coordinate = GamePositions.fakeCoordinate(speedhuntFake.latitude(),
                                 speedhuntFake.longitude(), speedhuntFake.live());
                         latitude = coordinate[0];
                         longitude = coordinate[1];
@@ -514,7 +524,7 @@ public class GamePingEngine {
                 }
                 long device = mirrorDevice(transaction, sessionId, source.id(), role(audience), null);
                 written.add(GamePositions.write(transaction, objectMapper, device, latitude, longitude, fixTime,
-                        null, collector));
+                        collector));
             }
         }
 
@@ -541,7 +551,7 @@ public class GamePingEngine {
                         fix.fixTime() == null ? null : fix.fixTime().toString(), decision.stale());
         return new Outcome(intent.path(), source.id(), null, decision.status(), decision.reason(), delivered,
                 decision.withheld(), fake, jokerOutcome, position, delay(context, now), decision.detail(), null,
-                written, results);
+                written, results.operations(), results.requests(), results.jokers());
     }
 
     private static String fakeReleaseDetail(Decision decision) {
@@ -570,7 +580,7 @@ public class GamePingEngine {
         String detail = null;
         List<Long> relayed = new ArrayList<>();
         List<GamePositions.Written> written = new ArrayList<>();
-        List<GameOperations.Result> results;
+        Applied results;
         if (notAfter != null && now.isAfter(notAfter)) {
             status = SKIPPED;
             reason = MISSED;
@@ -620,36 +630,54 @@ public class GamePingEngine {
                 Instant fixTime = item.fix().fixTime() == null ? now : item.fix().fixTime();
                 written.add(GamePositions.write(transaction, objectMapper, item.device(), item.fix().latitude(),
                         item.fix().longitude(), GamePositions.fixTime(fixTime.isAfter(now) ? now : fixTime, now),
-                        null, collector));
+                        collector));
                 relayed.add(item.hunter());
             }
             return new Outcome(RELAY, null, recipient.id(), status, reason,
                     relayed.isEmpty() ? List.of() : List.of(TimetableInstruction.HUNTERS), List.of(), null, null,
-                    null, delay(context, now), detail, relayed, written, results);
+                    null, delay(context, now), detail, relayed, written, results.operations(), results.requests(),
+                    results.jokers());
         }
         results = effects(transaction, sessionId, applied, intent.onNotDelivered());
         return new Outcome(RELAY, null, recipient.id(), status, reason, List.of(), List.of(), null, null, null,
-                delay(context, now), detail, relayed, written, results);
+                delay(context, now), detail, relayed, written, results.operations(), results.requests(),
+                results.jokers());
     }
 
-    /** Applies the chosen effects; returns the results of their operations. */
-    private static List<GameOperations.Result> effects(GameTransaction transaction, long sessionId,
-                                                       GameOperations applied, Effects value) throws Exception {
+    /**
+     * Applies the chosen effects, in the order of a delivery: request completions, operations, joker uses. Returns
+     * what they did.
+     */
+    private static Applied effects(GameTransaction transaction, long sessionId, GameOperations applied,
+                                   Effects value) throws Exception {
         Effects chosen = effects(value);
         if (chosen.empty()) {
-            return List.of();
+            return Applied.NONE;
         }
         int before = applied.results().size();
-        GameRequestService.complete(transaction, sessionId, chosen.requestList(), applied);
+        List<GameEffectsService.RequestOutcome> requests = null;
+        if (!chosen.requestList().isEmpty()) {
+            requests = new ArrayList<>();
+            for (GameRequest request : GameRequestService.complete(transaction, sessionId, chosen.requestList(),
+                    applied)) {
+                requests.add(new GameEffectsService.RequestOutcome(request.id(), request.status()));
+            }
+        }
         List<GameOperation> operations = chosen.operationList();
         for (int i = 0; i < operations.size(); i++) {
             applied.apply(i, operations.get(i));
         }
-        for (GameJokerService.Use use : chosen.jokerList()) {
-            GameJokerService.UseOutcome used = GameJokerService.use(transaction, sessionId, use, "Tool");
-            applied.jokerMembers().add(used.memberId());
+        List<GameJokerService.UseOutcome> jokers = null;
+        if (!chosen.jokerList().isEmpty()) {
+            jokers = new ArrayList<>();
+            for (GameJokerService.Use use : chosen.jokerList()) {
+                GameJokerService.UseOutcome used = GameJokerService.use(transaction, sessionId, use, applied.actor());
+                jokers.add(used);
+                applied.jokerMembers().add(used.memberId());
+            }
         }
-        return List.copyOf(applied.results().subList(before, applied.results().size()));
+        return new Applied(List.copyOf(applied.results().subList(before, applied.results().size())), requests,
+                jokers);
     }
 
     // Execution ---------------------------------------------------------------------------------------------

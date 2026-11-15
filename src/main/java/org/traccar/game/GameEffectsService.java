@@ -6,7 +6,6 @@
  */
 package org.traccar.game;
 
-import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.inject.Inject;
 import jakarta.inject.Singleton;
@@ -14,9 +13,7 @@ import jakarta.inject.Singleton;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.sql.SQLException;
-import java.time.Instant;
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -24,13 +21,20 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
-import java.util.concurrent.ThreadLocalRandom;
 
 /**
  * Fenced, idempotent effects deliveries of data model 2 (plan §3.1–3.2). One delivery is one game operation of the
- * controlling Tool: mirror positions, the typed state operations, ping intents (decided by {@link GamePingEngine},
- * one outcome each), request outcomes, operator joker uses, archived notifications, queued pushes, logs and
- * checkpoints, committed in one transaction under a durable delivery ID.
+ * controlling Tool: the typed state operations, ping intents (decided by {@link GamePingEngine}, one outcome each),
+ * request outcomes, operator joker uses, archived notifications, queued pushes, logs and checkpoints, committed in
+ * one transaction under a durable delivery ID.
+ *
+ * <p>A delivery carries no positions (game execution plan, phase 4): every mirror position is written by the
+ * server's ping engine from an intent. The one-off pings are intents of a delivery: a manual ping (path
+ * {@code manual}), a speedhunt static ping (path {@code speedhunt} with {@code pingDelivered} in
+ * {@code onDelivered} and {@code pingFailed} in {@code onNotDelivered}), an operator fake (the same with a
+ * {@code fake} for the run's audiences and source {@code operatorFake}), a request's ping (its completion in
+ * {@code onDelivered} and {@code onNotDelivered}, so it commits with the ping) and a one-off hunter relay (path
+ * {@code relay}, its joker use in {@code onDelivered}), which leaves a {@code tc_game_relays} row when it delivers.
  *
  * <p>The order is the effects transaction's: validate, lock the session and then the touched member states in
  * ascending order, apply, advance the member and session revisions, commit, and only then publish positions,
@@ -39,23 +43,15 @@ import java.util.concurrent.ThreadLocalRandom;
  * nothing; the same ID with other content answers 409.
  *
  * <p>Privacy, as in model 1: fake and real positions use one payload, the target's own speedhunt fake is applied
- * here so hunter-visible data never marks it, joker invalidations reach only the owners concerned (and the hunters
- * for their pool), and nothing names a speedhunt target to players and supporters.
+ * by the engine so hunter-visible data never marks it, joker invalidations reach only the owners concerned (and the
+ * hunters for their pool), and nothing names a speedhunt target to players and supporters.
  */
 @Singleton
 public class GameEffectsService {
 
-    public static final String PROTOCOL = GamePositions.PROTOCOL;
-    public static final int MAX_POSITIONS = 200;
     public static final int MAX_OPERATIONS = 200;
     public static final int MAX_ALERTS = 100;
     public static final int MAX_PUSHES = 500;
-
-    /** A raw mirror position (until phase 4 moves every ping to intents). */
-    @JsonInclude(JsonInclude.Include.NON_NULL)
-    public record PositionInput(Long deviceId, String uniqueId, Double latitude, Double longitude, String fixTime,
-                                Map<String, Object> attributes) {
-    }
 
     public record NotificationInput(String generation, List<GameNotificationService.Alert> alerts) {
     }
@@ -69,13 +65,10 @@ public class GameEffectsService {
      * in this transaction, after the operations, and answers one outcome; it applies its {@code onDelivered} or
      * {@code onNotDelivered} effects. Intents of a delivery never wait for a fresh fix.
      */
-    public record Delivery(String deliveryId, List<PositionInput> positions, List<GameOperation> operations,
+    public record Delivery(String deliveryId, List<GameOperation> operations,
                            List<GamePingEngine.Intent> pings, NotificationInput notifications,
                            List<PushInput> pushes, List<GameLogService.LogInput> logs,
                            List<GameRequestService.Completion> requests, List<GameJokerService.Use> jokers) {
-    }
-
-    public record PositionOutcome(long deviceId, long positionId, boolean latest, String fixTime) {
     }
 
     public record AlertOutcome(String alertId, boolean created) {
@@ -87,16 +80,13 @@ public class GameEffectsService {
     public record RequestOutcome(long id, String status) {
     }
 
-    /** The recorded outcome of a delivery; operator data. */
-    public record Outcome(String deliveryId, boolean replayed, long epoch, List<PositionOutcome> positions,
+    /** The recorded outcome of a delivery; operator data. The mirror positions written are in {@code pings}. */
+    public record Outcome(String deliveryId, boolean replayed, long epoch,
                           List<GameOperations.Result> operations, List<GamePingEngine.Outcome> pings,
                           String generation, List<AlertOutcome> alerts,
                           List<PushOutcome> pushes, List<RequestOutcome> requests,
                           List<GameJokerService.UseOutcome> jokers, List<GameOperations.FakeOutcome> fakes,
                           long sessionRevision) {
-    }
-
-    private record Mirror(long deviceId, long sourceMemberId, String destinationRole) {
     }
 
     private final GameTransactions transactions;
@@ -127,12 +117,12 @@ public class GameEffectsService {
                 || !delivery.deliveryId().matches("[A-Za-z0-9_-]{8,64}")) {
             throw GameErrors.invalid("Invalid delivery ID");
         }
-        if (list(delivery.positions()).size() > MAX_POSITIONS || list(delivery.operations()).size() > MAX_OPERATIONS
+        if (list(delivery.operations()).size() > MAX_OPERATIONS
                 || list(delivery.pushes()).size() > MAX_PUSHES || list(delivery.requests()).size() > MAX_OPERATIONS
                 || list(delivery.jokers()).size() > MAX_OPERATIONS) {
             throw GameErrors.invalid("Delivery is too large");
         }
-        if (hasNull(delivery.positions()) || hasNull(delivery.operations()) || hasNull(delivery.pushes())
+        if (hasNull(delivery.operations()) || hasNull(delivery.pushes())
                 || hasNull(delivery.jokers()) || hasNull(delivery.requests()) || hasNull(delivery.pings())) {
             throw GameErrors.invalid("Invalid delivery item");
         }
@@ -226,9 +216,9 @@ public class GameEffectsService {
         for (PushOutcome push : outcome.pushes()) {
             pushes.add(push.id() != null && current.containsKey(push.id()) ? current.get(push.id()) : push);
         }
-        return new Outcome(outcome.deliveryId(), true, outcome.epoch(), outcome.positions(), outcome.operations(),
-                outcome.pings(), outcome.generation(), outcome.alerts(), pushes, outcome.requests(), outcome.jokers(),
-                outcome.fakes(), outcome.sessionRevision());
+        return new Outcome(outcome.deliveryId(), true, outcome.epoch(), outcome.operations(), outcome.pings(),
+                outcome.generation(), outcome.alerts(), pushes, outcome.requests(), outcome.jokers(), outcome.fakes(),
+                outcome.sessionRevision());
     }
 
     private Outcome apply(GameTransaction transaction, long sessionId, long epoch, Delivery delivery, long rowId)
@@ -261,11 +251,14 @@ public class GameEffectsService {
         }
 
         GamePositions.Collector collector = new GamePositions.Collector();
-        List<PositionOutcome> positions = positions(transaction, sessionId, delivery, applied, collector);
         List<GamePingEngine.Outcome> pings = new ArrayList<>();
         for (GamePingEngine.Intent intent : intents) {
-            pings.add(engine.apply(transaction, sessionId, intent, GamePingEngine.Context.NONE, null, applied,
-                    collector));
+            GamePingEngine.Outcome ping = engine.apply(transaction, sessionId, intent, GamePingEngine.Context.NONE,
+                    null, applied, collector);
+            if (GamePingEngine.RELAY.equals(intent.path()) && ping.deliveredAny()) {
+                recordRelay(transaction, sessionId, ping);
+            }
+            pings.add(ping);
         }
 
         String generation = null;
@@ -329,78 +322,26 @@ public class GameEffectsService {
         if (!queued.isEmpty()) {
             transaction.afterCommit(() -> publisher.pushes(queued));
         }
-        return new Outcome(delivery.deliveryId(), false, epoch, positions, applied.results(), pings, generation,
-                alerts, pushes, requestOutcomes, uses, applied.fakes(), revision);
-    }
-
-    // Positions ---------------------------------------------------------------------------------------------
-
-    private List<PositionOutcome> positions(GameTransaction transaction, long sessionId, Delivery delivery,
-                                            GameOperations applied, GamePositions.Collector collector)
-            throws Exception {
-        List<PositionInput> inputs = list(delivery.positions());
-        List<PositionOutcome> result = new ArrayList<>();
-        if (inputs.isEmpty()) {
-            return result;
-        }
-        Map<Long, Mirror> mirrors = new HashMap<>();
-        for (GameResource.Mirror mirror : GameResourceRepository.mirrors(transaction, sessionId)) {
-            if (mirror.active() && mirror.deviceId() != null) {
-                mirrors.put(mirror.deviceId(), new Mirror(mirror.deviceId(), mirror.sourceMemberId(),
-                        mirror.destinationRole()));
-            }
-        }
-        Instant now = transaction.now();
-        for (PositionInput input : inputs) {
-            long deviceId = device(transaction, input);
-            Mirror mirror = mirrors.get(deviceId);
-            if (mirror == null) {
-                throw GameErrors.invalid("Device " + deviceId + " is not an active mirror of this game session");
-            }
-            GamePositions.checkCoordinates(input.latitude(), input.longitude());
-            double[] coordinate = {input.latitude(), input.longitude()};
-            GameOperations.AppliedFake fake = applied.appliedFakes().get(mirror.sourceMemberId());
-            if (fake != null && GameMember.HUNTER.equals(mirror.destinationRole())) {
-                // The target's own speedhunt fake reaches hunter destinations only.
-                coordinate = fakeCoordinate(fake.latitude(), fake.longitude(), fake.live());
-            }
-            var written = GamePositions.write(transaction, objectMapper, deviceId, coordinate[0], coordinate[1],
-                    GamePositions.fixTime(input.fixTime(), now), input.attributes(), collector);
-            result.add(new PositionOutcome(written.deviceId(), written.positionId(), written.latest(),
-                    written.fixTime()));
-        }
-        return result;
-    }
-
-    private static long device(GameTransaction transaction, PositionInput input) throws SQLException {
-        if (input.deviceId() != null) {
-            return input.deviceId();
-        }
-        if (input.uniqueId() == null || input.uniqueId().isBlank()) {
-            throw GameErrors.invalid("Position destination required");
-        }
-        return transaction.first("SELECT id FROM tc_devices WHERE uniqueid = ?", rows -> rows.getLong(1),
-                input.uniqueId()).orElseThrow(() -> GameErrors.invalid("Unknown position destination "
-                        + input.uniqueId()));
+        return new Outcome(delivery.deliveryId(), false, epoch, applied.results(), pings, generation, alerts,
+                pushes, requestOutcomes, uses, applied.fakes(), revision);
     }
 
     /**
-     * A joker fake's coordinate: as planned for a static ping, and moved by a new random 5–20 m in a random direction
-     * on every upload of a live ping.
+     * A relay intent of a delivery is a one-off hunter relay: one that delivered leaves a {@code tc_game_relays} row
+     * with the request it fulfilled or the joker reservation it used, so the recipient's last relay delivery is on
+     * the server whether a live relay or a one-off sent it.
      */
-    static double[] fakeCoordinate(double latitude, double longitude, boolean live) {
-        if (!live) {
-            return new double[] {latitude, longitude};
+    private static void recordRelay(GameTransaction transaction, long sessionId, GamePingEngine.Outcome ping)
+            throws SQLException {
+        Long request = list(ping.requests()).stream().map(RequestOutcome::id).findFirst().orElse(null);
+        Long reservation = list(ping.jokers()).stream().map(GameJokerService.UseOutcome::reservationId).findFirst()
+                .orElse(null);
+        if (reservation == null && request != null) {
+            reservation = GameJokerRepository.ofRequest(transaction, sessionId, request).stream()
+                    .map(GameJokerRepository.Reservation::id).findFirst().orElse(null);
         }
-        var random = ThreadLocalRandom.current();
-        double angle = random.nextDouble(5, 20) / 6378137;
-        double bearing = random.nextDouble(0, 2 * Math.PI);
-        double lat = Math.toRadians(latitude);
-        double sinLatitude = Math.sin(lat) * Math.cos(angle) + Math.cos(lat) * Math.sin(angle) * Math.cos(bearing);
-        double newLat = Math.asin(Math.max(-1, Math.min(1, sinLatitude)));
-        double newLon = longitude + Math.toDegrees(Math.atan2(Math.sin(bearing) * Math.sin(angle) * Math.cos(lat),
-                Math.cos(angle) - Math.sin(lat) * Math.sin(newLat)));
-        return new double[] {Math.toDegrees(newLat), Math.IEEEremainder(newLon, 360)};
+        GameStateRepository.insertRelay(transaction, sessionId, ping.recipientMemberId(), ping.hunters().size(),
+                request, reservation);
     }
 
 }

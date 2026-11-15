@@ -86,7 +86,7 @@ public abstract class GameBreakRunnerTest extends GameTestBase {
     private GameEffectsService.Outcome tool(Game game, List<GameRequestService.Completion> completions,
                                             GameOperation... operations) throws Exception {
         return effects.apply(game.session(), EPOCH, new GameEffectsService.Delivery("delivery-" + UUID.randomUUID(),
-                List.of(), List.of(operations), null, null, null, null, completions, null));
+                List.of(operations), null, null, null, null, completions, null));
     }
 
     private GameEffectsService.Outcome tool(Game game, GameOperation... operations) throws Exception {

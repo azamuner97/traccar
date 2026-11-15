@@ -130,7 +130,7 @@ server/web interaction, also run the full Docker integration loop and verify
 Game sessions and game state follow data model 2 (see `CUSTOMIZATIONS.md`):
 services and repositories in `org.traccar.game`, REST resources in
 `org.traccar.api.game`, the schema in `schema/changelog-game-model-2.xml`, and the
-API in `openapi.yaml` (game-session API version 9). Traccar Tool and the web app
+API in `openapi.yaml` (game-session API version 10). Traccar Tool and the web app
 speak only model 2.
 
 - The model-2 changelog drops the model-1 game tables and their data. Starting a

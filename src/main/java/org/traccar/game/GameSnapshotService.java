@@ -30,11 +30,13 @@ public class GameSnapshotService {
 
     /**
      * The typed game state: every catch interval, every run with its pings (newest first), every break, every live
-     * upload, the member state revisions and the per-member speedhunt statistics.
+     * upload, every one-off hunter relay that delivered, the member state revisions and the per-member speedhunt
+     * statistics.
      */
     public record State(List<GameState.Catch> catches, List<GameStateService.RunHistory> runs,
                         List<GameState.Break> breaks, List<GameState.LiveUpload> liveUploads,
-                        Map<Long, Long> memberRevisions, List<GameStateRepository.Statistics> statistics) {
+                        List<GameState.Relay> relays, Map<Long, Long> memberRevisions,
+                        List<GameStateRepository.Statistics> statistics) {
     }
 
     /**
@@ -71,6 +73,7 @@ public class GameSnapshotService {
             State state = new State(GameStateRepository.catches(transaction, sessionId, false), runs,
                     GameStateRepository.breaks(transaction, sessionId),
                     GameStateRepository.uploads(transaction, sessionId),
+                    GameStateRepository.relays(transaction, sessionId),
                     GameStateService.revisions(transaction, sessionId),
                     GameStateRepository.statistics(transaction, sessionId));
             Resources resources = new Resources(GameResourceRepository.mirrors(transaction, sessionId),

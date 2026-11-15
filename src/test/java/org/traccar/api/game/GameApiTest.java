@@ -22,6 +22,7 @@ import org.traccar.game.GameLogService;
 import org.traccar.game.GameMember;
 import org.traccar.game.GameNotificationService;
 import org.traccar.game.GameOperation;
+import org.traccar.game.GamePingEngine;
 import org.traccar.game.GamePlanInvalidation;
 import org.traccar.game.GameProximityService;
 import org.traccar.game.GameRequest;
@@ -243,7 +244,7 @@ public abstract class GameApiTest extends GameTestBase {
     private JsonNode deliver(long session, List<GameRequestService.Completion> completions,
                              GameOperation... operations) throws Exception {
         return sessionsApi.applyEffects(session, HEADER, new GameEffectsService.Delivery("api-delivery-"
-                + ++deliveries, null, List.of(operations), null, null, null, null, completions, null));
+                + ++deliveries, List.of(operations), null, null, null, null, completions, null));
     }
 
     private static GameOperation.PingDelivered ping(GameMember target, int number) {
@@ -260,8 +261,8 @@ public abstract class GameApiTest extends GameTestBase {
 
     @Test
     void operatorsManageSessionsMembersAndResources() throws Exception {
-        assertEquals(new GameSessionResource.Capabilities(9), sessionsApi.capabilities());
-        assertEquals(9, GameSessionService.API_VERSION);
+        assertEquals(new GameSessionResource.Capabilities(10), sessionsApi.capabilities());
+        assertEquals(10, GameSessionService.API_VERSION);
         String name = "api-" + UUID.randomUUID();
         JsonNode created = sessionsApi.create(new GameSessionResource.CreateRequest(name, 5, null,
                 json("{\"game_settings\": " + SETTINGS + "}")));
@@ -424,7 +425,7 @@ public abstract class GameApiTest extends GameTestBase {
 
         // A delivery needs the epoch the fence admitted; without one it is refused before anything happens.
         assertCode(423, () -> sessionsApi.applyEffects(session, null, new GameEffectsService.Delivery(
-                "api-unfenced-1", null, List.of(ping(game.anna(), 1)), null, null, null, null, null, null)));
+                "api-unfenced-1", List.of(ping(game.anna(), 1)), null, null, null, null, null, null)));
         JsonNode outcome = deliver(session, List.of(), ping(game.anna(), 1));
         assertEquals(EPOCH, outcome.get("epoch").asLong());
         assertEquals("real", outcome.get("operations").get(0).get("source").asText());
@@ -442,8 +443,25 @@ public abstract class GameApiTest extends GameTestBase {
                 null));
         assertCode(423, () -> sessionsApi.claimRequest(session, requestId, null));
         assertEquals("executing", sessionsApi.claimRequest(session, requestId, HEADER).get("status").asText());
-        deliver(session, List.of(new GameRequestService.Completion(requestId, GameRequest.SUCCEEDED, null, null)),
-                ping(game.carl(), 1));
+        // The request's ping is an intent: its completion commits with the positions the server writes.
+        trackerPosition(game.carl().trackerId(), 47.0, 8.0, T0.minusSeconds(5));
+        resources.addMirror(session, device(), game.carl().id(), "hunter", null);
+        JsonNode pinged = sessionsApi.applyEffects(session, HEADER, new GameEffectsService.Delivery("api-delivery-"
+                + ++deliveries, List.of(), List.of(new GamePingEngine.Intent(GamePingEngine.SPEEDHUNT,
+                        game.carl().id(), null, List.of("hunters"), null, null, null,
+                        new GamePingEngine.Effects(List.of(ping(game.carl(), 1)), List.of(
+                                new GameRequestService.Completion(requestId, GameRequest.SUCCEEDED, null, null)),
+                                null),
+                        new GamePingEngine.Effects(List.of(new GameOperation.PingFailed(game.carl().id(), null)),
+                                List.of(new GameRequestService.Completion(requestId, GameRequest.FAILED, null,
+                                        null)), null))), null, null, null, null, null));
+        JsonNode pingOutcome = pinged.get("pings").get(0);
+        assertEquals("sent", pingOutcome.get("status").asText());
+        assertEquals("succeeded", pingOutcome.get("requests").get(0).get("status").asText());
+        assertEquals(1, pingOutcome.get("positions").size());
+        assertFalse(pinged.has("positions"));
+        assertEquals(pingOutcome, sessionsApi.effectsOutcome(session, pinged.get("deliveryId").asText())
+                .get("pings").get(0));
         assertEquals(0, sessionsApi.listRequests(session, null, 0).size());
         assertEquals(1, sessionsApi.listRequests(session, "all", 0).size());
 
@@ -453,6 +471,7 @@ public abstract class GameApiTest extends GameTestBase {
         assertEquals(0, sessionsApi.reconcileJokers(session).size());
         JsonNode snapshot = (JsonNode) sessionsApi.snapshot(session).getEntity();
         assertEquals(2, snapshot.path("state").path("runs").size());
+        assertTrue(snapshot.path("state").path("relays").isArray());
         assertEquals("running", snapshot.path("game").path("state").asText());
         assertEquals("running", sessionsApi.state(session).path("state").asText());
     }

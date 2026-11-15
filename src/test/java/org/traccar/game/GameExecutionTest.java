@@ -268,7 +268,7 @@ public abstract class GameExecutionTest extends GameTestBase {
         long session = session();
         GameMember anna = bound(session, "player");
         long epoch = acquire(alice, A);
-        var delivery = new GameEffectsService.Delivery("delivery-lookup-1", null,
+        var delivery = new GameEffectsService.Delivery("delivery-lookup-1",
                 List.of(new GameOperation.Catch(anna.id(), "Operator")), null, null, null, null, null, null);
         var outcome = effects.apply(session, epoch, delivery);
         assertFalse(outcome.replayed());

@@ -252,4 +252,46 @@
     </sql>
   </changeSet>
 
+  <!--
+    Phase 4: every ping is an intent (Claude outputs/game-execution-plan.md, phase 4). The Tool no longer sends mirror
+    positions; a one-off hunter relay is a relay intent of an effects delivery, decided and written by the server.
+
+    - tc_game_relays: one row per one-off hunter relay that delivered: who received the hunters' positions, when,
+      how many hunters, and the request it fulfilled or the joker reservation it used. Live relays keep their rows in
+      tc_game_live_uploads (lastsampleat); the last relay delivery of a member is the newest of both.
+  -->
+  <changeSet author="traccar-tool" id="game-execution-4-relays">
+    <createTable tableName="tc_game_relays">
+      <column name="id" type="BIGINT" autoIncrement="true">
+        <constraints primaryKey="true" primaryKeyName="pk_gm_relays" nullable="false" />
+      </column>
+      <column name="gamesessionid" type="BIGINT"><constraints nullable="false" /></column>
+      <column name="recipientmemberid" type="BIGINT"><constraints nullable="false" /></column>
+      <column name="deliveredat" type="DATETIME(3)"><constraints nullable="false" /></column>
+      <column name="hunters" type="INT"><constraints nullable="false" /></column>
+      <column name="requestid" type="BIGINT" />
+      <column name="reservationid" type="BIGINT" />
+    </createTable>
+    <addForeignKeyConstraint baseTableName="tc_game_relays" baseColumnNames="gamesessionid"
+      referencedTableName="tc_game_sessions" referencedColumnNames="id" constraintName="fk_gm_relays_session" />
+    <addForeignKeyConstraint baseTableName="tc_game_relays" baseColumnNames="gamesessionid,recipientmemberid"
+      referencedTableName="tc_game_session_members" referencedColumnNames="gamesessionid,id"
+      constraintName="fk_gm_relays_recipient" />
+    <addForeignKeyConstraint baseTableName="tc_game_relays" baseColumnNames="gamesessionid,requestid"
+      referencedTableName="tc_game_requests" referencedColumnNames="gamesessionid,id"
+      constraintName="fk_gm_relays_request" />
+    <addForeignKeyConstraint baseTableName="tc_game_relays" baseColumnNames="gamesessionid,reservationid"
+      referencedTableName="tc_game_joker_reservations" referencedColumnNames="gamesessionid,id"
+      constraintName="fk_gm_relays_reservation" />
+    <createIndex tableName="tc_game_relays" indexName="idx_gm_relays_recipient">
+      <column name="gamesessionid" /><column name="recipientmemberid" /><column name="deliveredat" />
+    </createIndex>
+  </changeSet>
+
+  <changeSet author="traccar-tool" id="game-execution-4-relays-check">
+    <sql>
+      ALTER TABLE tc_game_relays ADD CONSTRAINT ck_gm_relays_hunters CHECK (hunters >= 1);
+    </sql>
+  </changeSet>
+
 </databaseChangeLog>

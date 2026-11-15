@@ -36,7 +36,8 @@ public abstract class GameSchemaTest {
             "tc_game_requests",
             "tc_game_jokers", "tc_game_joker_pools", "tc_game_joker_reservations", "tc_game_joker_ledger",
             "tc_game_member_state", "tc_game_catches", "tc_game_speedhunts", "tc_game_fake_ping_plans",
-            "tc_game_speedhunt_pings", "tc_game_live_uploads", "tc_game_breaks", "tc_game_notification_state",
+            "tc_game_speedhunt_pings", "tc_game_live_uploads", "tc_game_relays", "tc_game_breaks",
+            "tc_game_notification_state",
             "tc_game_notifications", "tc_game_proximity_state", "tc_game_proximity_grants",
             "tc_game_proximity_circles", "tc_game_proximity_circle_members", "tc_game_deliveries",
             "tc_game_push_outbox", "tc_game_controller");

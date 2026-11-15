@@ -128,7 +128,7 @@ public abstract class GameLiveUploadRunnerTest extends GameTestBase {
 
     /** Sends operations as the Tool does: an effects delivery. */
     private GameEffectsService.Outcome tool(Game game, GameOperation... operations) throws Exception {
-        return effects.apply(game.session(), EPOCH, new GameEffectsService.Delivery(id(), List.of(),
+        return effects.apply(game.session(), EPOCH, new GameEffectsService.Delivery(id(),
                 List.of(operations), null, null, null, null, null, null));
     }
 
@@ -525,7 +525,7 @@ public abstract class GameLiveUploadRunnerTest extends GameTestBase {
         GameRequest request = requests.submit(game.hunter(), new GameRequestService.Submission(GameRequest.LIVE_PING,
                 anna.id(), memberRevision(anna.id()), null));
         requests.claim(game.session(), request.id(), EPOCH);
-        long upload = effects.apply(game.session(), EPOCH, new GameEffectsService.Delivery(id(), List.of(), List.of(
+        long upload = effects.apply(game.session(), EPOCH, new GameEffectsService.Delivery(id(), List.of(
                 new GameOperation.LiveUploadStarted(GameState.SPEEDHUNT_PING, anna.id(), null, true, false, false, 10,
                         T0.plusSeconds(30).toString(), null, request.id(), null, null, null, null)), null, null, null,
                 null, List.of(new GameRequestService.Completion(request.id(), GameRequest.SUCCEEDED, null, null)),
@@ -566,7 +566,7 @@ public abstract class GameLiveUploadRunnerTest extends GameTestBase {
             var request = requests.submit(owner, new GameRequestService.Submission(GameRequest.FAKE_PING, null,
                     null, json("{\"pingNumber\": 1, \"latitude\": 46.5, \"longitude\": 7.0}")));
             requests.claim(game.session(), request.id(), EPOCH);
-            effects.apply(game.session(), EPOCH, new GameEffectsService.Delivery(id(), List.of(), List.of(), null,
+            effects.apply(game.session(), EPOCH, new GameEffectsService.Delivery(id(), List.of(), null,
                     null, null, null, List.of(new GameRequestService.Completion(request.id(), GameRequest.SUCCEEDED,
                             null, null)), null));
         }

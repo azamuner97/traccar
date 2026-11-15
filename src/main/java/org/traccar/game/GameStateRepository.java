@@ -13,8 +13,9 @@ import java.util.List;
 import java.util.Optional;
 
 /**
- * Rows of the typed game state: tc_game_catches, tc_game_speedhunts, tc_game_speedhunt_pings, tc_game_breaks and
- * tc_game_live_uploads. "At most one active" rules are enforced by the marker columns ({@code activememberid}).
+ * Rows of the typed game state: tc_game_catches, tc_game_speedhunts, tc_game_speedhunt_pings, tc_game_breaks,
+ * tc_game_live_uploads and tc_game_relays. "At most one active" rules are enforced by the marker columns
+ * ({@code activememberid}).
  */
 public final class GameStateRepository {
 
@@ -336,6 +337,25 @@ public final class GameStateRepository {
         transaction.update("UPDATE tc_game_live_uploads SET state = ?, endedat = ?, endreason = ?"
                 + " WHERE gamesessionid = ? AND id = ?", GameState.ENDED, transaction.now(),
                 GameJokerRepository.clip(endReason, 64), sessionId, id);
+    }
+
+    // One-off relays ----------------------------------------------------------------------------------------
+
+    /** Records a one-off hunter relay that delivered {@code hunters} positions to the recipient just now. */
+    public static long insertRelay(GameTransaction transaction, long sessionId, long recipientMemberId, int hunters,
+                                   Long requestId, Long reservationId) throws SQLException {
+        return transaction.insert("INSERT INTO tc_game_relays (gamesessionid, recipientmemberid, deliveredat,"
+                + " hunters, requestid, reservationid) VALUES (?, ?, ?, ?, ?, ?)", sessionId, recipientMemberId,
+                transaction.now(), hunters, requestId, reservationId);
+    }
+
+    public static List<GameState.Relay> relays(GameTransaction transaction, long sessionId) throws SQLException {
+        return transaction.list("SELECT id, recipientmemberid, deliveredat, hunters, requestid, reservationid"
+                + " FROM tc_game_relays WHERE gamesessionid = ? ORDER BY id",
+                rows -> new GameState.Relay(rows.getLong("id"), rows.getLong("recipientmemberid"),
+                        GameTime.get(rows, "deliveredat"), rows.getInt("hunters"),
+                        GameTransaction.longOrNull(rows, "requestid"),
+                        GameTransaction.longOrNull(rows, "reservationid")), sessionId);
     }
 
     /**

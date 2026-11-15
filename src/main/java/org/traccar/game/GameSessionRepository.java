@@ -24,6 +24,7 @@ public final class GameSessionRepository {
     public static final List<String> DELETE_ORDER = List.of(
             "tc_game_push_outbox",
             "tc_game_deliveries",
+            "tc_game_relays",
             "tc_game_live_uploads",
             "tc_game_speedhunt_pings",
             "tc_game_fake_ping_plans",

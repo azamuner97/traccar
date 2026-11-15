@@ -84,7 +84,7 @@ public abstract class GameStatusTest extends GameTestBase {
 
     private GameEffectsService.Outcome deliver(long session, List<GameRequestService.Completion> completions,
                                                GameOperation... operations) throws Exception {
-        return effects.apply(session, EPOCH, new GameEffectsService.Delivery("delivery-" + ++deliveries, null,
+        return effects.apply(session, EPOCH, new GameEffectsService.Delivery("delivery-" + ++deliveries,
                 List.of(operations), null, null, null, null, completions, null));
     }
 

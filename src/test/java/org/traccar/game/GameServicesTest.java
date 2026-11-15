@@ -377,6 +377,8 @@ public abstract class GameServicesTest {
                 + " toplayers, tosupporters, intervalseconds, startedat, state, requestid,"
                 + " reservationid) VALUES (?, 'speedhuntPing', ?, ?, TRUE, FALSE, FALSE, 10, ?, 'active', ?, ?)",
                 session, player, ping, T0, request, pool);
+        execute("INSERT INTO tc_game_relays (gamesessionid, recipientmemberid, deliveredat, hunters, requestid,"
+                + " reservationid) VALUES (?, ?, ?, 2, ?, ?)", session, supporter, T0, request, pause);
         execute("INSERT INTO tc_game_breaks (gamesessionid, memberid, state, plannedstart, plannedby, reservationid)"
                 + " VALUES (?, ?, 'planned', ?, 'participant', ?)", session, supporter, T0, pause);
         execute("INSERT INTO tc_game_notification_state (gamesessionid, generation, revision) VALUES (?, 'g1', 1)",

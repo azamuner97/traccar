@@ -81,6 +81,15 @@ public final class GameState {
     }
 
     /**
+     * A one-off hunter relay that delivered (plan phase 4): {@code hunters} hunter positions reached the recipient's
+     * per-hunter mirrors at {@code deliveredAt}, for the request it fulfilled or with the joker reservation it used.
+     * Live relays are {@link LiveUpload} rows; a member's last relay delivery is the newest of both.
+     */
+    public record Relay(long id, long recipientMemberId, Instant deliveredAt, int hunters, Long requestId,
+                        Long reservationId) {
+    }
+
+    /**
      * Repeated uploads, run by the server (plan phase 2): a live speedhunt ping, manual or geofence live tracking,
      * or a live hunter relay. {@code useJoker} and {@code overAllocate}, {@code pingNumber} and {@code startedBy}
      * are what later ticks need; {@code lastStatus}, {@code lastReason} and {@code lastDelivered} are the latest

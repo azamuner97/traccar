@@ -84,6 +84,11 @@ public final class GameOperations {
         this.publisher = publisher;
     }
 
+    /** Who applies these operations: {@code Tool} for a delivery, {@code Server} for its own execution. */
+    String actor() {
+        return actor;
+    }
+
     // What the operations changed ---------------------------------------------------------------------------
 
     List<Result> results() {

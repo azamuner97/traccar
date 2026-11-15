@@ -346,7 +346,7 @@ public abstract class GameTimetableTest extends GameTestBase {
 
     private GameEffectsService.Outcome deliver(long session, GameOperation... operations) throws Exception {
         return effects.apply(session, EPOCH, new GameEffectsService.Delivery("delivery-" + UUID.randomUUID(),
-                List.of(), List.of(operations), null, null, null, null, null, null));
+                List.of(operations), null, null, null, null, null, null));
     }
 
     @Test

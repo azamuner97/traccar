@@ -36,7 +36,7 @@ managed values and preserves unrelated attributes.
 
 Traccar's database is the single store of game sessions and game state
 (`schema/changelog-game-model-2.xml`, included last in `changelog-master.xml`).
-The game-session API version is **7**; `GET /api/game-sessions/capabilities`
+The game-session API version is **10**; `GET /api/game-sessions/capabilities`
 answers it, and a Tool built for another version stops at connection.
 
 - **Members.** Each participant is a member with a stable ID
@@ -230,15 +230,18 @@ database. Tracker-endpoint uploads are not fenced.
 
 An effects delivery commits under a durable `deliveryId`
 (`tc_game_deliveries`), in one transaction: request outcomes, operations,
-joker uses, mirror positions, archived alerts, queued pushes, logs and revisions.
+ping intents, joker uses, archived alerts, queued pushes, logs and revisions.
 Repeating a delivery ID returns the stored outcome and publishes nothing; the
-same ID with other content answers 409. Writable devices are the session's
-active mirrors. Positions use the uniform mirror payload (protocol `osmand`,
-accuracy/speed/course 0, activity `still`); fix times are truncated to whole
-seconds, and a fix older than the device's latest is stored without becoming
-latest. After commit the latest positions reach the cache and WebSocket
-subscribers, and the destination devices show as online with a new last-update
-time, as for tracker uploads. These positions skip filters and event handlers.
+same ID with other content answers 409. A delivery carries no positions (a
+`positions` property is refused): the server's ping engine writes every mirror
+position from an intent, to the session's active mirrors it resolves itself
+(see "Every ping is an intent" below). Positions use the uniform mirror
+payload (protocol `osmand`, accuracy/speed/course 0, activity `still`); fix
+times are truncated to whole seconds, and a fix older than the device's latest
+is stored without becoming latest. After commit the latest positions reach the
+cache and WebSocket subscribers, and the destination devices show as online
+with a new last-update time, as for tracker uploads. These positions skip
+filters and event handlers.
 
 Pushes are queued by member in `tc_game_push_outbox` and sent after commit, one
 attempt per recipient, through the recipient account's notificator. Each row
@@ -512,6 +515,37 @@ execution event (`started`, `sample`, `waitingForLocation`, `ended`). Hunters'
 live shares follow the active uploads (no controller-epoch rule any more).
 `liveUploadSample` and live `pingDelivered` are server-internal (400 when sent).
 
+### Every ping is an intent
+
+Since phase 4 of the game execution plan the Tool sends no mirror position at
+all. Each one-off ping is a ping intent (`pings`) of an effects delivery,
+decided by `GamePingEngine` in the delivery's transaction with the rules it
+applies to the timetable and the live uploads (retired or untracked source,
+catch, break, recipients, mirrors, position), and answered with one outcome
+(`status`, `reason`, `delivered`, `withheld`, `fake`, `position`, `hunters`,
+the written `positions`, and what its effects did: `operations`, `requests`,
+`jokers`):
+
+- **Manual ping:** path `manual` with the chosen audiences; an operator
+  coordinate is a `fake` for them.
+- **Speedhunt static ping:** path `speedhunt`, `pingDelivered` (mode `static`,
+  source `real`) in `onDelivered`, `pingFailed` in `onNotDelivered`.
+- **Operator fake:** the same with a `fake` for the run's audiences, no real
+  audience and source `operatorFake`; it needs no real position.
+- **A request's ping:** the request's completion in both branches (`succeeded`
+  in `onDelivered`, `failed` in `onNotDelivered`), so the request ends in the
+  transaction that writes, or does not write, its ping.
+- **One-off hunter relay:** path `relay` with the "Get hunter positions" joker
+  use in `onDelivered`, or the completion of the `jokerHunterPositions` request
+  it fulfils (whose own joker its success uses). A relay that delivers leaves
+  a `tc_game_relays` row (recipient, time, number of hunters, request or joker
+  reservation; `state.relays` in the operator snapshot), so a member's last
+  relay delivery is the newest of its live relay rows (`lastSampleAt`) and its
+  one-off relays.
+
+An uncertain delivery is reconciled with `GET …/effects/{deliveryId}`, which
+answers the recorded ping outcomes under any epoch.
+
 Hunters see every player and supporter with the speedhunt state (open,
 running with its ping count, live until when), who is protected by a break and
 until when, the hunter-facing pings with their states, and the session's
@@ -684,7 +718,7 @@ repository-safety contract.
 3. Deploy the combined server and web build. Its migration drops the model-1
    game tables and their data; it keeps Traccar users, devices, ordinary
    drawings and the controller epoch.
-4. Release the matching Traccar Tool (game-session API version 9) and run
+4. Release the matching Traccar Tool (game-session API version 10) and run
    Device Setup for every new session: it plans members before it creates
    devices and accounts.
 5. Confirm managed devices have category `person`, integer
