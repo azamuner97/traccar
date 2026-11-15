@@ -311,12 +311,13 @@ public abstract class GameStatusTest extends GameTestBase {
         apply(session, ping(game.anna(), 1));
         Instant liveUntil = T0.plus(Duration.ofMinutes(2));
         apply(session, new GameOperation.LiveUploadStarted(GameState.SPEEDHUNT_PING, game.ben().id(), null, true,
-                true, true, 10, liveUntil.toString(), null, null, null, null));
+                true, true, 10, liveUntil.toString(), null, null, null, true, null, null));
         apply(session, new GameOperation.LiveUploadStarted(GameState.MANUAL, game.dora().id(), null, true, false,
-                false, 10, T0.plus(Duration.ofMinutes(30)).toString(), "  Left the zone  ", null, null, null));
+                false, 10, T0.plus(Duration.ofMinutes(30)).toString(), "  Left the zone  ", null, null, null, null,
+                null));
         // Carl's geofence live tracking reaches hunters, but Carl is on a break: no live share.
         apply(session, new GameOperation.LiveUploadStarted(GameState.GEOFENCE_AUTO, game.carl().id(), null, true,
-                false, false, 10, null, null, null, null, null));
+                false, false, 10, null, null, null, null, null, null, null));
 
         GameStatus.Status hunterStatus = statusOf(game.hunter());
         GameStatus.HunterView hunter = (GameStatus.HunterView) hunterStatus.status();

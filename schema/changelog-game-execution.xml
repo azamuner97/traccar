@@ -206,4 +206,50 @@
     </sql>
   </changeSet>
 
+  <!--
+    Phase 2: live uploads and relays run on the server (Claude outputs/game-execution-plan.md, phase 2). The server
+    ticks every active tc_game_live_uploads row at its interval while the game runs, whatever the controller lease
+    does, so the controller epoch of a row no longer matters and is dropped. The row keeps what later ticks need:
+
+    - usejoker / overallocate: a hunter relay uses one "Get hunter positions" joker with its first tick that
+      delivers (beyond the allocation only with overallocate); overallocate also lets a live speedhunt ping that
+      starts a run use a pool joker beyond the allocation.
+    - pingnumber / startedby: the pingDelivered fields of a live speedhunt ping's first delivered sample.
+    - laststatus / lastreason / lastdelivered: the outcome of the latest tick (sent, skipped, failed, the engine's
+      reason and the audiences that received it), so an execution event is written only when it changes, also
+      across a restart.
+
+    Uploads the Tool ran before are ended (endreason migrated): the server never resumes them.
+  -->
+  <changeSet author="traccar-tool" id="game-execution-3-live-uploads">
+    <sql>
+      UPDATE tc_game_live_uploads SET state = 'ended', endedat = COALESCE(lastsampleat, startedat),
+          endreason = 'migrated'
+        WHERE state = 'active';
+    </sql>
+    <dropColumn tableName="tc_game_live_uploads" columnName="controllerepoch" />
+    <addColumn tableName="tc_game_live_uploads">
+      <column name="usejoker" type="BOOLEAN" defaultValueBoolean="false"><constraints nullable="false" /></column>
+      <column name="overallocate" type="BOOLEAN" defaultValueBoolean="false">
+        <constraints nullable="false" />
+      </column>
+      <column name="pingnumber" type="INT" />
+      <column name="startedby" type="VARCHAR(128)" />
+      <column name="laststatus" type="VARCHAR(16)" />
+      <column name="lastreason" type="VARCHAR(32)" />
+      <column name="lastdelivered" type="VARCHAR(40)" />
+    </addColumn>
+  </changeSet>
+
+  <changeSet author="traccar-tool" id="game-execution-3-live-uploads-checks">
+    <sql>
+      ALTER TABLE tc_game_live_uploads ADD CONSTRAINT ck_gm_live_uploads_joker
+        CHECK (usejoker = FALSE OR purpose = 'hunterRelay');
+      ALTER TABLE tc_game_live_uploads ADD CONSTRAINT ck_gm_live_uploads_ping
+        CHECK (pingnumber IS NULL OR (purpose = 'speedhuntPing' AND pingnumber >= 1));
+      ALTER TABLE tc_game_live_uploads ADD CONSTRAINT ck_gm_live_uploads_last
+        CHECK (laststatus IS NULL OR laststatus IN ('sent', 'skipped', 'failed'));
+    </sql>
+  </changeSet>
+
 </databaseChangeLog>

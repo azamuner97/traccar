@@ -769,8 +769,7 @@ public class GamePingEngine {
                 return null;
             }
             transaction.lockMemberStates(members(transaction, sessionId, List.of(intent)));
-            GameOperations applied = new GameOperations(transaction, sessionId,
-                    GameStateRepository.controllerEpoch(transaction), "Server", objectMapper);
+            GameOperations applied = new GameOperations(transaction, sessionId, "Server", objectMapper, publisher);
             GamePositions.Collector collector = new GamePositions.Collector();
             Outcome outcome = apply(transaction, sessionId, intent, context, fix, applied, collector);
             hooks.completed(transaction, outcome);

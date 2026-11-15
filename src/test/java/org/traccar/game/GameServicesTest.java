@@ -374,8 +374,8 @@ public abstract class GameServicesTest {
                 + " requestid, fakeplanid) VALUES (?, ?, 1, 'live', 'jokerFake', ?, ?, ?)",
                 session, run, T0, request, fake);
         execute("INSERT INTO tc_game_live_uploads (gamesessionid, purpose, sourcememberid, pingid, tohunters,"
-                + " toplayers, tosupporters, intervalseconds, startedat, state, controllerepoch, requestid,"
-                + " reservationid) VALUES (?, 'speedhuntPing', ?, ?, TRUE, FALSE, FALSE, 10, ?, 'active', 1, ?, ?)",
+                + " toplayers, tosupporters, intervalseconds, startedat, state, requestid,"
+                + " reservationid) VALUES (?, 'speedhuntPing', ?, ?, TRUE, FALSE, FALSE, 10, ?, 'active', ?, ?)",
                 session, player, ping, T0, request, pool);
         execute("INSERT INTO tc_game_breaks (gamesessionid, memberid, state, plannedstart, plannedby, reservationid)"
                 + " VALUES (?, ?, 'planned', ?, 'participant', ?)", session, supporter, T0, pause);

@@ -155,8 +155,8 @@ public abstract class GameSchemaTest {
             + " (gamesessionid, deviceid, sourcememberid, destinationrole, destinationmemberid, state)"
             + " VALUES (?, ?, ?, ?, ?, 'active')";
     private static final String LIVE = "INSERT INTO tc_game_live_uploads (gamesessionid, purpose, sourcememberid,"
-            + " recipientmemberid, pingid, tohunters, toplayers, tosupporters, intervalseconds, startedat, state,"
-            + " controllerepoch) VALUES (?, ?, ?, ?, ?, TRUE, FALSE, FALSE, 10, ?, 'active', 1)";
+            + " recipientmemberid, pingid, tohunters, toplayers, tosupporters, intervalseconds, startedat, state)"
+            + " VALUES (?, ?, ?, ?, ?, TRUE, FALSE, FALSE, 10, ?, 'active')";
 
     private long reservation(Connection connection, long session, Long member, String type) throws SQLException {
         return insert(connection, RESERVATION, session, member, type, T0, T0);

@@ -348,10 +348,12 @@ public class GameMemberService {
             }
             history = true;
         }
+        GameOperations uploads = new GameOperations(transaction, sessionId, "Server", null, publisher);
         for (GameState.LiveUpload upload : GameStateRepository.activeUploads(transaction, sessionId)) {
             if (Objects.equals(upload.sourceMemberId(), member.id())
                     || Objects.equals(upload.recipientMemberId(), member.id())) {
-                GameStateRepository.endUpload(transaction, sessionId, upload.id(), "retired");
+                // Each ends with its ended event; a retirement neither fails a live ping nor completes a run.
+                uploads.endUpload(upload, GameLiveEvents.RETIRED);
                 history |= GameState.SPEEDHUNT_PING.equals(upload.purpose());
             }
         }

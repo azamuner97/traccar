@@ -236,23 +236,24 @@ public class GameExecutionService {
 
     /**
      * Ends the open requests and active live uploads of a session whose game stops, and skips ({@code stopped})
-     * the timetable entries that wait for a fresh fix.
+     * the timetable entries that wait for a fresh fix. Each live upload ends with its {@code ended} event; a live
+     * speedhunt ping that never reached anyone returns its pool joker, one that was the last ping completes its
+     * speedhunt (as when it stops).
      */
     private static Stopped stopEffects(GameTransaction transaction, GamePublisher publisher, long sessionId)
-            throws SQLException {
+            throws Exception {
         List<GameState.LiveUpload> uploads = GameStateRepository.activeUploads(transaction, sessionId);
         Set<Long> members = new TreeSet<>();
         for (GameState.LiveUpload upload : uploads) {
             members.add(upload.memberId());
         }
         transaction.lockMemberStates(members);
+        GameOperations ended = new GameOperations(transaction, sessionId, "Server", null, publisher);
         for (GameState.LiveUpload upload : uploads) {
-            GameStateRepository.endUpload(transaction, sessionId, upload.id(), GAME_STOPPED);
-            if (upload.visibleToHunters()) {
-                transaction.bumpMemberState(upload.memberId());
-            }
+            ended.endUpload(upload, GAME_STOPPED);
         }
-        int ended = 0;
+        GameStateService.publish(transaction, publisher, sessionId, ended);
+        int requests = 0;
         Set<Long> owners = new HashSet<>();
         boolean pool = false;
         for (GameRequest request : GameRequestRepository.open(transaction, sessionId)) {
@@ -260,7 +261,7 @@ public class GameExecutionService {
             var settled = GameRequestRepository.finish(transaction, request, status, STOPPED_MESSAGE, null, false);
             owners.addAll(settled.members());
             pool |= settled.pool();
-            ended++;
+            requests++;
         }
         Set<Long> fakeOwners = new HashSet<>();
         int entries = GameTimetableService.stopWaiting(transaction, publisher, sessionId, fakeOwners);
@@ -269,7 +270,7 @@ public class GameExecutionService {
             transaction.afterCommit(() -> publisher.invalidate(
                     new GamePublisher.Invalidation(sessionId, GamePublisher.TIMETABLE, null)));
         }
-        return new Stopped(ended, uploads.size(), entries, ended > 0, owners, pool);
+        return new Stopped(requests, uploads.size(), entries, requests > 0, owners, pool);
     }
 
     // Test events -------------------------------------------------------------------------------------------

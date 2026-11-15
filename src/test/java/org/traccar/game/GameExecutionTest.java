@@ -166,8 +166,8 @@ public abstract class GameExecutionTest extends GameTestBase {
         epoch = acquire(alice, A);
         requests.claim(session, ping.id(), epoch);
         long upload = state.apply(session, epoch, List.of(new GameOperation.LiveUploadStarted(GameState.MANUAL,
-                anna.id(), null, true, true, true, 30, null, "Operator", null, null, null))).results().getFirst()
-                .id();
+                anna.id(), null, true, true, true, 30, null, "Operator", null, null, null, null, null))).results()
+                .getFirst().id();
         long annaRevision = memberRevision(anna.id());
         publisher.clear();
 
@@ -183,7 +183,12 @@ public abstract class GameExecutionTest extends GameTestBase {
         assertEquals(GameState.ENDED, ended.state());
         assertEquals(GameExecutionService.GAME_STOPPED, ended.endReason());
         assertEquals(annaRevision + 1, memberRevision(anna.id()));
-        GameEvent event = publisher.events.getFirst();
+        // The upload's ended event comes first, then the game's.
+        assertEquals(List.of("live:ended", "game:gameStopped"), publisher.events.stream()
+                .map(item -> item.category() + ":" + item.data().path("type").asText()).toList());
+        assertEquals(GameExecutionService.GAME_STOPPED, publisher.events.getFirst().data().path("endReason")
+                .asText());
+        GameEvent event = publisher.events.getLast();
         assertEquals(2, event.data().path("endedRequests").asInt());
         assertEquals(1, event.data().path("endedLiveUploads").asInt());
         assertFalse(publisher.topic(GamePublisher.REQUESTS).isEmpty());

@@ -80,12 +80,18 @@ public final class GameState {
         }
     }
 
-    /** Repeated uploads: a live speedhunt ping, manual or geofence live tracking, or a live hunter relay. */
+    /**
+     * Repeated uploads, run by the server (plan phase 2): a live speedhunt ping, manual or geofence live tracking,
+     * or a live hunter relay. {@code useJoker} and {@code overAllocate}, {@code pingNumber} and {@code startedBy}
+     * are what later ticks need; {@code lastStatus}, {@code lastReason} and {@code lastDelivered} are the latest
+     * tick's outcome.
+     */
     public record LiveUpload(long id, String purpose, Long sourceMemberId, Long recipientMemberId, Long pingId,
                              boolean toHunters, boolean toPlayers, boolean toSupporters, int intervalSeconds,
                              Instant startedAt, Instant deadline, Instant lastSampleAt, Instant endedAt, String state,
-                             String endReason, String reason, long controllerEpoch, Long requestId,
-                             Long reservationId) {
+                             String endReason, String reason, Long requestId, Long reservationId, boolean useJoker,
+                             boolean overAllocate, Integer pingNumber, String startedBy, String lastStatus,
+                             String lastReason, java.util.List<String> lastDelivered) {
         public boolean active() {
             return ACTIVE.equals(state);
         }
@@ -95,12 +101,33 @@ public final class GameState {
             return sourceMemberId != null ? sourceMemberId : recipientMemberId;
         }
 
+        public boolean relay() {
+            return HUNTER_RELAY.equals(purpose);
+        }
+
         /**
          * Whether hunters can observe it: a speedhunt ping always (it is speedhunt state), manual and geofence
          * tracking when they reach hunters. A hunter relay never reaches hunters.
          */
         public boolean visibleToHunters() {
             return SPEEDHUNT_PING.equals(purpose) || toHunters && !HUNTER_RELAY.equals(purpose);
+        }
+
+        /** The audiences of a participant's upload, in the engine's order; none for a relay. */
+        public java.util.List<String> audiences() {
+            java.util.List<String> result = new java.util.ArrayList<>();
+            if (!relay()) {
+                if (toHunters) {
+                    result.add(TimetableInstruction.HUNTERS);
+                }
+                if (toPlayers) {
+                    result.add(TimetableInstruction.PLAYERS);
+                }
+                if (toSupporters) {
+                    result.add(TimetableInstruction.SUPPORTERS);
+                }
+            }
+            return result;
         }
     }
 

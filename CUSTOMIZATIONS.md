@@ -56,13 +56,13 @@ answers it, and a Tool built for another version stops at connection.
   live uploads (`tc_game_live_uploads`) and per-member revisions
   (`tc_game_member_state`). Nothing writes a status document, and there is no
   hidden game-state device.
-- **Typed operations.** The Tool stays the scheduler. It sends typed operations
+- **Typed operations.** The Tool decides and sends typed operations
   (`catch`, `release`, `pingDelivered`, `pingFailed`, `runEnded`,
-  `liveUploadStarted`, `liveUploadSample`, `liveUploadEnded`, `breakStarted`,
-  `breakWaiting`, `breakEnded`, `breakCancelled`, `breakMissed`, `fakeUsed`,
-  `fakeReleased`, `checkpoint`) through `POST /api/game-sessions/{id}/effects`.
-  The server validates every lifecycle transition (409 for an illegal one) and
-  never schedules anything itself.
+  `liveUploadStarted`, `liveUploadEnded`, `breakStarted`, `breakWaiting`,
+  `breakEnded`, `breakCancelled`, `breakMissed`, `checkpoint`) and ping intents
+  through `POST /api/game-sessions/{id}/effects`. The server validates every
+  lifecycle transition (409 for an illegal one) and executes what has to happen
+  on time (the timetable, live uploads and relays; see below).
 - **Resource rows.** The Traccar resources a session owns are rows: members'
   accounts and trackers, mirrors (`tc_game_mirrors`), groups
   (`tc_game_session_groups`) and managed geofences
@@ -125,7 +125,7 @@ are administrators in this version.
 | Mirrors, groups, managed geofences | `tc_game_mirrors`, `tc_game_session_groups`, `tc_game_session_geofences` | Tool (`…/resources/*`) |
 | Generated-account passwords | `tc_game_session_credentials` (AES-GCM) | operator |
 | Geofence planner document | `tc_game_geofence_plans` | Tool |
-| Recovery checkpoints (monitoring cursors, relay counters) | `tc_game_session_checkpoints` | Tool (`…/checkpoints/*`) |
+| Recovery checkpoints (monitoring cursors) | `tc_game_session_checkpoints` | Tool (`…/checkpoints/*`) |
 | Timetable plan, toggle, columns, slots and cells (execution progress on the cells) | `tc_game_timetables`, `tc_game_timetable_participants`, `tc_game_timetable_slots`, `tc_game_timetable_entries`, `tc_game_timetable_changes` | Tool edits (`…/timetable/changes`, `…/timetable/execution`), the server executes |
 | Session log (including speedhunt events) | `tc_game_session_logs` | Tool |
 
@@ -173,8 +173,8 @@ Each session has a game state (`tc_game_session_state`): `running` or
 closed or crashed Tool leaves the game running. At most one session runs per
 server (a unique `runningkey`). While it runs, members may submit requests and
 see "running"; the server executes its timetable (when the timetable toggle is
-on) and will execute live uploads and break timers for it (later phases of
-`Claude outputs/game-execution-plan.md`).
+on), its live uploads and relays, and will execute break timers for it (a later
+phase of `Claude outputs/game-execution-plan.md`).
 Changing the state is fenced, except that any administrator may stop a game
 without an epoch while no lease is active. Stopping ends the open requests
 (waiting ones are cancelled, executing ones fail; their jokers return) and the
@@ -480,6 +480,31 @@ ping intents too (`pings`, one outcome each); the guarded fake positions and
 the `fakeUsed`/`fakeReleased` operations are gone. Timetable fakes are offered
 and armed up to 15 s before their ping.
 
+### Server-run live uploads and relays
+
+Live uploads run on the server (`Claude outputs/game-execution-plan.md`,
+phase 2). The Tool starts one with `liveUploadStarted` (a live speedhunt ping,
+manual or geofence live tracking of a source, or a live hunter relay to a
+recipient) and stops it with `liveUploadEnded`; the row stores what later ticks
+need (`useJoker`, `overAllocate`, `pingNumber`, `startedBy`).
+`GameLiveUploadRunner` ticks every active row at its interval while the game
+runs, whatever the lease does: a participant's upload is one engine intent with
+its audiences and the latest position (paths `speedhunt`, `live`,
+`geofenceLive`), a relay sends every active hunter's latest position to the
+recipient's per-hunter mirrors. A late tick sends the current position once;
+nothing is replayed. A live speedhunt ping's first delivered sample applies
+`pingDelivered` (and starts the speedhunt with its pool joker); a relay uses its
+"Get hunter positions" joker with its first tick that delivers. Uploads end at
+their deadline, with a stop, with a catch of their source (or relay
+recipient), with the end of their speedhunt, with a retirement and when the
+game stops. A live speedhunt ping that ends without reaching anyone returns the
+pool joker armed for it; one that delivered the speedhunt's last ping completes
+the speedhunt. Each start, change of outcome (first delivery, failure,
+recovery, waiting for a first position) and end is a `live` or `relay`
+execution event (`started`, `sample`, `waitingForLocation`, `ended`). Hunters'
+live shares follow the active uploads (no controller-epoch rule any more).
+`liveUploadSample` and live `pingDelivered` are server-internal (400 when sent).
+
 Hunters see every player and supporter with the speedhunt state (open,
 running with its ping count, live until when), who is protected by a break and
 until when, the hunter-facing pings with their states, and the session's
@@ -652,7 +677,7 @@ repository-safety contract.
 3. Deploy the combined server and web build. Its migration drops the model-1
    game tables and their data; it keeps Traccar users, devices, ordinary
    drawings and the controller epoch.
-4. Release the matching Traccar Tool (game-session API version 7) and run
+4. Release the matching Traccar Tool (game-session API version 8) and run
    Device Setup for every new session: it plans members before it creates
    devices and accounts.
 5. Confirm managed devices have category `person`, integer

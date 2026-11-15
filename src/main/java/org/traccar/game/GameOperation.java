@@ -26,7 +26,6 @@ import com.fasterxml.jackson.databind.JsonNode;
     @JsonSubTypes.Type(value = GameOperation.PingFailed.class, name = "pingFailed"),
     @JsonSubTypes.Type(value = GameOperation.RunEnded.class, name = "runEnded"),
     @JsonSubTypes.Type(value = GameOperation.LiveUploadStarted.class, name = "liveUploadStarted"),
-    @JsonSubTypes.Type(value = GameOperation.LiveUploadSample.class, name = "liveUploadSample"),
     @JsonSubTypes.Type(value = GameOperation.LiveUploadEnded.class, name = "liveUploadEnded"),
     @JsonSubTypes.Type(value = GameOperation.BreakPlanned.class, name = "breakPlanned"),
     @JsonSubTypes.Type(value = GameOperation.BreakWaiting.class, name = "breakWaiting"),
@@ -80,20 +79,32 @@ public sealed interface GameOperation {
     }
 
     /**
-     * Repeated uploads start: a live speedhunt ping, manual or geofence live tracking of {@code sourceMemberId}, or a
-     * live hunter relay to {@code recipientMemberId}. A hunter relay uses a "Get hunter positions" joker with its
-     * first tick that delivers ({@code useJoker}), on this operation or a later sample.
+     * Repeated uploads start, run by the server at {@code intervalSeconds} until {@code deadline} (plan phase 2): a
+     * live speedhunt ping, manual or geofence live tracking of {@code sourceMemberId}, or a live hunter relay to
+     * {@code recipientMemberId}. A hunter relay with {@code useJoker} uses one "Get hunter positions" joker with its
+     * first tick that delivers; {@code overAllocate} allows that use beyond the allocation. A live speedhunt ping's
+     * first delivered sample is ping {@code pingNumber} (default: the next ping of the target's speedhunt) started by
+     * {@code startedBy}; when it starts a speedhunt, {@code overAllocate} allows a pool joker beyond the allocation.
      */
     record LiveUploadStarted(String purpose, Long sourceMemberId, Long recipientMemberId, boolean toHunters,
                              boolean toPlayers, boolean toSupporters, int intervalSeconds, String deadline,
-                             String reason, Long requestId, Boolean useJoker, Boolean overAllocate)
-            implements GameOperation {
+                             String reason, Long requestId, Boolean useJoker, Boolean overAllocate,
+                             Integer pingNumber, String startedBy) implements GameOperation {
     }
 
-    /** A tick of an active live upload; its positions travel in the same delivery. */
+    /**
+     * A tick of an active live upload that delivered: server-internal, never part of a delivery (the server runs
+     * live uploads). It records the sample, uses a relay's joker on its first delivering tick and applies a live
+     * ping's joker fake.
+     */
     record LiveUploadSample(long liveUploadId, Boolean useJoker, Boolean overAllocate) implements GameOperation {
+        @Override
+        public String name() {
+            return "liveUploadSample";
+        }
     }
 
+    /** An active live upload ends: an operator's stop, a {@code speedhuntStopLivePing} request. */
     record LiveUploadEnded(long liveUploadId, String endReason) implements GameOperation {
     }
 

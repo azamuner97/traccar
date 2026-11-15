@@ -35,6 +35,21 @@ public abstract class GameStateTest extends GameTestBase {
         return apply(session, operation).results().getFirst().id();
     }
 
+    /** Applies operations as the server's own execution does (live pings and samples are server-internal). */
+    private List<GameOperations.Result> server(long session, GameOperation... operations) throws Exception {
+        return transactions.write(transaction -> {
+            transaction.lockSession(session);
+            transaction.lockMemberStates(GameOperations.members(transaction, session, List.of(operations)));
+            GameOperations applied = new GameOperations(transaction, session, "Server", mapper, publisher);
+            for (int i = 0; i < operations.length; i++) {
+                applied.apply(i, operations[i]);
+            }
+            transaction.bumpSession();
+            GameStateService.publish(transaction, publisher, session, applied);
+            return applied.results();
+        });
+    }
+
     private static GameOperation.PingDelivered ping(GameMember target, int number) {
         return new GameOperation.PingDelivered(target.id(), number, GameState.STATIC, GameState.REAL, true, true,
                 true, null, null, "Operator", true);
@@ -49,7 +64,8 @@ public abstract class GameStateTest extends GameTestBase {
                                                           String reason) {
         boolean relay = GameState.HUNTER_RELAY.equals(purpose);
         return new GameOperation.LiveUploadStarted(purpose, relay ? null : member.id(), relay ? member.id() : null,
-                toHunters, true, true, 30, null, reason, null, null, null);
+                toHunters && !relay, !relay, !relay, 30, null, reason, null, null,
+                GameState.SPEEDHUNT_PING.equals(purpose) ? Boolean.TRUE : null, null, null);
     }
 
     // Catches -----------------------------------------------------------------------------------------------
@@ -175,29 +191,31 @@ public abstract class GameStateTest extends GameTestBase {
         assertTrue(state.speedhuntRunning(session));
         assertTrue(state.runs(session).isEmpty());
         assertStatus(409, () -> apply(session, upload(GameState.SPEEDHUNT_PING, anna, true, null)));
-        assertStatus(400, () -> apply(session, livePing(anna, 1, upload + 1000)));
+        assertStatus(400, () -> server(session, livePing(anna, 1, upload + 1000)));
+        // Only the server delivers a live ping and its samples, with the upload's ticks.
+        assertStatus(400, () -> apply(session, livePing(anna, 1, upload)));
+        assertStatus(400, () -> apply(session, new GameOperation.LiveUploadSample(upload, null, null)));
 
         clock.advance(Duration.ofSeconds(5));
-        var delivered = apply(session, livePing(anna, 1, upload)).results().getFirst();
+        var delivered = server(session, livePing(anna, 1, upload)).getFirst();
         assertEquals(revision + 2, memberRevision(anna.id()));
-        assertStatus(409, () -> apply(session, livePing(anna, 2, upload)));
+        assertStatus(409, () -> server(session, livePing(anna, 2, upload)));
         for (int i = 0; i < 3; i++) {
             clock.advance(Duration.ofSeconds(30));
-            apply(session, new GameOperation.LiveUploadSample(upload, null, null));
+            server(session, new GameOperation.LiveUploadSample(upload, null, null));
         }
         // Samples are not game changes hunters observe: the revision stays.
         assertEquals(revision + 2, memberRevision(anna.id()));
         var row = state.liveUploads(session).getFirst();
         assertEquals(delivered.id(), row.pingId());
         assertEquals(clock.instant(), row.lastSampleAt());
-        assertEquals(EPOCH, row.controllerEpoch());
         assertEquals(1, state.runs(session).getFirst().pings().size());
         assertEquals(GameState.LIVE, state.runs(session).getFirst().pings().getFirst().mode());
         assertEquals(1, state.statistics(session).getFirst().livePings());
 
         apply(session, new GameOperation.LiveUploadEnded(upload, "deadline"));
         assertEquals(revision + 3, memberRevision(anna.id()));
-        assertStatus(409, () -> apply(session, new GameOperation.LiveUploadSample(upload, null, null)));
+        assertStatus(409, () -> server(session, new GameOperation.LiveUploadSample(upload, null, null)));
         assertStatus(409, () -> apply(session, new GameOperation.LiveUploadEnded(upload, null)));
         assertEquals("deadline", state.liveUploads(session).getFirst().endReason());
         assertTrue(state.speedhuntRunning(session));
@@ -314,13 +332,13 @@ public abstract class GameStateTest extends GameTestBase {
         long manual = applyId(session, upload(GameState.MANUAL, anna, true, "Too far out"));
         assertEquals(revision + 1, memberRevision(anna.id()));
         applyId(session, new GameOperation.LiveUploadStarted(GameState.GEOFENCE_AUTO, ben.id(), null, true, true,
-                true, 30, clock.instant().plusSeconds(300).toString(), null, null, null, null));
+                true, 30, clock.instant().plusSeconds(300).toString(), null, null, null, null, null, null));
         long playersOnly = applyId(session, upload(GameState.MANUAL, carla, false, null));
         long carlaRevision = memberRevision(carla.id());
         long relay = applyId(session, new GameOperation.LiveUploadStarted(GameState.HUNTER_RELAY, null, dora.id(),
-                false, true, false, 10, null, null, null, true, true));
+                false, false, false, 10, null, null, null, true, true, null, null));
         long doraRevision = memberRevision(dora.id());
-        apply(session, new GameOperation.LiveUploadSample(relay, true, true));
+        server(session, new GameOperation.LiveUploadSample(relay, true, true));
         // A relay is a private joker use: nobody else sees a revision change.
         assertEquals(doraRevision, memberRevision(dora.id()));
         var relayJokers = jokers.own(dora).inventories().stream()
@@ -334,14 +352,16 @@ public abstract class GameStateTest extends GameTestBase {
                 new GameStateService.LiveShare(ben.id(), "geofence", clock.instant().plusSeconds(300), null)),
                 state.liveShares(session));
 
-        // A new controller epoch makes rows of the previous one stale until they are sampled again.
+        // The server runs live uploads whatever the lease does: a new controller epoch keeps every share.
         lease(session, EPOCH + 1);
-        assertTrue(state.liveShares(session).isEmpty());
-        state.apply(session, EPOCH + 1, List.of(new GameOperation.LiveUploadSample(manual, null, null)));
-        assertEquals(List.of(anna.id()), state.liveShares(session).stream()
+        assertEquals(List.of(anna.id(), ben.id()), state.liveShares(session).stream()
                 .map(GameStateService.LiveShare::memberId).toList());
         state.apply(session, EPOCH + 1, List.of(new GameOperation.Catch(anna.id(), null)));
-        assertTrue(state.liveShares(session).isEmpty());
+        assertEquals(List.of(ben.id()), state.liveShares(session).stream()
+                .map(GameStateService.LiveShare::memberId).toList());
+        // The catch ended Anna's live upload with an ended event.
+        assertEquals(GameLiveEvents.CAUGHT, state.liveUploads(session).stream().filter(item -> item.id() == manual)
+                .findFirst().orElseThrow().endReason());
         stopGame(session);
         assertTrue(state.liveShares(session).isEmpty());
 
@@ -349,15 +369,15 @@ public abstract class GameStateTest extends GameTestBase {
         apply(session, new GameOperation.LiveUploadEnded(playersOnly, "stopped"));
         assertEquals(carlaRevision, memberRevision(carla.id()));
         assertStatus(400, () -> apply(session, new GameOperation.LiveUploadStarted("radio", anna.id(), null, true,
-                true, true, 30, null, null, null, null, null)));
+                true, true, 30, null, null, null, null, null, null, null)));
         assertStatus(400, () -> apply(session, new GameOperation.LiveUploadStarted(GameState.HUNTER_RELAY,
-                anna.id(), null, true, true, true, 30, null, null, null, null, null)));
+                anna.id(), null, true, true, true, 30, null, null, null, null, null, null, null)));
         assertStatus(400, () -> apply(session, new GameOperation.LiveUploadStarted(GameState.MANUAL, ben.id(), null,
-                true, true, true, 0, null, null, null, null, null)));
+                true, true, true, 0, null, null, null, null, null, null, null)));
         assertStatus(400, () -> apply(session, new GameOperation.LiveUploadStarted(GameState.MANUAL, carla.id(),
-                null, true, true, true, 30, null, null, null, true, null)));
+                null, true, true, true, 30, null, null, null, true, null, null, null)));
         assertStatus(409, () -> apply(session, new GameOperation.LiveUploadStarted(GameState.MANUAL, carla.id(),
-                null, true, true, true, 30, clock.instant().toString(), null, null, null, null)));
+                null, true, true, true, 30, clock.instant().toString(), null, null, null, null, null, null)));
         assertEquals(List.of(), jokers.reconcile(session));
         assertEquals(Set.of(dora.id()), publisher.topic(GamePublisher.JOKERS).getLast().members());
     }

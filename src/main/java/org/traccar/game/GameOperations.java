@@ -47,13 +47,17 @@ public final class GameOperations {
     }
 
     static final String BOUND = "bound";
+    /** The longest interval of a live upload: one hour. */
+    static final int MAX_INTERVAL_SECONDS = 3600;
     static final String BREAK_UNAVAILABLE = "A break cannot start right now; try again later";
+
+    private static final ObjectMapper DEFAULT_MAPPER = new ObjectMapper();
 
     private final GameTransaction transaction;
     private final long session;
-    private final long epoch;
     private final String actor;
     private final ObjectMapper objectMapper;
+    private final GamePublisher publisher;
     private GameSettings settings;
 
     private final List<Result> results = new ArrayList<>();
@@ -67,12 +71,17 @@ public final class GameOperations {
     private boolean requestsChanged;
     private boolean poolChanged;
 
-    GameOperations(GameTransaction transaction, long session, long epoch, String actor, ObjectMapper objectMapper) {
+    /**
+     * Operations of one transaction that holds the session lock. {@code publisher} receives the execution events
+     * of live uploads (written in the transaction, pushed after commit).
+     */
+    GameOperations(GameTransaction transaction, long session, String actor, ObjectMapper objectMapper,
+                   GamePublisher publisher) {
         this.transaction = transaction;
         this.session = session;
-        this.epoch = epoch;
         this.actor = actor;
-        this.objectMapper = objectMapper;
+        this.objectMapper = objectMapper == null ? DEFAULT_MAPPER : objectMapper;
+        this.publisher = publisher;
     }
 
     // What the operations changed ---------------------------------------------------------------------------
@@ -134,6 +143,21 @@ public final class GameOperations {
             settings = GameSettings.read(transaction, session);
         }
         return settings;
+    }
+
+    /**
+     * Refuses what only the server applies: a live ping is delivered by its upload's first sample, and samples are
+     * the server's own ticks ({@link GameLiveUploadRunner}). Checked for Tool-sent operations.
+     */
+    static void checkSent(List<GameOperation> operations) {
+        for (GameOperation operation : operations) {
+            if (operation instanceof GameOperation.PingDelivered ping && GameState.LIVE.equals(ping.mode())) {
+                throw GameErrors.invalid("A live ping is delivered by the server with its live upload's first sample");
+            }
+            if (operation instanceof GameOperation.LiveUploadSample) {
+                throw GameErrors.invalid("Live upload samples are the server's own ticks");
+            }
+        }
     }
 
     // Locking -----------------------------------------------------------------------------------------------
@@ -290,7 +314,7 @@ public final class GameOperations {
      * A caught member's open requests end and return their jokers, their armed plans (fakes not bound yet,
      * planned breaks) are released, and an active break ends; its joker stays used.
      */
-    private void memberOut(long memberId) throws SQLException {
+    private void memberOut(long memberId) throws Exception {
         var settled = GameRequestRepository.cancelOpen(transaction, session, memberId, GameRequest.CANCELLED,
                 "You are out of the game");
         if (!settled.members().isEmpty() || settled.pool()) {
@@ -304,6 +328,12 @@ public final class GameOperations {
         Optional<GameState.Break> active = GameStateRepository.activeBreak(transaction, session, memberId);
         if (active.isPresent()) {
             GameStateRepository.finishBreak(transaction, session, active.get().id(), GameState.ENDED);
+        }
+        // Their live uploads end, and so do the live relays to them.
+        for (GameState.LiveUpload upload : GameStateRepository.activeUploads(transaction, session)) {
+            if (upload.memberId() == memberId) {
+                endUpload(upload, GameLiveEvents.CAUGHT);
+            }
         }
     }
 
@@ -405,7 +435,7 @@ public final class GameOperations {
                 item.requestId(), fakePlan);
         if (upload != null) {
             GameStateRepository.linkPing(transaction, session, upload.id(), pingId);
-            GameStateRepository.sample(transaction, session, upload.id(), epoch);
+            GameStateRepository.sample(transaction, session, upload.id());
         }
         visible(target.id());
         historyChanged = true;
@@ -484,8 +514,19 @@ public final class GameOperations {
         }
         GameState.Run run = GameStateRepository.activeRun(transaction, session, target.id())
                 .orElseThrow(() -> GameErrors.conflict("The " + target.label() + " has no running speedhunt"));
-        GameStateRepository.endRun(transaction, session, run.id(), item.outcome(), item.reason());
-        // Armed fakes planned on pings the run did not reach are returned; open requests for them fail later.
+        endRun(run, item.outcome(), item.reason());
+        // The run's live ping ends with it.
+        for (GameState.LiveUpload upload : GameStateRepository.activeUploads(transaction, session)) {
+            if (GameState.SPEEDHUNT_PING.equals(upload.purpose()) && upload.memberId() == target.id()) {
+                endUpload(upload, GameLiveEvents.RUN_ENDED);
+            }
+        }
+        result(index, item, run.id(), run.id(), null, null, item.outcome());
+    }
+
+    /** Ends a run; armed fakes planned on pings it did not reach are returned (open requests for them fail later). */
+    private void endRun(GameState.Run run, String outcome, String reason) throws SQLException {
+        GameStateRepository.endRun(transaction, session, run.id(), outcome, reason);
         for (var plan : GameJokerRepository.plans(transaction, session, "p.boundrunid = ? AND "
                 + GameJokerRepository.ARMED, run.id())) {
             GameJokerRepository.release(transaction,
@@ -494,9 +535,8 @@ public final class GameOperations {
             fakes.add(new FakeOutcome(plan.reservationId(), GameJokerRepository.RELEASED));
             jokerMembers.add(plan.memberId());
         }
-        visible(target.id());
+        visible(run.targetMemberId());
         historyChanged = true;
-        result(index, item, run.id(), run.id(), null, null, item.outcome());
     }
 
     // Live uploads ------------------------------------------------------------------------------------------
@@ -506,23 +546,31 @@ public final class GameOperations {
             throw GameErrors.invalid("Invalid live upload purpose");
         }
         boolean relay = GameState.HUNTER_RELAY.equals(item.purpose());
+        boolean speedhunt = GameState.SPEEDHUNT_PING.equals(item.purpose());
         if (relay != (item.sourceMemberId() == null) || relay != (item.recipientMemberId() != null)) {
             throw GameErrors.invalid(relay ? "A hunter relay names its recipient" : "A live upload names its source");
         }
-        if (item.intervalSeconds() < 1) {
+        if (item.intervalSeconds() < 1 || item.intervalSeconds() > MAX_INTERVAL_SECONDS) {
             throw GameErrors.invalid("Invalid live upload interval");
         }
         if (Boolean.TRUE.equals(item.useJoker()) && !relay) {
             throw GameErrors.invalid("Only a hunter relay uses a joker");
         }
+        if (!speedhunt && (item.pingNumber() != null || item.startedBy() != null)) {
+            throw GameErrors.invalid("Only a live speedhunt ping has a ping number");
+        }
+        if (relay && (item.toHunters() || item.toPlayers() || item.toSupporters())) {
+            throw GameErrors.invalid("A hunter relay has no audiences");
+        }
+        if (!relay && !item.toHunters() && !item.toPlayers() && !item.toSupporters()) {
+            throw GameErrors.invalid("A live upload names its audiences");
+        }
         GameMember member = participant(relay ? item.recipientMemberId() : item.sourceMemberId());
-        if (GameState.SPEEDHUNT_PING.equals(item.purpose())) {
-            if (caught(member.id())) {
-                throw GameErrors.conflict("The " + member.label() + " is out of the game");
-            }
-            if (onBreak(member.id())) {
-                throw GameErrors.conflict("The " + member.label() + " is on a break");
-            }
+        if (caught(member.id())) {
+            throw GameErrors.conflict("The " + member.label() + " is out of the game");
+        }
+        if (speedhunt && onBreak(member.id())) {
+            throw GameErrors.conflict("The " + member.label() + " is on a break");
         }
         for (GameState.LiveUpload other : GameStateRepository.activeUploads(transaction, session)) {
             if (other.purpose().equals(item.purpose()) && other.memberId() == member.id()) {
@@ -534,18 +582,51 @@ public final class GameOperations {
                 && GameRequestRepository.find(transaction, session, item.requestId()).isEmpty()) {
             throw GameErrors.invalid("Request " + item.requestId() + " not found in this game session");
         }
+        boolean overAllocate = Boolean.TRUE.equals(item.overAllocate());
+        Integer number = null;
+        if (speedhunt) {
+            number = nextPing(member, item.pingNumber(), overAllocate);
+        }
+        if (Boolean.TRUE.equals(item.useJoker()) && !overAllocate && GameJokerRepository.available(transaction,
+                session, member.id(), GameJokerRepository.HUNTER_POSITIONS) <= 0) {
+            throw GameErrors.conflict("No Get hunter positions joker is left for the " + member.label()
+                    + "; confirm a use beyond the allocation");
+        }
         long id = GameStateRepository.insertUpload(transaction, session, item.purpose(),
                 relay ? null : member.id(), relay ? member.id() : null, item.toHunters(), item.toPlayers(),
-                item.toSupporters(), item.intervalSeconds(), deadline(item.deadline(), "live upload deadline"),
-                item.reason(), epoch, item.requestId());
+                item.toSupporters(), new GameStateRepository.UploadOptions(item.intervalSeconds(),
+                        deadline(item.deadline(), "live upload deadline"), item.reason(), item.requestId(),
+                        Boolean.TRUE.equals(item.useJoker()), overAllocate, number,
+                        speedhunt ? (item.startedBy() == null ? actor : item.startedBy()) : null));
         GameState.LiveUpload upload = GameStateRepository.upload(transaction, session, id).orElseThrow();
-        if (Boolean.TRUE.equals(item.useJoker())) {
-            relayJoker(upload, item.overAllocate());
-        }
         if (upload.visibleToHunters()) {
             visible(member.id());
         }
-        result(index, item, id, null, null, null, GameState.ACTIVE);
+        GameLiveEvents.started(transaction, publisher, session, upload);
+        result(index, item, id, null, number, null, GameState.ACTIVE);
+    }
+
+    /**
+     * The ping a live speedhunt ping delivers with its first sample: the next of the target's running speedhunt,
+     * or ping 1 of a new one, whose pool joker must be held for the target, available, or allowed beyond the
+     * allocation.
+     */
+    private int nextPing(GameMember target, Integer requested, boolean overAllocate) throws SQLException {
+        Optional<GameState.Run> run = GameStateRepository.activeRun(transaction, session, target.id());
+        int next = run.isEmpty() ? 1 : GameStateRepository.lastPingNumber(transaction, session, run.get().id()) + 1;
+        if (requested != null && requested != next) {
+            throw GameErrors.conflict("Ping " + requested + " is not the next ping (" + next + ") of this speedhunt");
+        }
+        Integer limit = settings().pingsPerSpeedhunt();
+        if (limit != null && next > limit) {
+            throw GameErrors.conflict("The speedhunt of the " + target.label() + " reached its ping limit");
+        }
+        if (run.isEmpty() && !overAllocate && poolReservation(target.id(), false) == null
+                && GameJokerRepository.available(transaction, session, null, GameJokerRepository.SPEEDHUNT) <= 0) {
+            throw GameErrors.conflict("No speedhunt joker is left in the hunters' pool; confirm a use beyond the"
+                    + " allocation");
+        }
+        return next;
     }
 
     /** A live relay uses one "Get hunter positions" joker per activation, with its first tick that delivers. */
@@ -562,9 +643,10 @@ public final class GameOperations {
         jokerMembers.add(upload.recipientMemberId());
     }
 
+    /** A delivering tick of a server-run upload (server-internal). */
     private void liveUploadSample(int index, GameOperation.LiveUploadSample item) throws Exception {
         GameState.LiveUpload upload = upload(item.liveUploadId());
-        GameStateRepository.sample(transaction, session, upload.id(), epoch);
+        GameStateRepository.sample(transaction, session, upload.id());
         if (Boolean.TRUE.equals(item.useJoker())) {
             relayJoker(upload, item.overAllocate());
         }
@@ -581,11 +663,63 @@ public final class GameOperations {
 
     private void liveUploadEnded(int index, GameOperation.LiveUploadEnded item) throws Exception {
         GameState.LiveUpload upload = upload(item.liveUploadId());
-        GameStateRepository.endUpload(transaction, session, upload.id(), item.endReason());
+        String reason = item.endReason() == null || item.endReason().isBlank() ? "stopped" : item.endReason().strip();
+        endUpload(upload, reason);
+        result(index, item, upload.id(), null, null, null, GameState.ENDED);
+    }
+
+    /**
+     * Ends an active live upload with its {@code ended} event, whatever ends it: a stop, its deadline, a catch, the
+     * end of its speedhunt, the game stopping, the member retiring. A live speedhunt ping that never reached anyone
+     * returns the pool joker armed for the speedhunt it would have started ({@code pingFailed}); one whose ping was
+     * the last of its speedhunt completes that speedhunt ({@code runEnded completed}), as the Tool did when such a
+     * Live Ping stopped. A catch, a retirement, the end of the speedhunt and a replacement do neither.
+     */
+    void endUpload(GameState.LiveUpload upload, String reason) throws Exception {
+        endUpload(upload, reason, null);
+    }
+
+    /** Ends an active live upload; {@code detail} explains a refusal that ended it. */
+    void endUpload(GameState.LiveUpload upload, String reason, String detail) throws Exception {
+        GameStateRepository.endUpload(transaction, session, upload.id(), reason);
         if (upload.visibleToHunters()) {
             visible(upload.memberId());
         }
-        result(index, item, upload.id(), null, null, null, GameState.ENDED);
+        GameLiveEvents.Ended effects = GameLiveEvents.Ended.NONE;
+        if (GameState.SPEEDHUNT_PING.equals(upload.purpose())) {
+            historyChanged = true;
+            if (!GameLiveEvents.QUIET_ENDS.contains(reason)) {
+                effects = finishLivePing(upload);
+            }
+        }
+        GameState.LiveUpload ended = GameStateRepository.upload(transaction, session, upload.id()).orElseThrow();
+        GameLiveEvents.ended(transaction, publisher, session, ended, reason, detail, effects);
+    }
+
+    private GameLiveEvents.Ended finishLivePing(GameState.LiveUpload upload) throws Exception {
+        long target = upload.memberId();
+        Optional<GameState.Run> run = GameStateRepository.activeRun(transaction, session, target);
+        if (upload.pingId() == null) {
+            if (run.isPresent()) {
+                return GameLiveEvents.Ended.NONE;
+            }
+            GameJokerRepository.Reservation armed = poolReservation(target, true);
+            if (armed == null) {
+                return GameLiveEvents.Ended.NONE;
+            }
+            GameJokerRepository.release(transaction, armed, "Server", "The Live Ping reached nobody");
+            fakes.add(new FakeOutcome(armed.id(), GameJokerRepository.RELEASED));
+            poolChanged = true;
+            return new GameLiveEvents.Ended(armed.id(), null);
+        }
+        var ping = GameStateRepository.ping(transaction, session, upload.pingId()).orElseThrow();
+        Integer limit = settings().pingsPerSpeedhunt();
+        if (run.isEmpty() || run.get().id() != ping.runId() || limit == null
+                || GameStateRepository.lastPingNumber(transaction, session, run.get().id()) < limit) {
+            return GameLiveEvents.Ended.NONE;
+        }
+        endRun(run.get(), GameState.COMPLETED, "ping limit");
+        return new GameLiveEvents.Ended(null, run.get().id());
     }
 
     // Breaks ------------------------------------------------------------------------------------------------

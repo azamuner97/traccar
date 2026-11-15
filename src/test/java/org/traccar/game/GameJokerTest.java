@@ -91,7 +91,7 @@ public abstract class GameJokerTest extends GameTestBase {
             transaction.lockSession(session);
             List<GameOperation> list = List.of(operations);
             transaction.lockMemberStates(GameOperations.members(transaction, session, list));
-            GameOperations applied = new GameOperations(transaction, session, EPOCH, "Tool", mapper);
+            GameOperations applied = new GameOperations(transaction, session, "Tool", mapper, publisher);
             GameRequestService.complete(transaction, session, completions, applied);
             for (int i = 0; i < list.size(); i++) {
                 applied.apply(i, list.get(i));
@@ -396,7 +396,7 @@ public abstract class GameJokerTest extends GameTestBase {
 
         // While any speedhunt runs, the target and everybody else get the same answer.
         long upload = apply(session, new GameOperation.LiveUploadStarted(GameState.SPEEDHUNT_PING, anna.id(), null,
-                true, true, true, 30, null, null, null, null, null)).results().getFirst().id();
+                true, true, true, 30, null, null, null, null, true, null, null)).results().getFirst().id();
         assertEquals(GameRequestService.BREAK_UNAVAILABLE, message(() -> submit(anna, GameRequest.BREAK, null)));
         assertEquals(GameRequestService.BREAK_UNAVAILABLE, message(() -> submit(ben, GameRequest.BREAK, null)));
         apply(session, new GameOperation.LiveUploadEnded(upload, null), ping(anna, 1, GameState.REAL));

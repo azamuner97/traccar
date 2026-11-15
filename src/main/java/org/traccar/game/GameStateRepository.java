@@ -27,7 +27,8 @@ public final class GameStateRepository {
             + " plannedby, requestid, reservationid FROM tc_game_breaks";
     private static final String UPLOADS = "SELECT id, purpose, sourcememberid, recipientmemberid, pingid, tohunters,"
             + " toplayers, tosupporters, intervalseconds, startedat, deadline, lastsampleat, endedat, state,"
-            + " endreason, reason, controllerepoch, requestid, reservationid FROM tc_game_live_uploads";
+            + " endreason, reason, requestid, reservationid, usejoker, overallocate, pingnumber, startedby, laststatus,"
+            + " lastreason, lastdelivered FROM tc_game_live_uploads";
 
     private GameStateRepository() {
     }
@@ -65,8 +66,20 @@ public final class GameStateRepository {
                 rows.getBoolean("tohunters"), rows.getBoolean("toplayers"), rows.getBoolean("tosupporters"),
                 rows.getInt("intervalseconds"), GameTime.get(rows, "startedat"), GameTime.get(rows, "deadline"),
                 GameTime.get(rows, "lastsampleat"), GameTime.get(rows, "endedat"), rows.getString("state"),
-                rows.getString("endreason"), rows.getString("reason"), rows.getLong("controllerepoch"),
-                GameTransaction.longOrNull(rows, "requestid"), GameTransaction.longOrNull(rows, "reservationid"));
+                rows.getString("endreason"), rows.getString("reason"), GameTransaction.longOrNull(rows, "requestid"),
+                GameTransaction.longOrNull(rows, "reservationid"), rows.getBoolean("usejoker"),
+                rows.getBoolean("overallocate"), intOrNull(rows, "pingnumber"), rows.getString("startedby"),
+                rows.getString("laststatus"), rows.getString("lastreason"),
+                audiences(rows.getString("lastdelivered")));
+    }
+
+    private static List<String> audiences(String value) {
+        return value == null || value.isEmpty() ? List.of() : List.of(value.split(","));
+    }
+
+    private static Integer intOrNull(ResultSet rows, String column) throws SQLException {
+        int value = rows.getInt(column);
+        return rows.wasNull() ? null : value;
     }
 
     // Catches -----------------------------------------------------------------------------------------------
@@ -274,21 +287,36 @@ public final class GameStateRepository {
                 sessionId);
     }
 
-    public static long insertUpload(GameTransaction transaction, long sessionId, String purpose, Long sourceMemberId,
-                                    Long recipientMemberId, boolean toHunters, boolean toPlayers,
-                                    boolean toSupporters, int intervalSeconds, Instant deadline, String reason,
-                                    long epoch, Long requestId) throws SQLException {
-        return transaction.insert("INSERT INTO tc_game_live_uploads (gamesessionid, purpose, sourcememberid,"
-                + " recipientmemberid, tohunters, toplayers, tosupporters, intervalseconds, startedat, deadline,"
-                + " state, reason, controllerepoch, requestid) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                sessionId, purpose, sourceMemberId, recipientMemberId, toHunters, toPlayers, toSupporters,
-                intervalSeconds, transaction.now(), deadline, GameState.ACTIVE, GameJokerRepository.clip(reason, 512),
-                epoch, requestId);
+    /** What a new live upload stores besides its purpose, member and audiences. */
+    public record UploadOptions(int intervalSeconds, Instant deadline, String reason, Long requestId,
+                                boolean useJoker, boolean overAllocate, Integer pingNumber, String startedBy) {
     }
 
-    public static void sample(GameTransaction transaction, long sessionId, long id, long epoch) throws SQLException {
-        transaction.update("UPDATE tc_game_live_uploads SET lastsampleat = ?, controllerepoch = ?"
-                + " WHERE gamesessionid = ? AND id = ?", transaction.now(), epoch, sessionId, id);
+    public static long insertUpload(GameTransaction transaction, long sessionId, String purpose, Long sourceMemberId,
+                                    Long recipientMemberId, boolean toHunters, boolean toPlayers,
+                                    boolean toSupporters, UploadOptions options) throws SQLException {
+        return transaction.insert("INSERT INTO tc_game_live_uploads (gamesessionid, purpose, sourcememberid,"
+                + " recipientmemberid, tohunters, toplayers, tosupporters, intervalseconds, startedat, deadline,"
+                + " state, reason, requestid, usejoker, overallocate, pingnumber, startedby)"
+                + " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                sessionId, purpose, sourceMemberId, recipientMemberId, toHunters, toPlayers, toSupporters,
+                options.intervalSeconds(), transaction.now(), options.deadline(), GameState.ACTIVE,
+                GameJokerRepository.clip(options.reason(), 512), options.requestId(), options.useJoker(),
+                options.overAllocate(), options.pingNumber(), GameJokerRepository.clip(options.startedBy(), 128));
+    }
+
+    /** Records that a tick sent positions of the upload. */
+    public static void sample(GameTransaction transaction, long sessionId, long id) throws SQLException {
+        transaction.update("UPDATE tc_game_live_uploads SET lastsampleat = ? WHERE gamesessionid = ? AND id = ?",
+                transaction.now(), sessionId, id);
+    }
+
+    /** Records the outcome of the latest tick: its status, reason and the audiences that received it. */
+    public static void tick(GameTransaction transaction, long sessionId, long id, String status, String reason,
+                            List<String> delivered) throws SQLException {
+        transaction.update("UPDATE tc_game_live_uploads SET laststatus = ?, lastreason = ?, lastdelivered = ?"
+                + " WHERE gamesessionid = ? AND id = ?", status, GameJokerRepository.clip(reason, 32),
+                delivered == null ? "" : String.join(",", delivered), sessionId, id);
     }
 
     public static void linkPing(GameTransaction transaction, long sessionId, long id, long pingId)
@@ -319,15 +347,6 @@ public final class GameStateRepository {
                 + " AND activememberid IS NOT NULL", sessionId)
                 || transaction.exists("SELECT 1 FROM tc_game_live_uploads WHERE gamesessionid = ? AND purpose = ?"
                         + " AND state = ?", sessionId, GameState.SPEEDHUNT_PING, GameState.ACTIVE);
-    }
-
-    /**
-     * The current controller epoch, whether or not its lease is still active. The lease row keeps model 1's UTC
-     * {@code TIMESTAMP(3)} columns.
-     */
-    public static long controllerEpoch(GameTransaction transaction) throws SQLException {
-        return transaction.first("SELECT epoch FROM tc_game_controller WHERE id = 1", rows -> rows.getLong(1))
-                .orElse(0L);
     }
 
 }

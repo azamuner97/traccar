@@ -84,7 +84,7 @@ tags:
   - name: Game Sessions
     description: >-
       Sessions, settings, members, resource rows, documents, timetable and logs (operators only). The game endpoints
-      describe game data model 2 (game-session API version 7): each participant is a member with a stable ID, typed
+      describe game data model 2 (game-session API version 8): each participant is a member with a stable ID, typed
       tables hold the game state, and the server computes every member's status. Operators are Traccar
       administrators. Members are resolved from the caller's account; an account without membership gets 403 from
       every member endpoint. Every time is an ISO-8601 instant in UTC. Players and supporters never receive member
@@ -5155,8 +5155,10 @@ paths:
         lease is active (recorded in the controller history and reported to the next acquisition as drift).
         Starting is refused (409) while another session's game runs; at most one game runs per server. Stopping
         ends the open requests (pending and approved ones are cancelled, executing ones fail; their jokers return)
-        and the active live uploads and relays (endReason gameStopped), in one transaction. Each change writes a
-        game execution event and announces the members' status. Setting the current state changes nothing.
+        and the active live uploads and relays (endReason gameStopped, each with its ended event; a live speedhunt
+        ping that reached nobody returns its pool joker, one that delivered the speedhunt's last ping completes it),
+        in one transaction. Each change writes a game execution event and announces the members' status. Setting the
+        current state changes nothing.
       tags: [Game Sessions]
       parameters:
         - $ref: '#/components/parameters/GameControllerEpoch'
@@ -6863,14 +6865,92 @@ components:
           type: string
         data:
           type: object
-          description: At most 4 KB of JSON; data.type names the event (gameStarted, gameStopped, test, ...)
+          description: >-
+            At most 4 KB of JSON; data.type names the event. game: gameStarted, gameStopped, test. timetable:
+            slotStarted, ping, slotFinished, slotMissed, execution. live (a participant's live uploads: purposes
+            speedhuntPing, manual, geofenceAuto) and relay (live hunter relays): started, sample, waitingForLocation,
+            ended. Every live and relay event has liveUploadId, purpose, memberId (source, or relay recipient),
+            displayName and trackerId; started adds audiences, intervalSeconds, startedAt, deadline, reason,
+            requestId, pingNumber and for relays useJoker and overAllocate; sample (written when a tick's outcome
+            differs from the previous tick's (status, reason or delivered audiences), or when it recorded a ping or
+            a joker; never for every tick) adds
+            status, reason, delivered, withheld, position {latitude, longitude, fixTime, stale}, detail, resumed,
+            for relays hunters (how many were relayed), ping {pingId, runId, number, limit, source, jokerFake,
+            audiences, startedAt, deadline} when a live speedhunt ping delivered its ping, and joker {reservationId,
+            overAllocated} when a relay used its joker; waitingForLocation (once, when a tick finds no position at
+            all) adds detail; ended adds endReason (deadline, caught, retired, runEnded, noJoker, rejected,
+            gameStopped, or the Tool's own), detail, audiences, lastSampleAt, reason, for live speedhunt pings
+            pingDelivered, pingFailed and runCompleted (the completed run's ID), and for relays jokerUsed.
+    GameLiveUpload:
+      type: object
+      description: >-
+        A live upload the server runs (live speedhunt ping, manual or geofence live tracking, live hunter relay).
+        lastSampleAt is the last tick that sent positions; lastStatus, lastReason and lastDelivered the latest
+        tick's outcome (sent, skipped, failed, the ping engine's reason and the audiences that received it). The last relay sample per recipient is the hunter
+        relay's last delivery.
+      properties:
+        id:
+          $ref: '#/components/schemas/Id'
+        purpose:
+          type: string
+          enum: [speedhuntPing, manual, geofenceAuto, hunterRelay]
+        sourceMemberId:
+          $ref: '#/components/schemas/NullableId'
+        recipientMemberId:
+          $ref: '#/components/schemas/NullableId'
+        pingId:
+          $ref: '#/components/schemas/NullableId'
+        toHunters:
+          type: boolean
+        toPlayers:
+          type: boolean
+        toSupporters:
+          type: boolean
+        intervalSeconds:
+          type: integer
+        startedAt:
+          $ref: '#/components/schemas/Time'
+        deadline:
+          $ref: '#/components/schemas/NullableTime'
+        lastSampleAt:
+          $ref: '#/components/schemas/NullableTime'
+        endedAt:
+          $ref: '#/components/schemas/NullableTime'
+        state:
+          type: string
+          enum: [active, ended]
+        endReason:
+          type: [string, 'null']
+        reason:
+          type: [string, 'null']
+        requestId:
+          $ref: '#/components/schemas/NullableId'
+        reservationId:
+          $ref: '#/components/schemas/NullableId'
+        useJoker:
+          type: boolean
+        overAllocate:
+          type: boolean
+        pingNumber:
+          type: [integer, 'null']
+        startedBy:
+          type: [string, 'null']
+        lastStatus:
+          type: [string, 'null']
+          enum: [sent, skipped, failed, null]
+        lastReason:
+          type: [string, 'null']
+        lastDelivered:
+          type: array
+          items:
+            $ref: '#/components/schemas/GamePingAudience'
     GameCapabilities:
       type: object
       required: [apiVersion]
       properties:
         apiVersion:
           type: integer
-          const: 7
+          const: 8
     GameSessionSummary:
       type: object
       properties:
@@ -7652,13 +7732,26 @@ components:
       description: >-
         One typed state operation; the server validates each transition against the row's current state and answers
         409 for an illegal one. Ping sources are real or operatorFake; the server stores jokerFake when the target's
-        own fake applies.
+        own fake applies. pingDelivered is static only (400 for mode live): a live ping is delivered by the server
+        with its live upload's first sample. liveUploadStarted (purpose speedhuntPing, manual, geofenceAuto with
+        sourceMemberId and at least one of toHunters/toPlayers/toSupporters, or hunterRelay with recipientMemberId
+        and no audiences; intervalSeconds 1-3600; deadline; reason; requestId) starts an upload that the server runs
+        at its interval until its deadline while the game runs, whatever the controller lease does. A hunterRelay
+        with useJoker uses one Get hunter positions joker with its first tick that delivers (409 at the start when
+        none is left and overAllocate is not set; a relay whose joker is gone before then ends with noJoker). A
+        speedhuntPing delivers ping pingNumber (default and only accepted value: the next ping of the target's
+        speedhunt) with its first delivered sample, started by startedBy; when it starts a speedhunt, its pool
+        joker must be held for the target by a hunter's request, available, or allowed by overAllocate (409
+        otherwise). Its run completes when the upload ends after delivering the speedhunt's last ping
+        (pings_per_speedhunt); one that ends without reaching anyone returns the pool joker armed for it.
+        liveUploadEnded (liveUploadId, endReason) is the Tool's stop; endReason replaced (restarting with other
+        audiences) neither fails the live ping nor completes its run. A catch ends the member's uploads and the
+        relays to them, runEnded ends the target's live ping (runEnded).
       properties:
         type:
           type: string
-          enum: [catch, release, pingDelivered, pingFailed, runEnded, liveUploadStarted, liveUploadSample,
-                 liveUploadEnded, breakPlanned, breakWaiting, breakStarted, breakEnded, breakCancelled, breakMissed,
-                 checkpoint]
+          enum: [catch, release, pingDelivered, pingFailed, runEnded, liveUploadStarted, liveUploadEnded,
+                 breakPlanned, breakWaiting, breakStarted, breakEnded, breakCancelled, breakMissed, checkpoint]
       additionalProperties: true
     GameEffectsDelivery:
       type: object
@@ -8070,7 +8163,7 @@ components:
             liveUploads:
               type: array
               items:
-                type: object
+                $ref: '#/components/schemas/GameLiveUpload'
             memberRevisions:
               type: object
               additionalProperties:

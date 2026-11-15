@@ -343,50 +343,25 @@ public abstract class GameEffectsTest extends GameTestBase {
     }
 
     @Test
-    void theTargetsOwnSpeedhuntFakeReachesItsHunterMirrorsOnly() throws Exception {
+    void liveSpeedhuntPingsAndSamplesAreTheServersOwn() throws Exception {
         Game game = game();
-        for (GameMember owner : List.of(game.anna(), game.ben())) {
-            jokers.change(game.session(), new GameJokerService.Change(owner.id(), GameJokerRepository.FAKE_PING, 1,
-                    null), "Operator");
-            var request = requests.submit(owner, new GameRequestService.Submission(GameRequest.FAKE_PING, null,
-                    null, json("{\"pingNumber\": 1, \"latitude\": 46.5, \"longitude\": 7.0}")));
-            requests.claim(game.session(), request.id(), EPOCH);
-            deliver(game.session(), new GameEffectsService.Delivery(id(), List.of(), List.of(), null, null, null, null,
-                    List.of(new GameRequestService.Completion(request.id(), GameRequest.SUCCEEDED, null, null)),
-                    null));
-        }
-        publisher.clear();
-
-        // A live ping on Anna: its first sample binds both fakes; Anna's applies with a 5-20 m offset each time.
+        jokers.change(game.session(), new GameJokerService.Change(null, GameJokerRepository.SPEEDHUNT, 1, null),
+                "Operator");
         long upload = deliver(game.session(), delivery(id(), List.of(), new GameOperation.LiveUploadStarted(
                 GameState.SPEEDHUNT_PING, game.anna().id(), null, true, true, true, 10, null, null, null, null,
-                null))).operations().getFirst().id();
-        var first = deliver(game.session(), delivery(id(), List.of(position(game.annaToHunters(), 47.1),
-                position(game.annaToPlayers(), 47.1), position(game.benToHunters(), 47.2)),
-                ping(game.anna(), 1, GameState.LIVE, upload)));
-        assertEquals(List.of(GameOperations.BOUND, GameOperations.BOUND), first.fakes().stream()
-                .map(GameOperations.FakeOutcome::status).toList());
-        assertEquals(GameState.JOKER_FAKE, first.operations().getFirst().source());
-        assertOffset(latitude(first.positions().get(0).positionId()), 46.5);
-        assertEquals(47.1, latitude(first.positions().get(1).positionId()));
-        assertEquals(47.2, latitude(first.positions().get(2).positionId()));
-        for (int i = 0; i < 5; i++) {
-            clock.advance(Duration.ofSeconds(10));
-            var sample = deliver(game.session(), delivery(id(), List.of(position(game.annaToHunters(), 47.1),
-                    position(game.annaToPlayers(), 47.1)), new GameOperation.LiveUploadSample(upload, null, null)));
-            assertOffset(latitude(sample.positions().get(0).positionId()), 46.5);
-            assertEquals(47.1, latitude(sample.positions().get(1).positionId()));
-        }
-        // Both owners are told at the same moment, and nothing about the target reaches anyone else.
-        var announced = publisher.topic(GamePublisher.JOKERS).getFirst().members();
-        assertEquals(Set.of(game.anna().id(), game.ben().id(), game.hunter().id()), announced);
-        assertTrue(publisher.topic(GamePublisher.STATUS).stream().allMatch(item -> item.members() == null));
-        var annaView = jokers.own(game.anna()).reservations().getFirst();
-        var benView = jokers.own(game.ben()).reservations().getFirst();
-        assertEquals(annaView.fake().bound(), benView.fake().bound());
-        assertNull(annaView.fake().boundRunId());
-        assertNull(benView.fake().boundRunId());
-        assertEquals(List.of(), jokers.reconcile(game.session()));
+                null, null, null))).operations().getFirst().id();
+        // The live ping's first sample, and every later one, is the server's tick (GameLiveUploadRunnerTest).
+        assertStatus(400, () -> deliver(game.session(), delivery(id(), List.of(position(game.annaToHunters(), 47.1)),
+                ping(game.anna(), 1, GameState.LIVE, upload))));
+        assertStatus(400, () -> deliver(game.session(), delivery(id(), List.of(),
+                new GameOperation.LiveUploadSample(upload, null, null))));
+        assertStatus(400, () -> deliver(game.session(), new GameEffectsService.Delivery(id(), List.of(), List.of(),
+                List.of(new GamePingEngine.Intent(GamePingEngine.MANUAL, game.anna().id(), null, List.of("hunters"),
+                        null, null, null, new GamePingEngine.Effects(List.of(new GameOperation.LiveUploadSample(
+                                upload, null, null)), null, null), null)), null, null, null, null, null)));
+        // The JSON API does not know the operation at all.
+        assertThrows(Exception.class, () -> mapper.readValue("{\"type\": \"liveUploadSample\", \"liveUploadId\": "
+                + upload + "}", GameOperation.class));
     }
 
     private static void assertOffset(double latitude, double planned) {

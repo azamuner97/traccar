@@ -64,7 +64,7 @@ public class GameStateService {
     // Operations --------------------------------------------------------------------------------------------
 
     /**
-     * Applies operations in one transaction, under the controller {@code epoch} that fenced the call. Positions,
+     * Applies operations in one transaction; the controller fence admitted the call under {@code epoch}. Positions,
      * notifications and request outcomes travel in effects deliveries instead.
      */
     public Applied apply(long sessionId, long epoch, List<GameOperation> operations) throws Exception {
@@ -72,10 +72,11 @@ public class GameStateService {
                 || operations.stream().anyMatch(java.util.Objects::isNull)) {
             throw GameErrors.invalid("Invalid game operations");
         }
+        GameOperations.checkSent(operations);
         return transactions.write(transaction -> {
             transaction.lockSession(sessionId);
             transaction.lockMemberStates(GameOperations.members(transaction, sessionId, operations));
-            GameOperations applied = new GameOperations(transaction, sessionId, epoch, "Operator", objectMapper);
+            GameOperations applied = new GameOperations(transaction, sessionId, "Operator", objectMapper, publisher);
             for (int i = 0; i < operations.size(); i++) {
                 applied.apply(i, operations.get(i));
             }
@@ -190,8 +191,8 @@ public class GameStateService {
 
     /**
      * Hunter live shares, derived from the active live uploads that reach hunters, while the session's game runs.
-     * Until the server runs live uploads (phase 2), uploads sampled under an earlier controller epoch are stale and
-     * not shown; nor are members who are caught or protected by a break, or uploads past their deadline.
+     * The server runs live uploads whatever the controller lease does, so a share stays while its upload is active;
+     * members who are caught or protected by a break, and uploads past their deadline, are not shown.
      */
     public List<LiveShare> liveShares(long sessionId) throws Exception {
         return read(sessionId, transaction -> liveShares(transaction, sessionId));
@@ -202,12 +203,10 @@ public class GameStateService {
         if (!GameExecutionService.running(transaction, sessionId)) {
             return result;
         }
-        long epoch = GameStateRepository.controllerEpoch(transaction);
         Instant now = transaction.now();
         Set<Long> included = new HashSet<>();
         for (GameState.LiveUpload upload : GameStateRepository.activeUploads(transaction, sessionId)) {
             if (!upload.toHunters() || GameState.HUNTER_RELAY.equals(upload.purpose())
-                    || upload.controllerEpoch() != epoch
                     || upload.deadline() != null && !upload.deadline().isAfter(now)) {
                 continue;
             }

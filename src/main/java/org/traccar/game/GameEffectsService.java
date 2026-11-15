@@ -136,7 +136,16 @@ public class GameEffectsService {
                 || hasNull(delivery.jokers()) || hasNull(delivery.requests()) || hasNull(delivery.pings())) {
             throw GameErrors.invalid("Invalid delivery item");
         }
+        GameOperations.checkSent(list(delivery.operations()));
         GamePingEngine.validateAll(delivery.pings());
+        for (GamePingEngine.Intent intent : list(delivery.pings())) {
+            for (GamePingEngine.Effects effects : new GamePingEngine.Effects[] {intent.onDelivered(),
+                    intent.onNotDelivered()}) {
+                if (effects != null) {
+                    GameOperations.checkSent(effects.operationList());
+                }
+            }
+        }
         if (delivery.notifications() != null) {
             var input = delivery.notifications();
             GameNotificationService.generation(input.generation());
@@ -160,10 +169,7 @@ public class GameEffectsService {
         return HexFormat.of().formatHex(digest);
     }
 
-    /**
-     * Applies a delivery that the controller fence admitted under {@code epoch} (the current lease epoch; live
-     * uploads record it to detect stale rows after a handover).
-     */
+    /** Applies a delivery that the controller fence admitted under {@code epoch} (recorded with the delivery). */
     public Outcome apply(long sessionId, long epoch, Delivery delivery) throws Exception {
         validate(delivery);
         String hash = hash(delivery);
@@ -232,7 +238,7 @@ public class GameEffectsService {
         Set<Long> locked = new java.util.TreeSet<>(GameOperations.members(transaction, sessionId, operations));
         locked.addAll(GamePingEngine.members(transaction, sessionId, intents));
         transaction.lockMemberStates(locked);
-        GameOperations applied = new GameOperations(transaction, sessionId, epoch, "Tool", objectMapper);
+        GameOperations applied = new GameOperations(transaction, sessionId, "Tool", objectMapper, publisher);
 
         List<RequestOutcome> requestOutcomes = new ArrayList<>();
         for (GameRequest request : GameRequestService.complete(transaction, sessionId, list(delivery.requests()),
