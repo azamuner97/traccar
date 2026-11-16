@@ -337,6 +337,8 @@ public abstract class GameServicesTest {
                 + " VALUES (?, 'game', ?, 'message')", session, T0);
         execute("INSERT INTO tc_game_geofence_plans (gamesessionid, revision, data, updatedat) VALUES (?, 1, '{}', ?)",
                 session, T0);
+        execute("INSERT INTO tc_game_device_lists (gamesessionid, revision, data, updatedat)"
+                + " VALUES (?, 1, '{\"devices\": []}', ?)", session, T0);
         execute("INSERT INTO tc_game_timetables (gamesessionid, revision, enabled, updatedat)"
                 + " VALUES (?, 1, TRUE, ?)", session, T0);
         execute("INSERT INTO tc_game_timetable_participants (gamesessionid, memberid, ordinal) VALUES (?, ?, 0)",
