@@ -31,7 +31,7 @@ public abstract class GameSchemaTest {
             "tc_game_sessions", "tc_game_session_settings", "tc_game_session_credentials",
             "tc_game_session_checkpoints", "tc_game_session_logs", "tc_game_controller_history",
             "tc_game_session_members", "tc_game_mirrors", "tc_game_session_groups", "tc_game_geofence_plans",
-            "tc_game_session_geofences", "tc_game_timetables", "tc_game_timetable_entries",
+            "tc_game_device_lists", "tc_game_session_geofences", "tc_game_timetables", "tc_game_timetable_entries",
             "tc_game_timetable_slots", "tc_game_timetable_participants", "tc_game_timetable_changes",
             "tc_game_requests",
             "tc_game_jokers", "tc_game_joker_pools", "tc_game_joker_reservations", "tc_game_joker_ledger",

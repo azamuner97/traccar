@@ -23,6 +23,7 @@ import jakarta.ws.rs.QueryParam;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 import org.traccar.game.GameControllerService;
+import org.traccar.game.GameDeviceListService;
 import org.traccar.game.GameDocumentService;
 import org.traccar.game.GameEffectsService;
 import org.traccar.game.GameExecutionService;
@@ -41,8 +42,9 @@ import java.util.Map;
 
 /**
  * Game sessions of data model 2 for operators (administrators): sessions and their settings, members and their
- * bindings, resource rows, documents and checkpoints, the timetable, logs, requests, jokers, effects deliveries and
- * the operator snapshot. Model 1's paths are kept where the concept is unchanged.
+ * bindings, resource rows, documents (credentials, geofence plans, the device list) and checkpoints, the timetable,
+ * logs, requests, jokers, effects deliveries and the operator snapshot. Model 1's paths are kept where the concept
+ * is unchanged.
  *
  * <p>{@code GameControllerFilter} fences writes by path: effects, {@code members/*},
  * {@code resources/*}, {@code checkpoints/*}, {@code requests/*} and {@code jokers/*} always, and every write of the
@@ -99,6 +101,10 @@ public class GameSessionResource extends GameApiResource {
     public record TimetableExecution(Boolean enabled) {
     }
 
+    /** A rejected device list (422): every failing row. */
+    public record DeviceListRejection(String message, List<GameDeviceListService.RowError> errors) {
+    }
+
     /** A rejected timetable changeset (422): every failing change. */
     public record TimetableRejection(String message, List<GameTimetableService.ChangeError> errors) {
     }
@@ -131,6 +137,9 @@ public class GameSessionResource extends GameApiResource {
 
     @Inject
     private GameTimetableService timetables;
+
+    @Inject
+    private GameDeviceListService deviceLists;
 
     @Inject
     private GameLogService logs;
@@ -463,6 +472,33 @@ public class GameSessionResource extends GameApiResource {
         required(request, "Geofence plans required");
         return new Revision(documents.updateGeofencePlans(id, expected(request.expectedRevision()),
                 request.document()));
+    }
+
+    /** The device list (the desired list of trackers); revision 0 with no devices when none was saved. */
+    @GET
+    @Path("{id}/device-list")
+    public JsonNode deviceList(@PathParam("id") long id) throws Exception {
+        checkOperator();
+        return json(deviceLists.get(id));
+    }
+
+    /**
+     * Stores the device list based on {@code expectedRevision}: 409 for a stale revision, 422 listing every failing
+     * row. Saving applies nothing; device setup applies the stored list.
+     */
+    @PUT
+    @Path("{id}/device-list")
+    public Response updateDeviceList(@PathParam("id") long id, DocumentUpdate request) throws Exception {
+        checkOperator();
+        required(request, "Device list required");
+        long expected = expected(request.expectedRevision());
+        try {
+            return Response.ok(json(deviceLists.update(id, expected, request.document())))
+                    .type(MediaType.APPLICATION_JSON).build();
+        } catch (GameDeviceListService.Rejected rejected) {
+            return Response.status(422).entity(json(new DeviceListRejection(rejected.getMessage(),
+                    rejected.errors()))).type(MediaType.APPLICATION_JSON).build();
+        }
     }
 
     @GET

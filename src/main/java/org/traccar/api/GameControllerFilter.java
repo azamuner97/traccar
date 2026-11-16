@@ -44,8 +44,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * resource rows, checkpoints, requests and jokers of any session, every write of the running session (its game
  * state, {@code running}, its timetable changes and execution toggle), and every write of game notifications and
  * proximity. Configuration edits of a stored session that is not running (name, settings, credentials, geofence
- * plans, timetable changes and toggle, logs) need only their revision check. Without a controller nobody
- * changes a running session, while the server's own execution goes on.</li>
+ * plans, the device list, timetable changes and toggle, logs) need only their revision check. Without a controller
+ * nobody changes a running session, while the server's own execution goes on.</li>
  * <li>The game state ({@code PUT game-sessions/{id}/state}) is fenced, with one exception: without an epoch, any
  * administrator may stop a game while no lease is active ({@link GameExecutionService#change} accepts only a stop
  * then, and records who stopped it). A test event ({@code POST game-sessions/{id}/events/test}) is never fenced: it

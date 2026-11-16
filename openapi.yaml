@@ -83,9 +83,10 @@ tags:
     description: Live video streaming
   - name: Game Sessions
     description: >-
-      Sessions, settings, members, resource rows, documents, timetable and logs (operators only). The game endpoints
-      describe game data model 2 (game-session API version 10): each participant is a member with a stable ID, typed
-      tables hold the game state, and the server computes every member's status. Operators are Traccar
+      Sessions, settings, members, resource rows, documents (including the device list), timetable and logs
+      (operators only). The game endpoints describe game data model 2 (game-session API version 11): each
+      participant is a member with a stable ID, typed tables hold the game state, and the server computes every
+      member's status. Operators are Traccar
       administrators. Members are resolved from the caller's account; an account without membership gets 403 from
       every member endpoint. Every time is an ISO-8601 instant in UTC. Players and supporters never receive member
       state revisions, ping sources, other members' fake plans or inventories, bound run references, or anything
@@ -3971,7 +3972,7 @@ paths:
   /game-sessions/capabilities:
     get:
       operationId: getGameCapabilities
-      summary: The game-session API version (10)
+      summary: The game-session API version (11)
       tags: [Game Sessions]
       responses:
         '200':
@@ -4609,6 +4610,66 @@ paths:
           $ref: '#/components/responses/NotFound'
         '409':
           $ref: '#/components/responses/Conflict'
+        '423':
+          $ref: '#/components/responses/Locked'
+  /game-sessions/{id}/device-list:
+    parameters:
+      - $ref: '#/components/parameters/GameSessionId'
+    get:
+      operationId: getGameDeviceList
+      summary: The device list (revision 0 and no devices when none is saved)
+      description: >-
+        The desired list of trackers that device setup applies. It is not the applied roster: saving it changes no
+        member, tracker or Traccar device.
+      tags: [Game Sessions]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GameDeviceList'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    put:
+      operationId: updateGameDeviceList
+      summary: Replaces the device list based on its revision
+      description: >-
+        The whole list is validated: names are non-empty and unique ignoring case, device identifiers are non-empty
+        and unique, role is player, supporter or hunter, role numbers are positive and unique per role, and at least
+        one device is a player. Names and identifiers are stored trimmed. Retrying the write that already succeeded
+        (expectedRevision one below the stored revision, the same devices) answers the stored list. Fenced like
+        other configuration documents: on the running session it needs the controlling Tool's epoch.
+      tags: [Game Sessions]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GameDeviceListUpdate'
+      responses:
+        '200':
+          description: The stored list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GameDeviceList'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          description: Rejected; every failing device is listed and nothing is stored
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GameDeviceListRejection'
         '423':
           $ref: '#/components/responses/Locked'
   /game-sessions/{id}/checkpoints:
@@ -6982,7 +7043,7 @@ components:
       properties:
         apiVersion:
           type: integer
-          const: 10
+          const: 11
     GameSessionSummary:
       type: object
       properties:
@@ -7085,6 +7146,88 @@ components:
           description: 0 when none is stored
         document:
           type: object
+    GameDeviceListRow:
+      type: object
+      additionalProperties: false
+      required: [name, deviceIdentifier, role, roleNumber]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 128
+          description: The participant's display name; unique ignoring case
+        deviceIdentifier:
+          type: string
+          minLength: 1
+          maxLength: 128
+          description: The tracker's Traccar unique ID; unique
+        role:
+          type: string
+          enum: [player, supporter, hunter]
+        roleNumber:
+          type: integer
+          minimum: 1
+          maximum: 2147483647
+          description: Unique per role; a member's number (role and number name a member)
+    GameDeviceListDocument:
+      type: object
+      additionalProperties: false
+      required: [devices]
+      properties:
+        devices:
+          type: array
+          maxItems: 1000
+          items:
+            $ref: '#/components/schemas/GameDeviceListRow'
+    GameDeviceList:
+      type: object
+      required: [revision, updatedAt, document]
+      properties:
+        revision:
+          type: integer
+          minimum: 0
+          description: 0 when none is stored
+        updatedAt:
+          type: [string, 'null']
+          format: date-time
+          description: Null when none is stored
+        document:
+          $ref: '#/components/schemas/GameDeviceListDocument'
+    GameDeviceListUpdate:
+      type: object
+      required: [expectedRevision, document]
+      properties:
+        expectedRevision:
+          type: integer
+          minimum: 0
+        document:
+          $ref: '#/components/schemas/GameDeviceListDocument'
+    GameDeviceListRejection:
+      type: object
+      required: [message, errors]
+      properties:
+        message:
+          type: string
+        errors:
+          type: array
+          items:
+            type: object
+            required: [code, message]
+            properties:
+              index:
+                type: [integer, 'null']
+                description: The failing device's index in devices; null for a rule of the whole list
+              field:
+                type: [string, 'null']
+                enum: [name, deviceIdentifier, role, roleNumber, null]
+              code:
+                type: string
+                description: >-
+                  missingName, invalidName, duplicateName, missingDeviceIdentifier, invalidDeviceIdentifier,
+                  duplicateDeviceIdentifier, missingRole, invalidRole, missingRoleNumber, invalidRoleNumber,
+                  duplicateRoleNumber, noPlayer or tooManyDevices
+              message:
+                type: string
     GameCheckpoint:
       type: object
       properties:

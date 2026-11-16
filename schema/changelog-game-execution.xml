@@ -294,4 +294,32 @@
     </sql>
   </changeSet>
 
+  <!--
+    Phase 5: the device list is a server document edited in the Tool's grid editor (Claude outputs/
+    game-execution-plan.md, phase 5). It is the desired list (rows of name, device identifier, role and role
+    number), validated on every write; device setup reads it and applies it to the members and Traccar devices.
+    The session's applied roster stays in its settings and member rows.
+
+    - tc_game_device_lists: one revisioned document per session (no row = revision 0, an empty list), like
+      tc_game_geofence_plans.
+  -->
+  <changeSet author="traccar-tool" id="game-execution-5-device-lists">
+    <createTable tableName="tc_game_device_lists">
+      <column name="gamesessionid" type="BIGINT">
+        <constraints primaryKey="true" primaryKeyName="pk_gm_device_lists" nullable="false" />
+      </column>
+      <column name="revision" type="BIGINT"><constraints nullable="false" /></column>
+      <column name="data" type="CLOB"><constraints nullable="false" /></column>
+      <column name="updatedat" type="DATETIME(3)"><constraints nullable="false" /></column>
+    </createTable>
+    <addForeignKeyConstraint baseTableName="tc_game_device_lists" baseColumnNames="gamesessionid"
+      referencedTableName="tc_game_sessions" referencedColumnNames="id" constraintName="fk_gm_device_lists_session" />
+  </changeSet>
+
+  <changeSet author="traccar-tool" id="game-execution-5-device-lists-check">
+    <sql>
+      ALTER TABLE tc_game_device_lists ADD CONSTRAINT ck_gm_device_lists_revision CHECK (revision >= 1);
+    </sql>
+  </changeSet>
+
 </databaseChangeLog>

@@ -32,7 +32,7 @@ public class GameSessionService {
      * The game-session API version of data model 2. Model 1 answered 4, so a Tool built for model 1 stops at
      * connection to this server.
      */
-    public static final int API_VERSION = 10;
+    public static final int API_VERSION = 11;
     /** The operators' WebSocket invalidation of the session list. */
     public static final String SESSIONS_INVALIDATION = "game-sessions";
 

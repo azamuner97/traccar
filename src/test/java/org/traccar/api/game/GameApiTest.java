@@ -13,6 +13,7 @@ import org.traccar.api.security.PermissionsService;
 import org.traccar.game.GameAccessRule;
 import org.traccar.game.GameBindingHook;
 import org.traccar.game.GameControllerService;
+import org.traccar.game.GameDeviceListService;
 import org.traccar.game.GameDocumentService;
 import org.traccar.game.GameEffectsService;
 import org.traccar.game.GameExecutionService;
@@ -101,6 +102,7 @@ public abstract class GameApiTest extends GameTestBase {
                 new GameRequestService(transactions, mapper, publisher), new GameJokerService(transactions, publisher),
                 timetables = new GameTimetableService(transactions, mapper, publisher),
                 new GameDocumentService(transactions, mapper, cipher()), new GameLogService(transactions),
+                new GameDeviceListService(transactions, mapper),
                 effectsService(),
                 new GameNotificationService(transactions, publisher), new GameProximityService(transactions, publisher),
                 new GameExecutionService(transactions, new GameControllerService(source, clock, 30, 5, null,
@@ -261,8 +263,8 @@ public abstract class GameApiTest extends GameTestBase {
 
     @Test
     void operatorsManageSessionsMembersAndResources() throws Exception {
-        assertEquals(new GameSessionResource.Capabilities(10), sessionsApi.capabilities());
-        assertEquals(10, GameSessionService.API_VERSION);
+        assertEquals(new GameSessionResource.Capabilities(11), sessionsApi.capabilities());
+        assertEquals(11, GameSessionService.API_VERSION);
         String name = "api-" + UUID.randomUUID();
         JsonNode created = sessionsApi.create(new GameSessionResource.CreateRequest(name, 5, null,
                 json("{\"game_settings\": " + SETTINGS + "}")));
@@ -328,6 +330,36 @@ public abstract class GameApiTest extends GameTestBase {
         assertEquals(1, sessionsApi.updateGeofencePlans(session, new GameSessionResource.DocumentUpdate(0L, 1,
                 json("{\"zones\": []}"))).revision());
         assertEquals(1, sessionsApi.geofencePlans(session).get("revision").asLong());
+        // The device list: revision 0 without one, 422 with every failing row, the stored (trimmed) list.
+        JsonNode emptyList = sessionsApi.deviceList(session);
+        assertEquals(0, emptyList.get("revision").asLong());
+        assertTrue(emptyList.get("updatedAt").isNull());
+        assertEquals(0, emptyList.get("document").get("devices").size());
+        Response refused = sessionsApi.updateDeviceList(session, new GameSessionResource.DocumentUpdate(0L, null,
+                json("{\"devices\": [{\"name\": \"Hugo\", \"deviceIdentifier\": \"h-1\", \"role\": \"hunter\","
+                        + " \"roleNumber\": 0}]}")));
+        assertEquals(422, refused.getStatus());
+        JsonNode refusal = (JsonNode) refused.getEntity();
+        assertEquals("The device list was rejected", refusal.get("message").asText());
+        assertEquals(List.of("invalidRoleNumber", "noPlayer"), refusal.get("errors").findValuesAsText("code"));
+        assertEquals(0, refusal.get("errors").get(0).get("index").asInt());
+        assertTrue(refusal.get("errors").get(1).get("index").isNull());
+        JsonNode devices = json("{\"devices\": [{\"name\": \" Anna \", \"deviceIdentifier\": \"a-1\","
+                + " \"role\": \"player\", \"roleNumber\": 1}]}");
+        Response stored = sessionsApi.updateDeviceList(session, new GameSessionResource.DocumentUpdate(0L, null,
+                devices));
+        assertEquals(200, stored.getStatus());
+        assertEquals(1, ((JsonNode) stored.getEntity()).get("revision").asLong());
+        assertEquals("Anna", sessionsApi.deviceList(session).get("document").get("devices").get(0).get("name")
+                .asText());
+        assertEquals(clock.instant().toString(), sessionsApi.deviceList(session).get("updatedAt").asText());
+        assertCode(400, () -> sessionsApi.updateDeviceList(session, new GameSessionResource.DocumentUpdate(null,
+                null, devices)));
+        assertCode(400, () -> sessionsApi.updateDeviceList(session, new GameSessionResource.DocumentUpdate(1L,
+                null, json("{\"rows\": []}"))));
+        assertCode(409, () -> sessionsApi.updateDeviceList(session, new GameSessionResource.DocumentUpdate(0L,
+                null, json("{\"devices\": [{\"name\": \"Ben\", \"deviceIdentifier\": \"b-1\","
+                        + " \"role\": \"player\", \"roleNumber\": 2}]}"))));
         assertEquals(1, sessionsApi.updateCredentials(session, new GameSessionResource.DocumentUpdate(0L, 1,
                 json("{\"base\": \"secret\"}"))).revision());
         assertEquals("secret", ((JsonNode) sessionsApi.credentials(session).getEntity()).path("document")

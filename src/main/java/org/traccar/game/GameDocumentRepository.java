@@ -12,13 +12,18 @@ import java.util.List;
 import java.util.Optional;
 
 /**
- * Revisioned session documents: credentials (tc_game_session_credentials), geofence plans (tc_game_geofence_plans)
- * and component checkpoints (tc_game_session_checkpoints). Revision 0 means that a document does not exist yet.
+ * Revisioned session documents: credentials (tc_game_session_credentials), geofence plans (tc_game_geofence_plans),
+ * the device list (tc_game_device_lists) and component checkpoints (tc_game_session_checkpoints). Revision 0 means
+ * that a document does not exist yet.
  */
 public final class GameDocumentRepository {
 
     /** A stored document: its revision and its text (ciphertext for credentials). */
     public record Stored(long revision, String text) {
+    }
+
+    /** A stored document with the time of its last write. */
+    public record StoredAt(long revision, String text, Instant updatedAt) {
     }
 
     /** A stored checkpoint row. */
@@ -57,6 +62,22 @@ public final class GameDocumentRepository {
         if (transaction.update("UPDATE tc_game_geofence_plans SET revision = ?, data = ?, updatedat = ?"
                 + " WHERE gamesessionid = ?", revision, data, transaction.now(), sessionId) == 0) {
             transaction.update("INSERT INTO tc_game_geofence_plans (gamesessionid, revision, data, updatedat)"
+                    + " VALUES (?, ?, ?, ?)", sessionId, revision, data, transaction.now());
+        }
+    }
+
+    // Device list -------------------------------------------------------------------------------------------
+
+    public static Optional<StoredAt> deviceList(GameTransaction transaction, long sessionId) throws SQLException {
+        return transaction.first("SELECT revision, data, updatedat FROM tc_game_device_lists WHERE gamesessionid = ?",
+                rows -> new StoredAt(rows.getLong(1), rows.getString(2), GameTime.get(rows, "updatedat")), sessionId);
+    }
+
+    public static void putDeviceList(GameTransaction transaction, long sessionId, long revision, String data)
+            throws SQLException {
+        if (transaction.update("UPDATE tc_game_device_lists SET revision = ?, data = ?, updatedat = ?"
+                + " WHERE gamesessionid = ?", revision, data, transaction.now(), sessionId) == 0) {
+            transaction.update("INSERT INTO tc_game_device_lists (gamesessionid, revision, data, updatedat)"
                     + " VALUES (?, ?, ?, ?)", sessionId, revision, data, transaction.now());
         }
     }

@@ -52,6 +52,7 @@ public final class GameSessionRepository {
             "tc_game_session_groups",
             "tc_game_session_geofences",
             "tc_game_geofence_plans",
+            "tc_game_device_lists",
             "tc_game_session_members",
             "tc_game_session_checkpoints",
             "tc_game_session_credentials",

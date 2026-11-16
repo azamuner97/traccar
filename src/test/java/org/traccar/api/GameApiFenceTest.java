@@ -98,7 +98,7 @@ public class GameApiFenceTest {
                 "POST " + base + "/resources/groups", "POST " + base + "/resources/geofences",
                 "POST " + base + "/resources/mirrors/2/retire", "POST " + base + "/resources/mirrors/2/reactivate",
                 "PUT " + base + "/resources/mirrors/2", "DELETE " + base + "/resources/mirrors/2",
-                "PUT " + base + "/credentials", "PUT " + base + "/geofence-plans",
+                "PUT " + base + "/credentials", "PUT " + base + "/geofence-plans", "PUT " + base + "/device-list",
                 "PUT " + base + "/checkpoints/monitoring", "DELETE " + base + "/checkpoints/monitoring",
                 "POST " + base + "/timetable/changes", "PUT " + base + "/timetable/execution",
                 "POST " + base + "/logs",
@@ -121,7 +121,7 @@ public class GameApiFenceTest {
         // checkpoints and the game state are written by the controlling Tool and always fenced.
         Set<String> configuration = Set.of("DELETE game-sessions/6", "PUT game-sessions/6/name",
                 "PUT game-sessions/6/config", "PUT game-sessions/6/credentials", "PUT game-sessions/6/geofence-plans",
-                "POST game-sessions/6/timetable/changes", "PUT game-sessions/6/timetable/execution",
+                "PUT game-sessions/6/device-list", "POST game-sessions/6/timetable/changes", "PUT game-sessions/6/timetable/execution",
                 "POST game-sessions/6/logs");
         for (String write : sessionWrites(STORED)) {
             assertEquals(!configuration.contains(write), fenced(write), write);

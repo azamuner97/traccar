@@ -36,7 +36,7 @@ managed values and preserves unrelated attributes.
 
 Traccar's database is the single store of game sessions and game state
 (`schema/changelog-game-model-2.xml`, included last in `changelog-master.xml`).
-The game-session API version is **10**; `GET /api/game-sessions/capabilities`
+The game-session API version is **11**; `GET /api/game-sessions/capabilities`
 answers it, and a Tool built for another version stops at connection.
 
 - **Members.** Each participant is a member with a stable ID
@@ -205,8 +205,8 @@ with HTTP 423 otherwise (`GameControllerFilter`):
   `requests/*` and `jokers/*`; every write of the running session (also its
   timetable changes and execution toggle) and the game state (except the
   administrator stop described above). Configuration of a session that is not
-  running (name, settings, credentials, geofence plans, timetable, logs) needs
-  only its revision check;
+  running (name, settings, credentials, geofence plans, device list, timetable,
+  logs) needs only its revision check;
 - writes to `/api/game-notifications` and `/api/game-proximity`;
 - while a lease is held, standard mutations (devices, groups, users,
   permissions, geofences, `DELETE /api/positions`) of the Traccar resources any
@@ -515,6 +515,25 @@ execution event (`started`, `sample`, `waitingForLocation`, `ended`). Hunters'
 live shares follow the active uploads (no controller-epoch rule any more).
 `liveUploadSample` and live `pingDelivered` are server-internal (400 when sent).
 
+### The device list
+
+Since phase 5 of the game execution plan the device list is a server document
+(`tc_game_device_lists`, `GET`/`PUT /api/game-sessions/{id}/device-list` with
+`expectedRevision`, like the geofence plans and fenced the same way). It holds
+`{"devices": [{"name", "deviceIdentifier", "role", "roleNumber"}]}`, the
+*desired* list of trackers: saving it changes no member, tracker or Traccar
+device. The Tool edits it in its grid editor (Excel import and export are
+optional) and its device setup reads the saved list and applies it; the
+session's applied roster stays in its settings and member rows. Every write is
+validated as a whole (`GameDeviceListService`): names are non-empty and unique
+ignoring case, device identifiers are non-empty and unique, `role` is
+`player`, `supporter` or `hunter`, role numbers are positive and unique per
+role, and at least one device is a player. Names and identifiers are stored
+trimmed. A malformed body answers 400; rule violations answer 422 with every
+failing row (`index`, `field`, `code`, `message`), and nothing is stored.
+Retrying the write that already succeeded answers the stored list; any other
+stale revision answers 409.
+
 ### Every ping is an intent
 
 Since phase 4 of the game execution plan the Tool sends no mirror position at
@@ -718,7 +737,7 @@ repository-safety contract.
 3. Deploy the combined server and web build. Its migration drops the model-1
    game tables and their data; it keeps Traccar users, devices, ordinary
    drawings and the controller epoch.
-4. Release the matching Traccar Tool (game-session API version 10) and run
+4. Release the matching Traccar Tool (game-session API version 11) and run
    Device Setup for every new session: it plans members before it creates
    devices and accounts.
 5. Confirm managed devices have category `person`, integer
