@@ -6,7 +6,8 @@ Run against the full Docker profile with Traccar Tool's virtual environment:
         --tool-source ../../Traccar-Tool/src
 
 It drives the Tool's own composition, not HTTP calls of its own: the server connection with the controller lease,
-the session repository, device setup with member planning and the device-list import, the timetable editor's
+the session repository, the device-list editor's document (Excel import, server rejections and conflicts, member
+states) and device setup on the saved list with member planning, the timetable editor's
 document (changesets, server rejections, conflicts, Excel round trip, the execution toggle), the Traccar client with
 the session's effects and game state, and the game services that need no window. See ``game_notification_integration``
 for the environment and the temporary administrator. Pushes reach only fixture accounts without push tokens.
@@ -34,17 +35,20 @@ class Progress:
 
 
 def write_device_list(path, rows):
-    import pandas as pd
-    from traccar_game_manager.infrastructure.files.device_list import GROUP_COLUMN
-    pd.DataFrame([{"name": name, "device identifier": unique_id, GROUP_COLUMN: role, "role number": number}
-                  for name, unique_id, role, number in rows]).to_excel(path, index=False)
+    """A device-list workbook with the template's headers, written by the Tool's exporter."""
+    from traccar_game_manager.application.ports.device_list import DeviceListExport
+    from traccar_game_manager.infrastructure.files.device_list import ExcelDeviceListWorkbooks
+    ExcelDeviceListWorkbooks().write(path, DeviceListExport(tuple(
+        ((display, unique_id, str(number), role), ("", "", "", "")) for display, unique_id, role, number in rows)))
 
 
 def main(tool_source):
     sys.path.insert(0, tool_source)
     from traccar_game_manager.app.connection import (
         ConnectionHolder, connect_to_server, effects_factory, fenced_transport_factory, game_state_factory)
+    from traccar_game_manager.app.device_setup import SavedDeviceListSource, create_device_list_document
     from traccar_game_manager.application.device_setup.models import DeviceSetupPlanningRequest
+    from traccar_game_manager.application.ports.device_list import DeviceListConflict, DeviceListRejected
     from traccar_game_manager.domain.server_profiles import ServerProfile
     from traccar_game_manager.domain.session.document import validate_session_document
     from traccar_game_manager.domain.session.factory import default_session_template
@@ -84,24 +88,55 @@ def main(tool_source):
         api.GAME_SESSION_IDS.append(session_id)
         session["traccar-server"] = profile.server_mapping(api.PASSWORD)
 
-        # Device setup with member planning: the device list names the members by role and number.
+        # The device list: a server document edited in the Tool's grid document, imported from Excel here.
         prefix = api.PREFIX[-12:]
         rows = [("Anna", prefix + "-anna", "player", 1), ("Ben", prefix + "-ben", "player", 2),
                 ("Sue", prefix + "-sue", "supporter", 1), ("Hugo", prefix + "-hugo", "hunter", 1),
                 ("Hanna", prefix + "-hanna", "hunter", 2)]
         device_list = Path(tmp.name) / "devices.xlsx"
         write_device_list(device_list, rows)
+        gateway = connection.device_list_for(name)
+        document = create_device_list_document(gateway, session_name=name, server_url=api.BASE,
+                                               applied_roster=lambda: dict(session.get("device_roster") or {}))
+
+        def reload_document():
+            document.apply_load(document.load_task()())
+            return document
+
+        reload_document()
+        assert document.base.revision == 0 and not document.seeded and not document.status().dirty
+        imported = document.apply_import(document.import_task(device_list)())
+        assert imported.warnings == (), imported
+        assert document.status().dirty and not document.problems()
+        # The real server refuses a list that breaks its rules (422, every failing row) and stores nothing.
+        devices_json = document.devices()
+        try:
+            gateway.save(0, devices_json + [dict(devices_json[0], name="anna", roleNumber=7)])
+            raise AssertionError("A duplicate name and identifier were stored")
+        except DeviceListRejected as refused:
+            assert [(item["index"], item["code"]) for item in refused.errors] == [
+                (5, "duplicateName"), (5, "duplicateDeviceIdentifier")], refused.errors
+        saved = document.apply_save(document.save_task()())
+        assert "revision 1" in saved.message, saved
+        try:
+            gateway.save(0, devices_json[:1])
+            raise AssertionError("A stale device list was stored")
+        except DeviceListConflict:
+            pass
+        reload_document()
+        assert [document.view().cell(item.key, "member").value for item in document.rows] == ["not applied"] * 5
         groups = {"players": api.PREFIX + "-Players", "supporters": api.PREFIX + "-Supporters",
                   "hunters": api.PREFIX + "-Hunters"}
 
-        def setup(current, path):
+        def setup(current):
+            """Device setup on the saved device list, as Apply… runs it."""
             request = DeviceSetupPlanningRequest(
                 session_name=name, session=current, players_group_name=groups["players"],
                 supporters_group_name=groups["supporters"], hunters_group_name=groups["hunters"],
-                device_list_path=str(path), supporter_password="supporter-" + secrets.token_hex(6))
+                supporter_password="supporter-" + secrets.token_hex(6))
             client = clients.from_session(current)
             service = create_device_setup_service(
-                client=client, request=request,
+                client=client, request=request, device_list_source=SavedDeviceListSource(gateway),
                 session_saver=lambda session_name, document: connection.sessions.save(session_name, document),
                 mirror_only_jokers_in_use=lambda: False,
                 member_planner=lambda roster: connection.sessions.plan_members(name, roster))
@@ -112,8 +147,17 @@ def main(tool_source):
             assert connection.jobs.flush(30)
             return result.session, progress, plan
 
-        session, progress, _plan = setup(session, device_list)
+        def edit_and_save(values):
+            reload_document()
+            keys = {item.cells["deviceIdentifier"]: item.key for item in document.rows}
+            document.apply_edits({(keys[identifier], field): value for (identifier, field), value in values.items()})
+            return document.apply_save(document.save_task()())
+
+        session, progress, plan = setup(session)
+        assert plan.device_list_revision == 1 and [change.action for change in plan.member_changes] == ["create"] * 5
         session["traccar-server"] = profile.server_mapping(api.PASSWORD)
+        reload_document()
+        assert [document.view().cell(item.key, "member").value for item in document.rows] == ["bound"] * 5
         listed = api.request("GET", f"/game-sessions/{session_id}/members")
         if any(item["state"] != "active" for item in listed):
             print("MEMBERS", json.dumps(listed, indent=0))
@@ -165,17 +209,17 @@ def main(tool_source):
             "GET", "/devices", credentials=anna)}
 
         # A second setup with the same device list changes nothing.
-        revision = api.request("GET", f"/game-sessions/{session_id}")["revision"]
-        session, progress, _plan = setup(session, device_list)
+        session, progress, plan = setup(session)
+        assert plan.member_changes == (), plan.member_changes
         session["traccar-server"] = profile.server_mapping(api.PASSWORD)
         again = {(item["role"], item["number"]): item
                  for item in api.request("GET", f"/game-sessions/{session_id}/members")}
         assert {key: (item["id"], item["userId"], item["trackerId"]) for key, item in again.items()} == {
             key: (item["id"], item["userId"], item["trackerId"]) for key, item in members.items()}
-        # Device-list import with a replaced tracker: Ben keeps his member (and its history); the tracker rebinds.
-        replaced = [row if row[1] != prefix + "-ben" else ("Ben", prefix + "-ben2", "player", 2) for row in rows]
-        write_device_list(device_list, replaced)
-        session, progress, _plan = setup(session, device_list)
+        # A replaced tracker in the device list: Ben keeps his member (and its history); the tracker rebinds.
+        edit_and_save({(prefix + "-ben", "deviceIdentifier"): prefix + "-ben2"})
+        session, progress, plan = setup(session)
+        assert plan.member_changes == (), plan.member_changes
         session["traccar-server"] = profile.server_mapping(api.PASSWORD)
         after = {(item["role"], item["number"]): item
                  for item in api.request("GET", f"/game-sessions/{session_id}/members")}
@@ -184,10 +228,33 @@ def main(tool_source):
         assert after[("player", 2)]["trackerId"] == new_ben["id"], after[("player", 2)]
         assert api.request("GET", "/game-status", credentials=accounts[("player", 2)])["memberId"] \
             == members[("player", 2)]["id"]
-        print("Tool device setup passed: controller lease at connection, session creation, member planning from "
-              "the device list, generated accounts bound to members (no model-1 markers, no administrators), "
-              "trackers and mirrors with role and session markers, mirror and group rows, mirror-only hunter access, an idempotent "
-              "second run, and a device-list import that rebinds a replaced tracker to the same member.")
+        # A group change: Hanna's tracker moves from hunter 2 to player 3. A member's role never changes, so the
+        # preview retires hunter 2 and creates player 3, and applying it does exactly that.
+        hanna = members[("hunter", 2)]
+        edit_and_save({(prefix + "-hanna", "role"): "player", (prefix + "-hanna", "roleNumber"): "3"})
+        assert document.view().cell(document.rows[-1].key, "member").value == "not applied"
+        session, progress, plan = setup(session)
+        assert [(change.action, change.role, change.number) for change in plan.member_changes] == [
+            ("retire", "hunter", 2), ("create", "player", 3)], plan.member_changes
+        assert "becomes Player 3" in plan.member_changes[0].detail, plan.member_changes[0]
+        session["traccar-server"] = profile.server_mapping(api.PASSWORD)
+        moved = {(item["role"], item["number"]): item
+                 for item in api.request("GET", f"/game-sessions/{session_id}/members")}
+        assert moved[("hunter", 2)]["state"] == "retired" and moved[("hunter", 2)]["id"] == hanna["id"]
+        assert moved[("player", 3)]["state"] == "active" and moved[("player", 3)]["id"] != hanna["id"]
+        hanna_device = next(device for device in api.request("GET", "/devices")
+                            if device["uniqueId"] == prefix + "-hanna")
+        assert moved[("player", 3)]["trackerId"] == hanna_device["id"], moved[("player", 3)]
+        assert hanna_device["attributes"].get("traccarToolRole") == "player"
+        assert hanna_device["attributes"].get("traccarToolRoleNumber") == 3
+        reload_document()
+        assert [document.view().cell(item.key, "member").value for item in document.rows] == ["bound"] * 5
+        print("Tool device setup passed: controller lease at connection, session creation, the device list edited "
+              "in the Tool's document (Excel import, a real 422 listing every failing row, a real 409) and saved, "
+              "member planning from the saved list (member states not applied → bound), generated accounts bound "
+              "to members (no model-1 markers, no administrators), trackers and mirrors with role and session "
+              "markers, mirror and group rows, mirror-only hunter access, an idempotent second run, a replaced "
+              "tracker rebinding to the same member, and a group change retiring hunter 2 and creating player 3.")
         timetable_flow(connection, name, session_id, tmp.name)
         game_flow(connection, clients, session, name, session_id, accounts, profile, tmp.name)
         return connection, clients, session, name, session_id, accounts, members
@@ -237,7 +304,8 @@ def timetable_flow(connection, name, session_id, tmp):
     editor = document()
     _participants, candidates = editor.roster()
     names = {label.split(" (")[0]: member_id for member_id, label in candidates}
-    assert set(names) == {"Anna", "Ben", "Sue"}, candidates
+    # Hanna became player 3 when the device list moved her tracker from hunter 2 (device setup above).
+    assert set(names) == {"Anna", "Ben", "Hanna", "Sue"}, candidates
     editor.set_participants([names["Anna"], names["Ben"], names["Sue"]])
     soon = editor.server_now().replace(microsecond=0) + timedelta(seconds=40)
     editor.insert_row(soon)

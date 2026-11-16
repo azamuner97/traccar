@@ -1,4 +1,4 @@
-"""Local MySQL/HTTP audit of game data model 2 (game-session API version 10) with isolated fixtures.
+"""Local MySQL/HTTP audit of game data model 2 (game-session API version 11) with isolated fixtures.
 
 Creates a temporary administrator and temporary members' accounts, exercises the game-session, controller, member,
 request, joker, timetable and status endpoints directly and, with ``--tool-source``, through Traccar Tool's model-2
@@ -169,11 +169,70 @@ class Game:
 
 # Sessions, documents and deletion -------------------------------------------------------------------------------
 
+def _refused_body(method, path, body, expected):
+    """The JSON body of a refusal (``api.request`` returns no body for non-200 answers)."""
+    headers = {"Authorization": "Basic " + base64.b64encode(f"{api.EMAIL}:{api.PASSWORD}".encode()).decode(),
+               "Content-Type": "application/json"}
+    if api.CONTROLLER["epoch"] is not None:
+        headers[api.EPOCH_HEADER] = str(api.CONTROLLER["epoch"])
+    message = urllib.request.Request(api.BASE + "/api" + path, data=json.dumps(body).encode(), headers=headers,
+                                     method=method)
+    try:
+        urllib.request.urlopen(message, timeout=15)
+    except urllib.error.HTTPError as error:
+        assert error.code == expected, (error.code, error.read()[:300])
+        return json.loads(error.read())
+    raise AssertionError(f"{method} {path} was accepted, expected {expected}")
+
+
+def audit_device_list(user_credentials):
+    """The device list (phase 5): an empty list without one, the stored trimmed list, the idempotent retry, 409,
+    422 with every failing row, 400 for a malformed body, nothing applied to members, operator-only access,
+    fencing on the running session, and deletion with its session."""
+    session_id = api.create_game_session("device-list")
+    path = f"/game-sessions/{session_id}/device-list"
+    assert api.request("GET", path) == {"revision": 0, "updatedAt": None, "document": {"devices": []}}
+    api.request("GET", path, credentials=user_credentials, expected=403)
+    devices = [{"name": " Anna ", "deviceIdentifier": "4711 ", "role": "player", "roleNumber": 1},
+               {"name": "Hugo", "deviceIdentifier": "h-1", "role": "hunter", "roleNumber": 3}]
+    stored = api.request("PUT", path, {"expectedRevision": 0, "document": {"devices": devices}})
+    assert stored["revision"] == 1 and stored["updatedAt"], stored
+    assert stored["document"]["devices"][0] == {"name": "Anna", "deviceIdentifier": "4711", "role": "player",
+                                                "roleNumber": 1}, stored
+    assert api.request("GET", path) == stored
+    aggregate = api.request("GET", f"/game-sessions/{session_id}")["revision"]
+    # The same write again (its answer lost): the stored list, no new revision.
+    assert api.request("PUT", path, {"expectedRevision": 0, "document": {"devices": devices}}) == stored
+    assert api.request("GET", f"/game-sessions/{session_id}")["revision"] == aggregate
+    api.request("PUT", path, {"expectedRevision": 0, "document": {"devices": devices[:1]}}, expected=409)
+    refused = _refused_body("PUT", path, {"expectedRevision": 1, "document": {"devices": [
+        {"name": "Hugo", "deviceIdentifier": "h-1", "role": "hunter", "roleNumber": 1},
+        {"name": "hugo", "deviceIdentifier": "h-1", "role": "Hunter", "roleNumber": 0}]}}, 422)
+    assert refused["message"] == "The device list was rejected", refused
+    assert [(item["index"], item["field"], item["code"]) for item in refused["errors"]] == [
+        (1, "name", "duplicateName"), (1, "deviceIdentifier", "duplicateDeviceIdentifier"),
+        (1, "role", "invalidRole"), (1, "roleNumber", "invalidRoleNumber"), (None, "role", "noPlayer")], refused
+    api.request("PUT", path, {"expectedRevision": 1, "document": {"devices": [], "extra": 1}}, expected=400)
+    assert api.request("GET", path)["revision"] == 1, "a refused list stores nothing"
+    # The list is the desired one: saving it plans no member.
+    assert api.request("GET", f"/game-sessions/{session_id}/members") == []
+    # On the running session a write needs the controlling Tool's epoch, like other configuration documents.
+    api.execute(session_id)
+    update = {"expectedRevision": 1, "document": {"devices": devices[:1]}}
+    api.request("PUT", path, update, epoch=False, expected=423)
+    assert api.request("PUT", path, update)["revision"] == 2
+    api.stop_game(session_id)
+    api.request("DELETE", f"/game-sessions/{session_id}", expected=204)
+    api.GAME_SESSION_IDS.remove(session_id)
+    api.request("GET", path, expected=404)
+    assert api.sql(f"SELECT COUNT(*) FROM tc_game_device_lists WHERE gamesessionid = {int(session_id)}") == "0"
+
+
 def audit_http(fixtures, user_credentials):
     """Admin-only access, revisions, encryption at rest, timetable identity by member, logs, cascading deletion."""
     api.request("GET", "/game-sessions", credentials=user_credentials, expected=403)
     api.request("GET", "/game-sessions/capabilities", credentials=user_credentials, expected=403)
-    assert api.request("GET", "/game-sessions/capabilities") == {"apiVersion": 10}
+    assert api.request("GET", "/game-sessions/capabilities") == {"apiVersion": 11}
     session_id = api.create_game_session("http", {"pings_per_speedhunt": 4})
     api.request("POST", "/game-sessions", {"name": api.PREFIX + "-http", "schemaVersion": 5, "config": {}},
                 expected=409)
@@ -1626,7 +1685,6 @@ def audit_tool(tool_source):
         name = api.PREFIX + "-tool"
         draft = default_session_template(name)
         draft["user_passwords"]["player"] = "player-" + secrets.token_hex(4)
-        draft["device_list_path"] = "/local/only.xlsx"
         session = repository.create(name, validate_session_document(draft, name))
         session_id = repository.session_id(name)
         api.GAME_SESSION_IDS.append(session_id)
@@ -1647,7 +1705,7 @@ def audit_tool(tool_source):
             jobs=ServerJobQueue()).load(name)
         assert reloaded["game_settings"]["pings_per_speedhunt"] == 7
         assert reloaded["user_passwords"]["player"] == draft["user_passwords"]["player"]
-        assert reloaded["device_list_path"] == "", "Local paths must not be stored centrally"
+        assert "device_list_path" not in reloaded, "The device list is a server document, not a local path"
         assert "game_status" not in reloaded
         stored = api.request("GET", f"/game-sessions/{session_id}")
         assert api.PASSWORD not in json.dumps(stored), "The Traccar admin password must not be stored centrally"
@@ -1670,6 +1728,7 @@ def main(tool_source=None):
     try:
         api.acquire_controller()
         audit_http(fixtures, (user_email, user_password))
+        audit_device_list((user_email, user_password))
         audit_controller(fixtures, user_id, (user_email, user_password))
         game = Game(fixtures, "game", {"pings_per_speedhunt": 4},
                     [("hunter", "hunter", "Hunter"), ("anna", "player", "Anna"), ("ben", "player", "Ben"),
@@ -1690,7 +1749,9 @@ def main(tool_source=None):
         if tool_source:
             audit_one_off_pings(tool_source, game)
             audit_tool(tool_source)
-        print("MySQL/HTTP game-session audit passed: admin-only access, API version 10, one-off pings as "
+        print("MySQL/HTTP game-session audit passed: admin-only access, API version 11, the device list (stored "
+              "trimmed, retry, 409, 422 with every failing row, fenced while running, deleted with its session), "
+              "one-off pings as "
               "intents through the Tool (manual, speedhunt static and operator fake, relay with its joker and "
               "record, a lost answer reconciled by lookup), revision conflicts and "
               "idempotent retries, credential encryption at rest, timetable changesets (cells keyed by slot and "
