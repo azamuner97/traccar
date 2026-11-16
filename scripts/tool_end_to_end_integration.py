@@ -398,13 +398,22 @@ def game_flow(connection, clients, session, name, session_id, accounts, profile,
     assert "Public transport" not in json.dumps(api.request("GET", "/game-status", credentials=ben_view))
     client.deliver_effects(operations=[live_upload_ended(manual_id, "stopped")])
 
-    # A hunter relay: the hunters' positions reach Anna through her hunter mirror, using her joker.
+    # A one-off hunter relay is the Tool's relay intent: the server reads Hugo's tracker and writes his position to
+    # Anna's per-hunter mirror, using her joker in the same transaction (the Tool sends no position).
+    from traccar_game_manager.application.game_actions.relay import relay_intent
+    from traccar_game_manager.application.tracking.pings import ping_outcomes
     requests.change_jokers(anna.id, "hunterPositions", 1, "audit")
     relay_key = next(key for key in mirrors if key.startswith("hunter_1_to_player_1"))
-    relayed = client.upload_positions([{"uniqueId": mirrors[relay_key], "latitude": 47.2, "longitude": 8.4}],
-                                      jokers=[{"memberId": anna.id, "type": "hunterPositions",
-                                               "overAllocate": False, "detail": "Audit relay"}])
-    assert relayed["jokers"][0]["overAllocated"] is False, relayed
+    hugo = trackers[prefix + "-hugo"]
+    api.upload(api.request("GET", f"/devices?id={hugo}")[0]["uniqueId"], 47.2, 8.4)
+    deadline = time.monotonic() + 15
+    while (api.request("GET", f"/positions?deviceId={hugo}") or [{}])[-1].get("latitude") != 47.2:
+        assert time.monotonic() < deadline, "Hugo's position was not stored"
+        time.sleep(0.2)
+    relayed = ping_outcomes(client.deliver_effects(pings=[relay_intent(anna.id)]))[0]
+    assert relayed.delivered == ("hunters",) and relayed.jokers[0]["overAllocated"] is False, relayed
+    shown = api.request("GET", f"/devices?uniqueId={mirrors[relay_key]}")[0]
+    assert api.request("GET", f"/positions?id={shown['positionId']}")[0]["latitude"] == 47.2, shown
     own = api.request("GET", "/game-jokers", credentials=accounts[("player", 1)])
     assert next(item for item in own["inventories"] if item["type"] == "hunterPositions")["used"] == 1
 

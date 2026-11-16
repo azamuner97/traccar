@@ -1,4 +1,4 @@
-"""Local MySQL/HTTP audit of game data model 2 (game-session API version 9) with isolated fixtures.
+"""Local MySQL/HTTP audit of game data model 2 (game-session API version 10) with isolated fixtures.
 
 Creates a temporary administrator and temporary members' accounts, exercises the game-session, controller, member,
 request, joker, timetable and status endpoints directly and, with ``--tool-source``, through Traccar Tool's model-2
@@ -173,7 +173,7 @@ def audit_http(fixtures, user_credentials):
     """Admin-only access, revisions, encryption at rest, timetable identity by member, logs, cascading deletion."""
     api.request("GET", "/game-sessions", credentials=user_credentials, expected=403)
     api.request("GET", "/game-sessions/capabilities", credentials=user_credentials, expected=403)
-    assert api.request("GET", "/game-sessions/capabilities") == {"apiVersion": 9}
+    assert api.request("GET", "/game-sessions/capabilities") == {"apiVersion": 10}
     session_id = api.create_game_session("http", {"pings_per_speedhunt": 4})
     api.request("POST", "/game-sessions", {"name": api.PREFIX + "-http", "schemaVersion": 5, "config": {}},
                 expected=409)
@@ -324,23 +324,30 @@ def audit_controller(fixtures, user_id, user_credentials):
     api.request("POST", "/notifications/send/traccar", message, epoch=False, expected=423)
     assert "notificationTokens" not in (api.request("GET", f"/users/{user_id}").get("attributes") or {})
 
-    # Effects: mirror positions become latest and the device shows as online; repeats are not applied.
-    delivery = {"deliveryId": "audit-" + uuid4().hex,
-                "positions": [{"deviceId": mirror["id"], "latitude": 47.1, "longitude": 8.5}],
+    # Effects: a ping intent's mirror position becomes latest and the device shows as online; repeats are not
+    # applied. The server reads Anna's tracker and resolves her hunters' mirror itself (phase 4).
+    report_fix(real, 47.1, 8.5)
+    intent = {"path": "manual", "sourceMemberId": anna["id"], "audiences": ["hunters"]}
+    delivery = {"deliveryId": "audit-" + uuid4().hex, "pings": [intent],
                 "pushes": [{"memberId": anna["id"], "subject": "Audit", "message": "Speedhunt started",
                             "notificator": "traccar"}]}
     first = api.request("POST", f"/game-sessions/{session_id}/effects", delivery)
-    assert not first["replayed"] and all(item["latest"] for item in first["positions"]), first
+    written = first["pings"][0]["positions"]
+    assert not first["replayed"] and first["pings"][0]["status"] == "sent", first
+    assert [item["deviceId"] for item in written] == [mirror["id"]] and written[0]["latest"], first
     device = stored_device(mirror["id"])
-    assert device["positionId"] == first["positions"][0]["positionId"] and device["status"] == "online"
+    assert device["positionId"] == written[0]["positionId"] and device["status"] == "online"
     position = api.request("GET", f"/positions?id={device['positionId']}")[0]
     assert position["attributes"]["activity"] == "still" and position["protocol"] == "osmand"
+    assert position["latitude"] == 47.1, position
     replay = api.request("POST", f"/game-sessions/{session_id}/effects", delivery)
-    assert replay["replayed"] and replay["positions"] == first["positions"]
+    assert replay["replayed"] and replay["pings"] == first["pings"]
     api.request("POST", f"/game-sessions/{session_id}/effects",
-                {**delivery, "positions": [{"deviceId": mirror["id"], "latitude": 47.2, "longitude": 8.5}]},
-                expected=409)
+                {**delivery, "pings": [{**intent, "audiences": ["hunters", "players"]}]}, expected=409)
     assert api.sql(f"SELECT COUNT(*) FROM tc_positions WHERE deviceid={mirror['id']}") == "1"
+    # A delivery carries no positions any more: the property is refused, whatever it names.
+    api.effects(session_id, positions=[{"deviceId": mirror["id"], "latitude": 47.2, "longitude": 8.6}],
+                expected=400)
     deadline = time.monotonic() + 15
     while api.sql(f"SELECT status FROM tc_game_push_outbox WHERE gamesessionid={session_id}") in (
             "queued", "attempting"):
@@ -348,12 +355,7 @@ def audit_controller(fixtures, user_id, user_credentials):
         time.sleep(0.5)
     pushed = api.sql(f"SELECT status, detail FROM tc_game_push_outbox WHERE gamesessionid={session_id}")
     assert pushed.split("\t")[0] == "sent", pushed
-    older = (datetime.now(timezone.utc) - timedelta(minutes=5)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
-    late = api.effects(session_id, positions=[{"deviceId": mirror["id"], "latitude": 47.2, "longitude": 8.6,
-                                               "fixTime": older}])
-    assert not late["positions"][0]["latest"]
-    assert stored_device(mirror["id"])["positionId"] == first["positions"][0]["positionId"]
-    api.effects(session_id, positions=[{"deviceId": real["id"], "latitude": 1, "longitude": 1}], expected=400)
+    assert stored_device(mirror["id"])["positionId"] == written[0]["positionId"]
     api.request("POST", f"/game-sessions/{session_id}/effects", {**delivery, "deliveryId": "audit-" + uuid4().hex},
                 epoch=False, expected=423)
 
@@ -495,18 +497,31 @@ def audit_jokers(game):
     game.submit("anna", joker, expected=409)
     assert all(item["type"] != "jokerHunterPositions" for item in game.requests("hunter")), "jokers are private"
 
-    # The Tool delivers each hunter's snapshot with its own fix time, together with the outcome.
+    # The Tool fulfils it with a relay intent carrying the request's completion: the server reads each hunter's
+    # latest position and writes it with its own fix time; the request succeeds in the same transaction.
     relay = game.fixtures.device(api.PREFIX + "-hunter-to-anna", attributes={"traccarToolMirror": True})
     api.add_mirror(game.id, relay["id"], game.member_id("hunter"), destination_member_id=game.member_id("anna"))
     game.claim(request["id"])
-    fix_time = (datetime.now(timezone.utc) - timedelta(minutes=3)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
-    outcome = game.succeed(request["id"], "Positions of 1 hunter(s) sent.", positions=[
-        {"deviceId": relay["id"], "latitude": 47.3, "longitude": 8.6, "fixTime": fix_time}])
-    assert outcome["positions"][0]["latest"] and outcome["positions"][0]["fixTime"].startswith(fix_time[:19])
+    fix_time = (datetime.now(timezone.utc) - timedelta(minutes=3)).replace(microsecond=0)
+    report_fix(game.trackers["hunter"], 47.3, 8.6, fix_time)
+    outcome = game.effects(pings=[{"path": "relay", "recipientMemberId": game.member_id("anna"),
+                                   "onDelivered": {"requests": [{"id": request["id"], "status": "succeeded",
+                                                                 "message": "Positions sent."}]},
+                                   "onNotDelivered": {"requests": [{"id": request["id"], "status": "failed",
+                                                                    "message": "No hunter position."}]}}])
+    relayed = outcome["pings"][0]
+    assert relayed["status"] == "sent" and relayed["hunters"] == [game.member_id("hunter")], relayed
+    assert relayed["requests"] == [{"id": request["id"], "status": "succeeded"}], relayed
+    assert relayed["positions"][0]["latest"], relayed
+    assert relayed["positions"][0]["fixTime"].startswith(_iso(fix_time)[:19]), relayed
     position = api.request("GET", f"/positions?id={stored_device(relay['id'])['positionId']}")[0]
-    assert position["fixTime"].startswith(fix_time[:19]), position["fixTime"]
+    assert position["fixTime"].startswith(_iso(fix_time)[:19]) and position["latitude"] == 47.3, position
+    assert game.operator_request(request["id"])["status"] == "succeeded"
     inventory = game.inventory("anna", "hunterPositions")
     assert inventory["used"] == 1 and inventory["available"] == 0, inventory
+    # The server keeps the one-off relay, so the last relay delivery survives a reload of the Tool.
+    record = api.request("GET", f"/game-sessions/{game.id}/snapshot")["state"]["relays"][-1]
+    assert record["recipientMemberId"] == game.member_id("anna") and record["requestId"] == request["id"], record
 
     # An operator relay without a joker left needs a confirmed use beyond the allocation.
     use = {"memberId": game.member_id("anna"), "type": "hunterPositions", "overAllocate": False,
@@ -885,9 +900,22 @@ def audit_timetable_fakes(game):
     mirror = game.mirrors["anna"]
     game.effects(operations=[{"type": "fakeUsed", "reservationId": first}], expected=400)
     game.effects(positions=[{"deviceId": mirror["id"], "latitude": 1, "longitude": 1, "fakeReservationId": first,
-                             "fallbackLatitude": 47.3, "fallbackLongitude": 8.3}], expected=400)
+                             "fallbackLatitude": 47.3, "fallbackLongitude": 8.3}], expected=400)  # no positions at all
     timetable_changes(game.id, [{"type": "removeSlot", "slotId": slot} for slot in slots.values()])
     game.reconcile()
+
+
+def report_fix(device, latitude, longitude, fix_time=None):
+    """Uploads a tracker position through the OsmAnd port and waits until the server holds it as the latest."""
+    extra = {"timestamp": fix_time.isoformat()} if fix_time is not None else {}
+    api.upload(device["uniqueId"], latitude, longitude, **extra)
+    deadline = time.monotonic() + 15
+    while time.monotonic() < deadline:
+        latest = api.request("GET", f"/positions?deviceId={device['id']}")
+        if latest and latest[-1]["latitude"] == latitude:
+            return latest[-1]
+        time.sleep(0.2)
+    raise AssertionError(f"Position {latitude} of {device['uniqueId']} was not stored")
 
 
 def wait_until(moment):
@@ -1073,10 +1101,14 @@ def audit_speedhunt_fakes(game):
         assert all(item["use"] != "speedhunt" for item in game.status(key)["status"]["fakes"]), key
         bound = [item for item in game.own_jokers(key)["reservations"] if (item.get("fake") or {}).get("bound")]
         assert len(bound) == 1 and "boundRunId" not in bound[0]["fake"], bound
-    mirror = game.mirrors["anna"]
-    delivered = game.effects(operations=[{"type": "pingDelivered", "targetMemberId": game.member_id("anna"),
-                                          "number": 2, "mode": "static", "source": "real"}],
-                             positions=[{"deviceId": mirror["id"], "latitude": 47.0, "longitude": 8.0}])
+    # Ping 2 is a static ping intent: the server reads Anna's real position and gives her hunters' mirror her fake.
+    report_fix(game.trackers["anna"], 47.0, 8.0)
+    anna = game.member_id("anna")
+    delivered = game.effects(pings=[{
+        "path": "speedhunt", "sourceMemberId": anna, "audiences": ["hunters"],
+        "onDelivered": {"operations": [{"type": "pingDelivered", "targetMemberId": anna, "number": 2,
+                                        "mode": "static", "source": "real"}]},
+        "onNotDelivered": {"operations": [{"type": "pingFailed", "targetMemberId": anna}]}}])["pings"][0]
     assert delivered["operations"][0]["source"] == "jokerFake", delivered
     position = api.request("GET", f"/positions?id={delivered['positions'][0]['positionId']}")[0]
     assert position["latitude"] == PRIVATE_LATITUDE, position
@@ -1302,6 +1334,131 @@ def audit_timetable_privacy(game, sockets):
 
 # Traccar Tool against the server ------------------------------------------------------------------------------
 
+def audit_one_off_pings(tool_source, game):
+    """Phase 4: every one-off action the Tool takes is a ping intent built and read by the Tool's own services. A
+    manual ping, a speedhunt static and operator-fake ping, a one-off relay with its joker, and a lost answer
+    reconciled by lookup after a change of control, never sent twice."""
+    sys.path.insert(0, tool_source)
+    from types import SimpleNamespace
+    import requests
+    from traccar_game_manager.application.game_actions.relay import (
+        HunterRelayActionService, HunterRelayRuntimeState)
+    from traccar_game_manager.application.tracking.manual import ManualUploadSelection, ManualUploadService
+    from traccar_game_manager.application.tracking.pings import effects as ping_effects
+    from traccar_game_manager.application.tracking.pings import participant_ping, ping_outcomes
+    from traccar_game_manager.infrastructure.traccar.effects import EffectsDeliveryError, SessionEffects
+    from traccar_game_manager.infrastructure.traccar.game_sessions import GameSessionApi
+
+    client = tool_api(tool_source)
+    deliveries = SessionEffects(client, game.id, epoch_provider=lambda: api.CONTROLLER["epoch"])
+    clock = SimpleNamespace(now=lambda: datetime.now(timezone.utc))
+    trackers = {game.trackers[key]["id"]: game.member_id(key) for key in game.trackers}
+    logs = []
+    sue, hunter = game.member_id("sue"), game.member_id("hunter")
+    report_fix(game.trackers["sue"], 47.31, 8.31)
+    report_fix(game.trackers["hunter"], 47.41, 8.41)
+
+    # A manual ping: the server reads Sue's tracker; an operator coordinate for Ben needs no position.
+    manual = ManualUploadService(
+        clock, lambda pings: deliveries.deliver(pings=pings), members=trackers.get,
+        prepare_targets=lambda _device: {"hunters": True, "players": False, "supporters": False},
+        has_any_target=lambda _device, config: any(config.values()),
+        describe_targets=lambda config: "hunters", event_sink=lambda message, _device: logs.append(message),
+        local_tz=timezone.utc, no_location_message=lambda name: f"No location for {name}")
+    sue_device = {"id": game.trackers["sue"]["id"], "name": "Sue"}
+    ben_device = {"id": game.trackers["ben"]["id"], "name": "Ben"}
+    results = manual.upload([ManualUploadSelection(sue_device), ManualUploadSelection(ben_device, (46.71, 7.71))])
+    assert [item.uploaded for item in results] == [True, True], logs
+    assert api.request("GET", f"/positions?deviceId={game.mirrors['sue']['id']}")[-1]["latitude"] == 47.31
+    assert api.request("GET", f"/positions?deviceId={game.mirrors['ben']['id']}")[-1]["latitude"] == 46.71
+    assert logs[0].startswith("Position of Sue uploaded to hunters at "), logs
+
+    # A speedhunt static ping and an operator fake: pingDelivered commits with the positions.
+
+    def speedhunt(number, source, coordinate=None):
+        delivered = {"type": "pingDelivered", "targetMemberId": sue, "number": number, "mode": "static",
+                     "source": source}
+        if number == 1:
+            # As the Tool: a speedhunt the operator starts was confirmed when no pool joker is left.
+            delivered.update(toHunters=True, toPlayers=False, toSupporters=False, overAllocate=True)
+        return ping_outcomes(deliveries.deliver(pings=[participant_ping(
+            "speedhunt", sue, ("hunters",), coordinate=coordinate,
+            on_delivered=ping_effects(operations=[delivered]),
+            on_not_delivered=ping_effects(operations=[{"type": "pingFailed", "targetMemberId": sue}]))]))[0]
+
+    first = speedhunt(1, "real")
+    assert first.delivered == ("hunters",) and first.operation("pingDelivered")["number"] == 1, first
+    fake = speedhunt(2, "operatorFake", (46.61, 7.61))
+    assert fake.fake_audiences == ("hunters",) and fake.operation("pingDelivered")["source"] == "operatorFake"
+    assert api.request("GET", f"/positions?deviceId={game.mirrors['sue']['id']}")[-1]["latitude"] == 46.61
+    sue_status = game.participant("hunter", "sue")["speedhunt"]
+    assert sue_status["running"] and sue_status["pings"] == 2, sue_status
+    game.end_run("sue")
+
+    # A one-off relay through the Tool's relay service: one joker, used with the delivery, and a server record.
+    relay_mirror = game.fixtures.device(api.PREFIX + "-hunter-to-sue", attributes={"traccarToolMirror": True})
+    api.add_mirror(game.id, relay_mirror["id"], hunter, destination_member_id=sue)
+    game.change("sue", "hunterPositions", 1)
+    state = HunterRelayRuntimeState()
+    relay = HunterRelayActionService(
+        state, clock=clock, deliver=lambda pings: deliveries.deliver(pings=pings), members=trackers.get,
+        hunters=lambda: [{"id": game.trackers["hunter"]["id"], "name": "Hunter"}],
+        counters_changed=lambda _device: None, event_sink=lambda message, _device: logs.append(message),
+        no_location_message=lambda name: f"No location for {name}", local_tz=timezone.utc)
+    outcome = relay.relay(sue_device)
+    assert (outcome.delivered, outcome.failed) == (1, 0), logs
+    assert "One Get hunter positions joker of Sue used." in logs, logs
+    assert api.request("GET", f"/positions?deviceId={relay_mirror['id']}")[-1]["latitude"] == 47.41
+    assert game.inventory("sue", "hunterPositions")["used"] == 1
+    records = [item for item in api.request("GET", f"/game-sessions/{game.id}/snapshot")["state"]["relays"]
+               if item["recipientMemberId"] == sue]
+    assert len(records) == 1 and records[0]["reservationId"] and records[0]["hunters"] == 1, records
+
+    # A lost answer: the delivery committed, its response never arrived, and control changed meanwhile. The Tool
+    # looks it up under the new epoch and never sends it again.
+    posted = []
+
+    class LosingTransport:
+        get, put, delete = staticmethod(requests.get), staticmethod(requests.put), staticmethod(requests.delete)
+
+        @staticmethod
+        def post(url, **kwargs):
+            response = requests.post(url, **kwargs)
+            if url.endswith("/effects"):
+                posted.append(kwargs["json"]["deliveryId"])
+                raise requests.ConnectionError("answer lost")
+            return response
+
+    losing = GameSessionApi(api.BASE, api.EMAIL, api.PASSWORD, transport=LosingTransport(),
+                            epoch_provider=lambda: api.CONTROLLER["epoch"])
+    uncertain = SessionEffects(losing, game.id, retries=0, sleep=lambda _seconds: None,
+                               epoch_provider=lambda: api.CONTROLLER["epoch"])
+    game.change("sue", "hunterPositions", 1)
+    used = game.inventory("sue", "hunterPositions")["used"]
+    report_fix(game.trackers["hunter"], 47.42, 8.42)
+
+    try:
+        uncertain.deliver(pings=[{"path": "relay", "recipientMemberId": sue, "onDelivered": {"jokers": [{
+            "memberId": sue, "type": "hunterPositions", "overAllocate": False, "detail": "Manual hunter relay"}]}}])
+        raise AssertionError("The answer was meant to be lost")
+    except EffectsDeliveryError as error:
+        assert error.uncertain, error
+        lost_id = error.delivery_id
+    epoch = api.CONTROLLER["epoch"]
+    api.release_controller()
+    api.acquire_controller(resume=epoch)
+    assert api.CONTROLLER["epoch"] == epoch + 1
+    reconciled = uncertain.reconcile()
+    assert [delivery for delivery, _outcome in reconciled] == [lost_id], reconciled
+    recorded = ping_outcomes(reconciled[0][1])[0]
+    assert recorded.delivered == ("hunters",) and recorded.jokers[0]["memberId"] == sue, recorded
+    assert posted == [lost_id], "the delivery was looked up, never posted again"
+    assert game.inventory("sue", "hunterPositions")["used"] == used + 1, "the joker was used once"
+    assert api.request("GET", f"/positions?deviceId={relay_mirror['id']}")[-1]["latitude"] == 47.42
+
+    game.reconcile()
+
+
 def tool_api(tool_source):
     sys.path.insert(0, tool_source)
     import requests
@@ -1330,9 +1487,11 @@ def audit_tool_requests(tool_source, game):
     """The Tool's request processor and gateway against the real server: revisions, approval, a delivered ping."""
     from traccar_game_manager.application.game_requests.processor import (
         GameRequestProcessor, RequestCheck, RequestResult)
+    from traccar_game_manager.application.tracking.pings import effects, participant_ping
     from traccar_game_manager.domain.game.settings import normalize_game_settings
 
     client, gateway = tool_gateway(tool_source, game)
+    report_fix(game.trackers["ben"], 47.21, 8.21)
     member_id = game.member_id("ben")
     executed, logs = [], []
 
@@ -1346,11 +1505,15 @@ def audit_tool_requests(tool_source, game):
 
         def execute(self, kind, item, parameters):
             executed.append(kind)
-            # As the speedhunt service: the ping's typed operation commits with the outcome.
-            return RequestResult(True, "Ping 1 of 4 sent.", operations=({
+            # As the speedhunt service: the ping is an intent; its pingDelivered or pingFailed and the request's
+            # completion (added by the processor) commit with the positions the server writes.
+            intent = participant_ping("speedhunt", member_id, ("hunters",), on_delivered=effects(operations=[{
                 "type": "pingDelivered", "targetMemberId": member_id, "number": 1, "mode": "static",
                 "source": "real", "toHunters": True, "toPlayers": True, "toSupporters": True,
-                "requestId": int(parameters["requestId"])},))
+                "requestId": int(parameters["requestId"])}]), on_not_delivered=effects(operations=[{
+                    "type": "pingFailed", "targetMemberId": member_id}]))
+            return RequestResult(True, "Ping 1 of 4 sent.", pings=(intent,),
+                                 failure_message="No one could receive this ping.")
 
     def revisions():
         return {member.id: member.state_revision for member in gateway.members()}
@@ -1377,6 +1540,8 @@ def audit_tool_requests(tool_source, game):
     done = game.operator_request(request["id"])
     assert done["status"] == "succeeded" and done["message"] == "Ping 1 of 4 sent.", (done, logs)
     assert executed == ["speedhuntStaticPing"]
+    # The ping and the request's completion were one delivery: the hunters' mirror shows Ben's real position.
+    assert api.request("GET", f"/positions?deviceId={game.mirrors['ben']['id']}")[-1]["latitude"] == 47.21
     ben = game.participant("hunter", "ben")["speedhunt"]
     assert ben["running"] and ben["pings"] == 1, ben
     game.end_run("ben")
@@ -1523,8 +1688,11 @@ def main(tool_source=None):
         audit_control_changes(game)
         audit_participant_privacy(fixtures)
         if tool_source:
+            audit_one_off_pings(tool_source, game)
             audit_tool(tool_source)
-        print("MySQL/HTTP game-session audit passed: admin-only access, API version 9, revision conflicts and "
+        print("MySQL/HTTP game-session audit passed: admin-only access, API version 10, one-off pings as "
+              "intents through the Tool (manual, speedhunt static and operator fake, relay with its joker and "
+              "record, a lost answer reconciled by lookup), revision conflicts and "
               "idempotent retries, credential encryption at rest, timetable changesets (cells keyed by slot and "
               "member, canonical content, 422 rejections, retries), logs, "
               "cascading deletion, controller lease with fenced game and standard endpoints (path and body IDs, "

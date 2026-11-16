@@ -197,7 +197,7 @@ GAME_SESSION_IDS = []
 
 
 def create_game_session(label, game_settings=None):
-    """A stored game session of model 2 (API version 9) with its settings; deleted by ``delete_game_sessions``."""
+    """A stored game session of model 2 (API version 10) with its settings; deleted by ``delete_game_sessions``."""
     session = request("POST", "/game-sessions", {
         "name": PREFIX + "-" + label, "schemaVersion": SCHEMA_VERSION,
         "config": {"game_settings": game_settings or {}}})
