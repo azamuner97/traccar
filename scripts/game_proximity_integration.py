@@ -260,8 +260,8 @@ def main(tool_source=None, skip_restart=False):
             api.request("GET", endpoint, credentials=credentials[key], expected=403)
         for key in ("first", "second", "supporter"):
             api.request("GET", "/game-proximity/circles", credentials=credentials[key], expected=403)
-            # Fenced before authorization: participants never hold the controller lease.
-            api.request("PUT", endpoint, value, credentials=credentials[key], expected=423)
+            # Fenced; a participant's failed lease check answers 403 and tells nothing about the lease.
+            api.request("PUT", endpoint, value, credentials=credentials[key], expected=403)
         assert api.request("GET", "/game-proximity/circles", credentials=outsider_credentials) == []
         api.request("GET", "/game-proximity/access", credentials=None, expected=401)
         api.request("GET", "/game-proximity/circles", credentials=None, expected=401)

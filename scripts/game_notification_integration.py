@@ -614,8 +614,8 @@ def main(tool_source=None):
         for key in roles:
             page(session_id, credentials[key])
             page(other_id, credentials[key], expected=403)
-            # Writes are fenced before authorization: without the controller lease they are refused (423).
-            request("POST", endpoint, {}, credentials=credentials[key], expected=423)
+            # Writes are fenced; a member's failed lease check answers 403, so members learn nothing of the lease.
+            request("POST", endpoint, {}, credentials=credentials[key], expected=403)
             sockets[key] = fixtures.socket(credentials[key])
         page(session_id, unrelated, expected=403)
         page(other_id, other_credentials)

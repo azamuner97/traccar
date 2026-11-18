@@ -764,8 +764,9 @@ def audit_planned_breaks(game, tool_source=None):
                 expected=409)
     second = api.request("POST", plan_endpoint, {"memberId": game.member_id("anna"),
                                                  "startsAt": _iso(second_start), "overAllocate": True})
+    # A member's fenced write answers 403: a failed lease check tells only administrators about the lease.
     api.request("POST", plan_endpoint, {"memberId": game.member_id("anna"), "startsAt": _iso(later)},
-                credentials=game.credentials["anna"], expected=423)
+                credentials=game.credentials["anna"], expected=403)
     by_start = {item["startsAt"]: item for item in plans()}
     assert set(by_start) == {_iso(later), _iso(second_start)}, by_start
     assert all(item["plannedBy"] == "operator" for item in by_start.values())
@@ -1408,6 +1409,9 @@ def audit_one_off_pings(tool_source, game):
     from traccar_game_manager.infrastructure.traccar.effects import EffectsDeliveryError, SessionEffects
     from traccar_game_manager.infrastructure.traccar.game_sessions import GameSessionApi
 
+    # The privacy audit ran a game of its own; pings are execution, refused (409) while this game is stopped.
+    api.execute(game.id)
+    game.reconcile()
     client = tool_api(tool_source)
     deliveries = SessionEffects(client, game.id, epoch_provider=lambda: api.CONTROLLER["epoch"])
     clock = SimpleNamespace(now=lambda: datetime.now(timezone.utc))
