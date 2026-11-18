@@ -452,6 +452,27 @@ public abstract class GameExecutionTest extends GameTestBase {
     // Delivery lookup ---------------------------------------------------------------------------------------
 
     @Test
+    void anUnfencedConfigurationWriteThatMeetsAStartedGameIsRefused() throws Exception {
+        // Review SC-7: the filter let the write through without the lease because the game was stopped; the game
+        // starts before the write locks the session, so the write is checked again under the lock.
+        long session = session();
+        GameUnfencedWrites.begin(session);
+        try {
+            long revision = sessions.get(session).settings().revision();
+            sessions.rename(session, revision, "Before the start");
+            startGame(session);
+            long current = sessions.get(session).settings().revision();
+            assertEquals(GameControllerService.LOCKED, status(() -> sessions.rename(session, current, "Too late")));
+            assertEquals("Before the start", sessions.get(session).name());
+        } finally {
+            GameUnfencedWrites.end();
+        }
+        // The same write fenced (or the server's own) is not marked and goes through.
+        long current = sessions.get(session).settings().revision();
+        assertEquals("Fenced", sessions.rename(session, current, "Fenced").name());
+    }
+
+    @Test
     void aRecordedDeliveryIsLookedUpUnderAnyEpoch() throws Exception {
         long session = session();
         GameMember anna = bound(session, "player");

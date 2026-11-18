@@ -7,6 +7,7 @@ import jakarta.ws.rs.core.PathSegment;
 import jakarta.ws.rs.core.Response;
 import jakarta.ws.rs.core.SecurityContext;
 import jakarta.ws.rs.core.UriInfo;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -14,6 +15,7 @@ import org.traccar.api.security.UserPrincipal;
 import org.traccar.game.GameControllerService;
 import org.traccar.game.GameExecutionService;
 import org.traccar.game.GameOwnershipService;
+import org.traccar.game.GameUnfencedWrites;
 
 import java.io.ByteArrayInputStream;
 import java.nio.charset.StandardCharsets;
@@ -51,6 +53,12 @@ public class GameControllerFilterTest {
                 Set.of()));
         when(controller.status()).thenReturn(lease(true));
         when(controller.lockShared()).thenReturn(1L);
+        when(controller.administrator(1L)).thenReturn(true);
+    }
+
+    @AfterEach
+    void clearMark() {
+        GameUnfencedWrites.end();
     }
 
     private static GameControllerService.Lease lease(boolean active) {

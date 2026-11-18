@@ -5,12 +5,14 @@ import jakarta.ws.rs.core.MultivaluedHashMap;
 import jakarta.ws.rs.core.PathSegment;
 import jakarta.ws.rs.core.SecurityContext;
 import jakarta.ws.rs.core.UriInfo;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.traccar.api.security.UserPrincipal;
 import org.traccar.game.GameControllerService;
 import org.traccar.game.GameExecutionService;
 import org.traccar.game.GameOwnershipService;
+import org.traccar.game.GameUnfencedWrites;
 
 import java.util.Arrays;
 import java.util.List;
@@ -49,6 +51,12 @@ public class GameApiFenceTest {
         inject(filter, "execution", execution);
         when(execution.runningSessionId()).thenReturn(RUNNING);
         when(controller.lockShared()).thenReturn(1L);
+        when(controller.administrator(1L)).thenReturn(true);
+    }
+
+    @AfterEach
+    void clearMark() {
+        GameUnfencedWrites.end();
     }
 
     private static ContainerRequestContext request(String method, String path) {
@@ -56,10 +64,14 @@ public class GameApiFenceTest {
     }
 
     private static ContainerRequestContext request(String method, String path, String epoch) {
+        return request(1, method, path, epoch);
+    }
+
+    private static ContainerRequestContext request(long userId, String method, String path, String epoch) {
         var request = mock(ContainerRequestContext.class);
         when(request.getMethod()).thenReturn(method);
         var security = mock(SecurityContext.class);
-        when(security.getUserPrincipal()).thenReturn(new UserPrincipal(1, null));
+        when(security.getUserPrincipal()).thenReturn(new UserPrincipal(userId, null));
         when(request.getSecurityContext()).thenReturn(security);
         var uri = mock(UriInfo.class);
         List<PathSegment> segments = Arrays.stream(path.split("/")).map(value -> {
@@ -76,9 +88,19 @@ public class GameApiFenceTest {
 
     /** Whether the filter checks the controller epoch for this write, sent with an epoch. */
     private boolean fenced(String write) throws Exception {
+        return checked(write, "1");
+    }
+
+    /** Whether the filter checks the epoch of this write sent without one: the write needs the lease. */
+    private boolean required(String write) throws Exception {
+        return checked(write, null);
+    }
+
+    private boolean checked(String write, String epoch) throws Exception {
         clearInvocations(controller);
         String[] parts = write.split(" ", 2);
-        filter.filter(request(parts[0], parts[1], "1"));
+        filter.filter(request(parts[0], parts[1], epoch));
+        GameUnfencedWrites.end();
         try {
             verify(controller, never()).check(anyLong(), any());
             return false;
@@ -121,11 +143,45 @@ public class GameApiFenceTest {
         // checkpoints and the game state are written by the controlling Tool and always fenced.
         Set<String> configuration = Set.of("DELETE game-sessions/6", "PUT game-sessions/6/name",
                 "PUT game-sessions/6/config", "PUT game-sessions/6/credentials", "PUT game-sessions/6/geofence-plans",
-                "PUT game-sessions/6/device-list", "POST game-sessions/6/timetable/changes", "PUT game-sessions/6/timetable/execution",
-                "POST game-sessions/6/logs");
+                "PUT game-sessions/6/device-list", "POST game-sessions/6/timetable/changes",
+                "PUT game-sessions/6/timetable/execution", "POST game-sessions/6/logs");
         for (String write : sessionWrites(STORED)) {
-            assertEquals(!configuration.contains(write), fenced(write), write);
+            if (!write.endsWith("/state")) {
+                assertEquals(!configuration.contains(write), required(write), write);
+            }
+            // Review SC-6: an epoch that a configuration write carries must be current as well.
+            assertTrue(fenced(write), write);
         }
+        assertFalse(required("POST game-sessions"));
+        assertTrue(fenced("POST game-sessions"));
+    }
+
+    @Test
+    void onlyAdministratorsLearnAnythingAboutTheLease() throws Exception {
+        // Review SC-5: whatever a member sends, the answer never depends on the lease: the resource's 403, or 403
+        // from a failed check; administrators get 423.
+        when(controller.check(anyLong(), any())).thenThrow(GameControllerService.locked("lease"));
+        for (boolean active : new boolean[] {true, false}) {
+            when(controller.status()).thenReturn(new GameControllerService.Lease(3, active ? "active" : "expired",
+                    active, null, null, null, null, "2026-05-01T10:00:00Z", 30, 5));
+            for (String epoch : new String[] {null, "1"}) {
+                for (String path : List.of("game-sessions/5/state", "game-sessions/6/state", "game-sessions/6/name",
+                        "game-sessions/5/name")) {
+                    var request = request(2, "PUT", path, epoch);
+                    filter.filter(request);
+                    GameUnfencedWrites.end();
+                    var captor = org.mockito.ArgumentCaptor.forClass(jakarta.ws.rs.core.Response.class);
+                    verify(request, org.mockito.Mockito.atMost(1)).abortWith(captor.capture());
+                    Integer status = captor.getAllValues().isEmpty() ? null : captor.getValue().getStatus();
+                    boolean refusedWithoutEpoch = epoch == null && path.equals("game-sessions/5/name");
+                    assertEquals(epoch != null || refusedWithoutEpoch ? Integer.valueOf(403) : null, status,
+                            path + " " + epoch + " " + active);
+                }
+            }
+        }
+        var operator = request(1, "PUT", "game-sessions/6/name", "1");
+        filter.filter(operator);
+        verify(operator).abortWith(org.mockito.ArgumentMatchers.argThat(response -> response.getStatus() == 423));
     }
 
     @Test
@@ -136,8 +192,8 @@ public class GameApiFenceTest {
             assertTrue(fenced(write), write);
         }
         for (String write : List.of("POST game-requests", "POST game-requests/9/cancel",
-                "POST game-jokers/reservations/4/cancel", "POST game-sessions",
-                "GET game-sessions/5/snapshot", "GET game-status")) {
+                "POST game-jokers/reservations/4/cancel", "POST game-sessions/6/events/test",
+                "POST game-controller/release", "GET game-sessions/5/snapshot", "GET game-status")) {
             assertFalse(fenced(write), write);
         }
     }

@@ -200,6 +200,7 @@ public final class GameTransaction {
         sessionRevision = first("SELECT revision FROM tc_game_sessions WHERE id = ? FOR UPDATE",
                 rows -> rows.getLong(1), id).orElseThrow(() -> GameErrors.notFound("Game session not found"));
         sessionId = id;
+        GameUnfencedWrites.check(this, id);
         return sessionRevision;
     }
 

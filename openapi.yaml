@@ -106,15 +106,20 @@ tags:
       Server-wide controller lease for Traccar Tool (administrators only). Fenced requests carry the current
       controllerEpoch in the X-Game-Controller-Epoch header and are refused with 423 otherwise. Fenced are, for any
       session, effects, members/*, resources/*, checkpoints/*, requests/* and jokers/*; every write of the running
-      session (its game state is running), including its timetable changes and execution toggle; the game state itself (PUT
-      /game-sessions/{id}/state), except a stop without the header while no lease is active; writes to
+      session (its game state is running), including its timetable changes and execution toggle; the game state
+      itself (PUT /game-sessions/{id}/state), except a stop without the header while no lease is active; writes to
       /game-notifications and /game-proximity; and - while a lease is held - standard mutations (devices, groups,
       users, permissions, geofences, DELETE /positions) of the Traccar resources a session owns (members' accounts
       and trackers, mirrors, groups, geofences), and /notifications/send/* reaching members of the running
-      session. Users may always update their own account. A request that carries the header must carry the
-      current epoch, whatever it changes. The lease decides only which Tool may make decisions: losing, releasing
-      or taking over control changes no game state and ends no request; a new epoch returns requests still
-      executing under an older one to approved.
+      session. Users may always update their own account. Configuration writes of a session whose game is not
+      running (and creating a session) need no header; the game state is checked again under the session lock, so
+      such a write that meets a game started meanwhile is refused with 423. A game write (configuration included)
+      or a fenced Traccar mutation that carries the header must carry the current epoch; /game-controller/*, the
+      test event and other Traccar endpoints ignore it. A failed check answers 423 to administrators only; other
+      accounts get 403 and learn nothing about the lease (also on the game state without the header). The lease
+      decides only which Tool may make decisions: losing, releasing or taking over control changes no game state
+      and ends no request; a new epoch returns requests still executing under an older one to approved, and the
+      server's controller task returns any such request of the running game about once per second.
 paths:
   /audit:
     get:

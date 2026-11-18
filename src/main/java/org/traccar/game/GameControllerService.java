@@ -118,6 +118,20 @@ public class GameControllerService {
                 .entity(message).type(MediaType.TEXT_PLAIN).build());
     }
 
+    /**
+     * Whether the account is an administrator. The controller filter checks the lease only for administrators, so
+     * other accounts learn nothing about it from fencing answers (review SC-5, SC-6).
+     */
+    public boolean administrator(long userId) throws SQLException {
+        try (Connection connection = dataSource.getConnection();
+             var query = connection.prepareStatement("SELECT administrator FROM tc_users WHERE id = ?")) {
+            query.setLong(1, userId);
+            try (ResultSet rows = query.executeQuery()) {
+                return rows.next() && rows.getBoolean(1);
+            }
+        }
+    }
+
     /** Parses the epoch header; a malformed value is a client error, a missing one is {@code null}. */
     public static Long parseEpoch(String value) {
         if (value == null || value.isBlank()) {

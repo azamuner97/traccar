@@ -11,6 +11,7 @@ import jakarta.annotation.Priority;
 import jakarta.inject.Inject;
 import jakarta.servlet.ServletRequest;
 import jakarta.ws.rs.BadRequestException;
+import jakarta.ws.rs.ForbiddenException;
 import jakarta.ws.rs.Priorities;
 import jakarta.ws.rs.WebApplicationException;
 import jakarta.ws.rs.container.ContainerRequestContext;
@@ -27,6 +28,7 @@ import org.traccar.game.GameControllerService;
 import org.traccar.game.GameExecutionService;
 import org.traccar.game.GameOwnershipService;
 import org.traccar.game.GameTransactions;
+import org.traccar.game.GameUnfencedWrites;
 
 import javax.sql.DataSource;
 import java.io.ByteArrayInputStream;
@@ -44,18 +46,24 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * resource rows, checkpoints, requests and jokers of any session, every write of the running session (its game
  * state, {@code running}, its timetable changes and execution toggle), and every write of game notifications and
  * proximity. Configuration edits of a stored session that is not running (name, settings, credentials, geofence
- * plans, the device list, timetable changes and toggle, logs) need only their revision check. Without a controller
- * nobody changes a running session, while the server's own execution goes on.</li>
+ * plans, the device list, timetable changes and toggle, logs) and session creation need only their revision check;
+ * the game state is checked again under the session lock ({@link GameUnfencedWrites}), so an edit that meets a game
+ * started meanwhile answers 423. Without a controller nobody changes a running session, while the server's own
+ * execution goes on.</li>
  * <li>The game state ({@code PUT game-sessions/{id}/state}) is fenced, with one exception: without an epoch, any
  * administrator may stop a game while no lease is active ({@link GameExecutionService#change} accepts only a stop
- * then, and records who stopped it). A test event ({@code POST game-sessions/{id}/events/test}) is never fenced: it
+ * then, and records who stopped it). Other accounts get the resource's 403 whatever the lease, so they cannot tell
+ * whether a Tool controls the game. A test event ({@code POST game-sessions/{id}/events/test}) is never fenced: it
  * only writes a log row.</li>
  * <li>Standard mutations of the Traccar resources that any session owns ({@link GameOwnershipService}: members'
  * accounts and trackers, mirrors, groups and geofences), and pushes that reach members of the running session,
  * require the epoch while a lease is held. While no lease is held, administrators may make them; the change is
  * recorded for Tool to report on its next acquisition. Pushes that reach members of the running session count as
  * such changes.</li>
- * <li>A request that carries an epoch must carry the current one, whatever it changes.</li>
+ * <li>A game write (also a configuration edit of a stored session) or a Traccar mutation fenced above that carries
+ * an epoch must carry the current one; the controller endpoints, the test event and Traccar endpoints outside this
+ * list ignore the header. A failed check answers 423 to administrators only; other accounts get 403 and learn
+ * nothing about the lease.</li>
  * </ul>
  * Users updating their own account are never fenced: participants register push tokens and save preferences
  * that way while a game runs.
@@ -78,7 +86,7 @@ public class GameControllerFilter implements ContainerRequestFilter, ContainerRe
     private static final String STATE_PART = "state";
     private static final String TEST_EVENT_PART = "events/test";
 
-    private enum Decision { NONE, REQUIRED, OWNED, STANDARD, GAME_STATE }
+    private enum Decision { NONE, REQUIRED, OWNED, STANDARD, GAME_STATE, CONFIGURATION }
 
     /** One shared hold of the fence, released exactly once by the response filter or the servlet fallback. */
     public static final class Hold {
@@ -118,6 +126,7 @@ public class GameControllerFilter implements ContainerRequestFilter, ContainerRe
 
     /** Servlet-level fallback that releases a hold left behind by an aborted response. */
     public static void releaseFrom(ServletRequest request) {
+        GameUnfencedWrites.end();
         if (request.getAttribute(FENCE_PROPERTY) instanceof Hold hold) {
             hold.release();
             request.removeAttribute(FENCE_PROPERTY);
@@ -168,8 +177,18 @@ public class GameControllerFilter implements ContainerRequestFilter, ContainerRe
                 case GAME_STATE -> {
                     if (epoch != null) {
                         fence(request, userId, epoch);
-                    } else if (controller.status().active()) {
+                    } else if (controller.status().active() && controller.administrator(userId)) {
+                        // Other accounts get the resource's 403: they never learn whether a Tool controls the game.
                         request.abortWith(locked("Tool controls the game; stop it in Tool, or release control first"));
+                    }
+                }
+                case CONFIGURATION -> {
+                    if (epoch != null) {
+                        // A carried epoch must be current, also where none is needed.
+                        fence(request, userId, epoch);
+                    } else if (path.size() > 1 && number(path.get(1)) != null) {
+                        // Checked again under the session lock: the game may start before the write locks it.
+                        GameUnfencedWrites.begin(number(path.get(1)));
                     }
                 }
                 case OWNED -> {
@@ -202,6 +221,10 @@ public class GameControllerFilter implements ContainerRequestFilter, ContainerRe
             controller.check(userId, epoch);
         } catch (Exception error) {
             hold.release();
+            if (error instanceof WebApplicationException && !controller.administrator(userId)) {
+                // Fenced writes are the operator's: other accounts get 403 and learn nothing about the lease.
+                throw new ForbiddenException();
+            }
             throw error;
         }
         request.setProperty(FENCE_PROPERTY, hold);
@@ -209,6 +232,7 @@ public class GameControllerFilter implements ContainerRequestFilter, ContainerRe
 
     @Override
     public void filter(ContainerRequestContext request, ContainerResponseContext response) {
+        GameUnfencedWrites.end();
         if (request.getProperty(FENCE_PROPERTY) instanceof Hold hold) {
             hold.release();
             request.removeProperty(FENCE_PROPERTY);
@@ -239,7 +263,7 @@ public class GameControllerFilter implements ContainerRequestFilter, ContainerRe
             }
             case "game-sessions" -> {
                 if (path.size() < 2) {
-                    return Decision.NONE;
+                    return Decision.CONFIGURATION;
                 }
                 Long id = number(path.get(1));
                 String part = String.join("/", path.subList(2, path.size()));
@@ -254,7 +278,7 @@ public class GameControllerFilter implements ContainerRequestFilter, ContainerRe
                     return Decision.REQUIRED;
                 }
                 Long running = execution.runningSessionId();
-                return id != null && id.equals(running) ? Decision.REQUIRED : Decision.NONE;
+                return id != null && id.equals(running) ? Decision.REQUIRED : Decision.CONFIGURATION;
             }
             case "permissions" -> {
                 return owned(permissionTargets(request)) ? Decision.OWNED : Decision.STANDARD;
