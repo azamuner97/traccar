@@ -4040,6 +4040,9 @@ paths:
     delete:
       operationId: deleteGameSession
       summary: Deletes a session and every game record of it; its Traccar resources are cleaned up before
+      description: >-
+        A session whose game runs cannot be deleted: stop the game first. Its writes are fenced, so without the
+        controller epoch the request answers 423; with it, 409.
       tags: [Game Sessions]
       responses:
         '204':
@@ -4048,6 +4051,8 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
         '423':
           $ref: '#/components/responses/Locked'
   /game-sessions/{id}/name:
@@ -5323,7 +5328,7 @@ paths:
   /game-status/speedhunt:
     get:
       operationId: getGameSpeedhuntProgress
-      summary: Anonymous speedhunt progress of the member's session; administrators get the executing session's
+      summary: Anonymous speedhunt progress of the member's session; administrators get the running session's
       tags: [Game Members]
       responses:
         '200':
@@ -5703,6 +5708,8 @@ paths:
       tags:
         - Game Controller
       responses:
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '200':
           description: OK
           content:
@@ -5726,6 +5733,10 @@ paths:
             schema:
               $ref: '#/components/schemas/GameControllerInstance'
       responses:
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '200':
           description: Acquired lease and unfenced administrator edits since the previous acquisition
           content:
@@ -5751,6 +5762,10 @@ paths:
             schema:
               $ref: '#/components/schemas/GameControllerInstance'
       responses:
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '200':
           description: Acquired lease
           content:
@@ -5772,6 +5787,10 @@ paths:
             schema:
               $ref: '#/components/schemas/GameControllerInstance'
       responses:
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '200':
           description: Renewed lease
           content:
@@ -5795,6 +5814,10 @@ paths:
             schema:
               type: object
       responses:
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '200':
           description: Lease after the release
           content:
@@ -5820,6 +5843,10 @@ paths:
             minimum: 1
             maximum: 500
       responses:
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '200':
           description: OK
           content:
@@ -6949,7 +6976,11 @@ components:
         data:
           type: object
           description: >-
-            At most 4 KB of JSON; data.type names the event. game: gameStarted, gameStopped, test. timetable:
+            At most 4 KB of JSON; data.type names the event. game: gameStarted, gameStopped, test; gameStarted and
+            gameStopped have state (running or stopped), changedBy and controlled (whether the change carried the
+            controller epoch); gameStopped adds endedRequests, endedLiveUploads and skippedTimetableEntries (cells
+            skipped with reason stopped), and cleanup true when it ended leftovers of a game that was already
+            stopped; test has message and sentBy. timetable:
             slotStarted, ping, slotFinished, slotMissed, execution. live (a participant's live uploads: purposes
             speedhuntPing, manual, geofenceAuto) and relay (live hunter relays): started, sample, waitingForLocation,
             ended. Every live and relay event has liveUploadId, purpose, memberId (source, or relay recipient),
@@ -7671,13 +7702,18 @@ components:
               message:
                 type: string
                 maxLength: 16384
+                description: >-
+                  At most 16384 UTF-16 code units (a character outside the Basic Multilingual Plane, such as an
+                  emoji, counts twice); a longer entry refuses the whole batch with 400. The server's own event
+                  messages are cut to the same length without splitting a character.
     GameRequest:
       type: object
       description: >-
         Members get no detail or epoch; hunters get roster labels and no message. baseRevision is the target's member
         state revision of a hunter's request. Requests never expire with time (expired marks a waiting request that
         lapsed because its requester or target left the game); a change of control returns one still executing
-        under an older epoch to approved.
+        under an older epoch to approved. Its requester may cancel an executing request while no lease is active
+        or the request's epoch is older than the lease's.
       properties:
         id:
           $ref: '#/components/schemas/Id'
@@ -8453,8 +8489,7 @@ components:
     GameSpeedhuntProgress:
       type: object
       description: >-
-        The current speedhunt without its target, the same for every member; inactive while no Tool controls the
-        game. pingCount and pingLimit are left out while zero or unlimited.
+        The current speedhunt without its target, the same for every member; inactive while the game is stopped. pingCount and pingLimit are left out while zero or unlimited.
       required: [active]
       properties:
         active:
@@ -8484,7 +8519,9 @@ components:
           $ref: '#/components/schemas/Time'
         endsAt:
           $ref: '#/components/schemas/Time'
-          description: Past endsAt and still active means ending (no Tool has ended it yet)
+          description: >-
+            Past endsAt and still active means ending: the server ends a break at its deadline while the game
+            runs, so this happens while the game is stopped (or for a moment before the server's tick)
     GamePlayerView:
       type: object
       description: Players and supporters - no revisions, sources, other members' plans or target identities
