@@ -480,7 +480,12 @@ public abstract class GamePingEngineTest extends GameTestBase {
 
     @Test
     void aHunterFixWithoutAUsableTimeDoesNotFailTheRelay() throws Exception {
-        // Review SE-5: a tracker without a clock stores 1970; that hunter counts as without a position.
+        // Review SE-5: a tracker without a clock stores 1970; that hunter counts as without a position. MySQL's
+        // TIMESTAMP cannot store such a fix, so only H2 has the case.
+        try (var connection = source.getConnection()) {
+            org.junit.jupiter.api.Assumptions.assumeTrue(
+                    "H2".equals(connection.getMetaData().getDatabaseProductName()));
+        }
         long session = session();
         GameMember recipient = bound(session, GameMember.PLAYER);
         GameMember good = bound(session, GameMember.HUNTER);
