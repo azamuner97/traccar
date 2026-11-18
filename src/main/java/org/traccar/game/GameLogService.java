@@ -87,8 +87,9 @@ public class GameLogService {
     }
 
     /**
-     * Writes an execution event inside a transaction that holds the session lock, and pushes it to administrators
-     * after commit. {@code data} is a JSON object of at most {@value GameEvent#MAX_DATA} bytes.
+     * Writes an execution event inside a transaction that holds the session lock. The transaction pushes its events
+     * to administrators once after commit, in the session's event ID order. {@code data} is a JSON object of at most
+     * {@value GameEvent#MAX_DATA} bytes.
      */
     public static GameEvent event(GameTransaction transaction, GamePublisher publisher, long sessionId,
                                   String category, String message, JsonNode data) throws SQLException {
@@ -107,13 +108,29 @@ public class GameLogService {
         if (json.getBytes(StandardCharsets.UTF_8).length > GameEvent.MAX_DATA) {
             throw new IllegalArgumentException("Game event data exceeds " + GameEvent.MAX_DATA + " bytes");
         }
-        String text = message.length() > MAX_MESSAGE ? message.substring(0, MAX_MESSAGE) : message;
+        if (transaction.session() != sessionId) {
+            throw new IllegalStateException("A game event belongs to the locked session");
+        }
+        String text = truncate(message);
         Instant now = transaction.now();
         long id = transaction.insert("INSERT INTO tc_game_session_logs (gamesessionid, category, occurredat, message,"
                 + " data) VALUES (?, ?, ?, ?, ?)", sessionId, category, now, text, json);
         GameEvent event = new GameEvent(id, sessionId, category, now.toString(), text, data.deepCopy());
-        transaction.afterCommit(() -> publisher.gameEvents(List.of(event)));
+        transaction.event(publisher, event);
         return event;
+    }
+
+    /**
+     * Cuts a message to {@value #MAX_MESSAGE} UTF-16 code units, the unit of the limit, without splitting a surrogate
+     * pair (review WC-9).
+     */
+    static String truncate(String message) {
+        if (message.length() <= MAX_MESSAGE) {
+            return message;
+        }
+        int end = Character.isHighSurrogate(message.charAt(MAX_MESSAGE - 1))
+                && Character.isLowSurrogate(message.charAt(MAX_MESSAGE)) ? MAX_MESSAGE - 1 : MAX_MESSAGE;
+        return message.substring(0, end);
     }
 
     private static JsonNode data(String value) {

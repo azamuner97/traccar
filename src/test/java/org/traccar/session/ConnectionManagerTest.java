@@ -27,6 +27,7 @@ import java.net.InetSocketAddress;
 
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.reset;
@@ -184,6 +185,46 @@ public class ConnectionManagerTest {
     }
 
     @Test
+    public void testGamePushesReadNoAccountsAndFollowTheAdministratorFlag() throws Exception {
+        // User 2 becomes an administrator; the flag is read when the account changes, never per push.
+        clearInvocations(storage);
+        User administrator = new User();
+        administrator.setAdministrator(true);
+        when(storage.getObject(eq(User.class), any(Request.class))).thenReturn(administrator);
+        connectionManager.invalidateObject(false, User.class, 2, ObjectOperation.UPDATE);
+        verify(storage).getObject(eq(User.class), any(Request.class));
+        clearInvocations(storage);
+        reset(listener, secondListener);
+
+        var events = List.of(new org.traccar.game.GameEvent(1, 7, "ping", "2026-01-01T00:00:00Z", "Ping",
+                com.fasterxml.jackson.databind.node.JsonNodeFactory.instance.objectNode()));
+        for (int i = 0; i < 3; i++) {
+            connectionManager.updateGameEvents(false, events);
+            connectionManager.updateGameAdmin(false, "game-requests");
+            connectionManager.updateGameUsers(false, java.util.Set.of(), "game-jokers");
+        }
+        verify(storage, never()).getObject(eq(User.class), any(Request.class));
+        verify(secondListener, times(3)).onGameEvents(events);
+        verify(secondListener, times(3)).onUpdateGameAdmin("game-requests");
+        verify(secondListener, times(3)).onUpdateGameAdmin("game-jokers");
+        verify(listener, never()).onGameEvents(any());
+        verify(listener, never()).onUpdateGameAdmin(any());
+
+        // A new socket of an administrator reads the flag once; a revoked flag stops the pushes.
+        var third = mock(ConnectionManager.UpdateListener.class);
+        connectionManager.addListener(3, third);
+        connectionManager.updateGameEvents(false, events);
+        verify(third).onGameEvents(events);
+        when(storage.getObject(eq(User.class), any(Request.class))).thenReturn(new User());
+        connectionManager.invalidateObject(false, User.class, 2, ObjectOperation.UPDATE);
+        connectionManager.invalidateObject(false, User.class, 3, ObjectOperation.DELETE);
+        reset(secondListener, third);
+        connectionManager.updateGameEvents(false, events);
+        verify(secondListener, never()).onGameEvents(any());
+        verify(third, never()).onGameEvents(any());
+    }
+
+    @Test
     public void testJokerChangesReachOnlyTheirOwnersAndAdministrators() throws Exception {
         // User 1 owns the joker, user 2 (a hunter) does not; neither is an administrator.
         when(storage.getObject(eq(User.class), any(Request.class))).thenReturn(new User());
@@ -193,10 +234,12 @@ public class ConnectionManagerTest {
         verify(listener).onUpdateGameAdmin("game-jokers");
         verify(secondListener, never()).onUpdateGameAdmin(any());
 
-        reset(listener, secondListener, broadcastService);
         User administrator = new User();
         administrator.setAdministrator(true);
         when(storage.getObject(eq(User.class), any(Request.class))).thenReturn(administrator);
+        connectionManager.invalidateObject(false, User.class, 1, ObjectOperation.UPDATE);
+        connectionManager.invalidateObject(false, User.class, 2, ObjectOperation.UPDATE);
+        reset(listener, secondListener, broadcastService);
         connectionManager.updateGameUsers(false, java.util.Set.of(), "game-jokers");
         verifyNoInteractions(broadcastService);
         verify(listener).onUpdateGameAdmin("game-jokers");

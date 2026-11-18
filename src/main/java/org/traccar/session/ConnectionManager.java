@@ -87,6 +87,11 @@ public class ConnectionManager implements BroadcastInterface {
     private final List<Consumer<Position>> positionObservers = new CopyOnWriteArrayList<>();
     private final Map<Long, Set<Long>> userDevices = new HashMap<>();
     private final Map<Long, Set<Long>> deviceUsers = new HashMap<>();
+    /**
+     * The connected accounts that are administrators: read when an account's first socket registers and again when
+     * the account changes, so game pushes read no storage while they hold this monitor.
+     */
+    private final Set<Long> administrators = new HashSet<>();
 
     @Inject
     public ConnectionManager(
@@ -389,6 +394,23 @@ public class ConnectionManager implements BroadcastInterface {
         listeners.getOrDefault(userId, Set.of()).forEach(UpdateListener::onUpdateUser);
     }
 
+    private void refreshAdministrator(long userId) {
+        boolean administrator;
+        try {
+            User user = storage.getObject(User.class, new Request(
+                    new Columns.Include("administrator"), new Condition.Equals("id", userId)));
+            administrator = user != null && user.getAdministrator();
+        } catch (StorageException error) {
+            LOGGER.warn("Administrator flag refresh failed", error);
+            administrator = false;
+        }
+        if (administrator) {
+            administrators.add(userId);
+        } else {
+            administrators.remove(userId);
+        }
+    }
+
     private boolean canReadDevice(long userId, long deviceId) {
         try {
             return storage.getObject(Device.class, new Request(new Columns.Include("id"),
@@ -458,6 +480,11 @@ public class ConnectionManager implements BroadcastInterface {
         } else if (clazz.equals(Drawing.class)) {
             updateDrawings();
         } else if (clazz.equals(User.class)) {
+            if (operation == ObjectOperation.DELETE) {
+                administrators.remove(id);
+            } else if (listeners.containsKey(id)) {
+                refreshAdministrator(id);
+            }
             updateUser(id);
             // Owner identity and sharing changes affect every viewer's drawing capabilities.
             updateDrawings();
@@ -509,35 +536,19 @@ public class ConnectionManager implements BroadcastInterface {
         if (local) {
             broadcastService.updateGameAdmin(true, resource);
         }
-        for (var entry : listeners.entrySet()) {
-            try {
-                User user = storage.getObject(User.class, new Request(
-                        new Columns.Include("administrator"), new Condition.Equals("id", entry.getKey())));
-                if (user != null && user.getAdministrator()) {
-                    entry.getValue().forEach(listener -> listener.onUpdateGameAdmin(resource));
-                }
-            } catch (StorageException error) {
-                LOGGER.warn("Game invalidation failed", error);
-            }
+        for (long userId : administrators) {
+            listeners.getOrDefault(userId, Set.of()).forEach(listener -> listener.onUpdateGameAdmin(resource));
         }
     }
 
-    /** Pushes execution events to administrators only, with the same check as {@link #updateGameAdmin}. */
+    /** Pushes execution events to administrators only, like {@link #updateGameAdmin}. */
     @Override
     public synchronized void updateGameEvents(boolean local, java.util.List<org.traccar.game.GameEvent> events) {
         if (local) {
             broadcastService.updateGameEvents(true, events);
         }
-        for (var entry : listeners.entrySet()) {
-            try {
-                User user = storage.getObject(User.class, new Request(
-                        new Columns.Include("administrator"), new Condition.Equals("id", entry.getKey())));
-                if (user != null && user.getAdministrator()) {
-                    entry.getValue().forEach(listener -> listener.onGameEvents(events));
-                }
-            } catch (StorageException error) {
-                LOGGER.warn("Game events failed", error);
-            }
+        for (long userId : administrators) {
+            listeners.getOrDefault(userId, Set.of()).forEach(listener -> listener.onGameEvents(events));
         }
     }
 
@@ -546,20 +557,10 @@ public class ConnectionManager implements BroadcastInterface {
         if (local) {
             broadcastService.updateGameUsers(true, userIds, resource);
         }
-        try {
-            for (var entry : listeners.entrySet()) {
-                boolean recipient = userIds.contains(entry.getKey());
-                if (!recipient) {
-                    User user = storage.getObject(User.class, new Request(
-                            new Columns.Include("administrator"), new Condition.Equals("id", entry.getKey())));
-                    recipient = user != null && user.getAdministrator();
-                }
-                if (recipient) {
-                    entry.getValue().forEach(listener -> listener.onUpdateGameAdmin(resource));
-                }
+        for (var entry : listeners.entrySet()) {
+            if (userIds.contains(entry.getKey()) || administrators.contains(entry.getKey())) {
+                entry.getValue().forEach(listener -> listener.onUpdateGameAdmin(resource));
             }
-        } catch (Exception error) {
-            LOGGER.warn("Game user invalidation failed", error);
         }
     }
 
@@ -589,6 +590,7 @@ public class ConnectionManager implements BroadcastInterface {
                     new Columns.Include("id"), new Condition.Permission(User.class, userId, Device.class)));
             userDevices.put(userId, devices.stream().map(BaseModel::getId).collect(Collectors.toSet()));
             devices.forEach(device -> deviceUsers.computeIfAbsent(device.getId(), id -> new HashSet<>()).add(userId));
+            refreshAdministrator(userId);
         }
         set.add(listener);
     }
@@ -598,6 +600,7 @@ public class ConnectionManager implements BroadcastInterface {
         set.remove(listener);
         if (set.isEmpty()) {
             listeners.remove(userId);
+            administrators.remove(userId);
 
             userDevices.remove(userId).forEach(deviceId -> deviceUsers.computeIfPresent(deviceId, (x, userIds) -> {
                 userIds.remove(userId);

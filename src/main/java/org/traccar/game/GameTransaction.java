@@ -46,6 +46,8 @@ public final class GameTransaction {
     private final Instant now;
     private final boolean readOnly;
     private final List<Runnable> afterCommit = new ArrayList<>();
+    private final List<GameEvent> events = new ArrayList<>();
+    private GamePublisher eventPublisher;
 
     private Long sessionId;
     private long sessionRevision;
@@ -77,6 +79,29 @@ public final class GameTransaction {
 
     List<Runnable> afterCommitActions() {
         return Collections.unmodifiableList(afterCommit);
+    }
+
+    /**
+     * Collects an execution event of the locked session. {@link GameTransactions} pushes a transaction's events
+     * once after commit, in commit order of the session (review SE-1, SC-1).
+     */
+    void event(GamePublisher publisher, GameEvent event) {
+        if (event.gameSessionId() != session()) {
+            throw new IllegalStateException("A game event belongs to the locked session");
+        }
+        if (eventPublisher != null && eventPublisher != publisher) {
+            throw new IllegalStateException("A transaction pushes its events to one publisher");
+        }
+        eventPublisher = publisher;
+        events.add(event);
+    }
+
+    List<GameEvent> events() {
+        return Collections.unmodifiableList(events);
+    }
+
+    GamePublisher eventPublisher() {
+        return eventPublisher;
     }
 
     // Statements --------------------------------------------------------------------------------------------

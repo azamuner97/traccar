@@ -20,8 +20,9 @@ import java.time.Instant;
  *
  * <p>A write follows the order of the effects transaction (plan §3.1): validate, lock (see
  * {@link GameTransaction}), apply, advance revisions, commit, and only then run the after-commit actions that
- * publish the change. A transaction makes no network calls. A database constraint violation rolls back and answers
- * 409, so rules that the services check first still hold under concurrent writers.
+ * publish the change. Execution events are pushed first, once per transaction and in commit order (see
+ * {@link GameEventSequencer}). A transaction makes no network calls. A database constraint violation rolls back and
+ * answers 409, so rules that the services check first still hold under concurrent writers.
  */
 @Singleton
 public class GameTransactions {
@@ -34,6 +35,7 @@ public class GameTransactions {
 
     private final DataSource dataSource;
     private final Clock clock;
+    private final GameEventSequencer events = new GameEventSequencer();
 
     @Inject
     public GameTransactions(DataSource dataSource) {
@@ -80,7 +82,9 @@ public class GameTransactions {
 
     private <T> T run(Work<T> work, boolean readOnly, boolean snapshot) throws Exception {
         T result;
-        GameTransaction transaction;
+        GameTransaction transaction = null;
+        GameEventSequencer.Ticket ticket = null;
+        boolean committed = false;
         try (Connection connection = dataSource.getConnection()) {
             boolean autoCommit = connection.getAutoCommit();
             int isolation = connection.getTransactionIsolation();
@@ -91,7 +95,12 @@ public class GameTransactions {
             try {
                 transaction = new GameTransaction(connection, clock.instant(), readOnly);
                 result = work.run(transaction);
+                if (!transaction.events().isEmpty()) {
+                    // Reserved while the session lock is held, so a session's pushes follow its event IDs.
+                    ticket = events.reserve();
+                }
                 connection.commit();
+                committed = true;
             } catch (SQLException error) {
                 rollback(connection, error);
                 if (GameErrors.constraintViolation(error)) {
@@ -108,6 +117,14 @@ public class GameTransactions {
                         connection.setTransactionIsolation(isolation);
                     }
                 } catch (SQLException ignored) {
+                }
+            }
+        } finally {
+            if (ticket != null) {
+                if (committed) {
+                    events.publish(ticket, transaction.eventPublisher(), transaction.events());
+                } else {
+                    events.cancel(ticket);
                 }
             }
         }
