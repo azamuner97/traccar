@@ -42,9 +42,9 @@ import java.util.Set;
  * {@code approved}, and the server retries that every second until it succeeds ({@link #returnStale}). The requester
  * may cancel a request that is {@code executing} only while it is orphaned: no lease is active, or it was claimed
  * under an older epoch than the lease's (a late delivery of the old Tool is refused by the epoch fence). A request
- * succeeds only under the epoch that claimed it. Whether a request needs the operator's approval comes from the session settings
- * ({@code request_approvals}); the controlling Tool decides, claims and completes requests, and their outcomes commit
- * inside effects deliveries together with joker accounting.
+ * succeeds only under the epoch that claimed it. Whether a request needs the operator's approval comes from the
+ * session settings ({@code request_approvals}); the controlling Tool decides, claims and completes requests, and their
+ * outcomes commit inside effects deliveries together with joker accounting.
  *
  * <p>Answers never reveal whom a speedhunt targets: a break request during any speedhunt gets the same message for
  * every participant.

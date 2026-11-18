@@ -199,7 +199,8 @@ public class GameExecutionService {
                     throw error;
                 }
             }
-            Stopped stopped = start ? Stopped.NONE : cleanup ? leftovers : stopEffects(transaction, publisher, sessionId);
+            Stopped stopped = start ? Stopped.NONE
+                    : cleanup ? leftovers : stopEffects(transaction, publisher, sessionId);
 
             String detail = cleanup ? "Ended leftovers of the stopped game"
                     + (epoch == null ? " without control of the game" : "")
