@@ -426,8 +426,8 @@ public abstract class GameBreakRunnerTest extends GameTestBase {
         long late = plan(game, game.ben(), T0.plusSeconds(1000));
         stopGame(game.session());
         advanceTo(T0.plusSeconds(1100));
-        speedhunt(game, game.sue());
         startGame(game.session());
+        speedhunt(game, game.sue());
         advance(1);
         assertEquals(GameState.WAITING, pause(game, late).state());
         advanceTo(T0.plusSeconds(1600));

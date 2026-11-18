@@ -113,6 +113,7 @@ public abstract class GameStateTest extends GameTestBase {
     @Test
     void aRunStartsWithItsFirstDeliveredPingAndPingsAreConsecutive() throws Exception {
         long session = session();
+        startGame(session);
         GameMember anna = bound(session, "player");
         GameMember ben = bound(session, "supporter");
         jokers.change(session, new GameJokerService.Change(null, GameJokerRepository.SPEEDHUNT, 1, null), "Operator");
@@ -182,6 +183,7 @@ public abstract class GameStateTest extends GameTestBase {
     @Test
     void aLivePingIsOnePingAcrossItsSamples() throws Exception {
         long session = session();
+        startGame(session);
         GameMember anna = bound(session, "player");
         long revision = memberRevision(anna.id());
 

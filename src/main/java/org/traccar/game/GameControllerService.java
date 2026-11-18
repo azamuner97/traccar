@@ -149,6 +149,20 @@ public class GameControllerService {
         }
     }
 
+    /**
+     * Runs an unfenced change while no lease is active (423 otherwise), holding the fence exclusively: fenced requests
+     * admitted before the lease lapsed finish first, and no Tool acquires control until the change is done. The
+     * caller must not hold the fence shared (unfenced requests never do).
+     */
+    public <T> T whileUncontrolled(Callable<T> work) throws Exception {
+        return exclusive(() -> {
+            if (status().active()) {
+                throw locked("Tool controls the game; stop it in Tool, or release control first");
+            }
+            return work.call();
+        });
+    }
+
     // --- persistence helpers ------------------------------------------------------------------------------
 
     private <T> T transaction(Work<T> work) throws Exception {
@@ -532,6 +546,14 @@ public class GameControllerService {
             }
             return ended;
         });
+    }
+
+    /**
+     * Retries returning requests still executing under an older epoch than the lease's (every second): the return
+     * after a change of control may have failed. Returns whether a request was returned.
+     */
+    public boolean returnStaleExecuting() throws Exception {
+        return requests != null && requests.returnStale();
     }
 
     /** Records the expiry of a lease that was not renewed in time; returns whether anything changed. */

@@ -250,6 +250,7 @@ public abstract class GameEffectsTest extends GameTestBase {
         assertEquals(1, number("SELECT COUNT(*) FROM tc_positions WHERE deviceid = ?", game.benToHunters()));
         // A member of another session is no source of this one.
         Game other = game();
+        startGame(game.session());
         assertStatus(400, () -> deliver(game.session(), pings(id(), intent(other.anna(), List.of("hunters"), null,
                 null))));
         // Pings within one second all become latest in order.

@@ -23,6 +23,8 @@ import java.util.concurrent.TimeUnit;
  * queued. The game state of every session is kept.</li>
  * <li>Records lease expiry from the stored deadline and announces it. Requests never expire, and losing the lease
  * changes neither the game state nor any request.</li>
+ * <li>Retries returning the requests of the running session still executing under an older epoch than the lease's
+ * (one indexed read while there are none).</li>
  * </ul>
  */
 public class TaskGameController implements ScheduleTask {
@@ -61,6 +63,13 @@ public class TaskGameController implements ScheduleTask {
             controller.recordExpiry();
         } catch (Exception error) {
             LOGGER.warn("Game controller maintenance failed", error);
+        }
+        try {
+            if (controller.returnStaleExecuting()) {
+                LOGGER.info("Game requests left executing under an older controller epoch were returned");
+            }
+        } catch (Exception error) {
+            LOGGER.warn("Executing game requests could not be returned", error);
         }
     }
 }

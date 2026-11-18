@@ -199,6 +199,194 @@ public abstract class GameExecutionTest extends GameTestBase {
                 GameRequest.HUNTER_POSITIONS, null, null, null)));
     }
 
+    private static GameOperation.LiveUploadStarted manualLive(GameMember source) {
+        return new GameOperation.LiveUploadStarted(GameState.MANUAL, source.id(), null, true, true, true, 30, null,
+                "Operator", null, null, null, null, null);
+    }
+
+    private GameEffectsService.Outcome deliver(long session, long epoch, String id, List<GameOperation> operations,
+                                               List<GamePingEngine.Intent> pings) throws Exception {
+        return effects.apply(session, epoch, new GameEffectsService.Delivery(id, operations, pings, null, null, null,
+                null, null));
+    }
+
+    private static int conflictOf(org.junit.jupiter.api.function.Executable executable, String message) {
+        var error = assertThrows(jakarta.ws.rs.WebApplicationException.class, executable);
+        assertEquals(message, error.getMessage());
+        return error.getResponse().getStatus();
+    }
+
+    @Test
+    void aStoppedGameRefusesExecutionButKeepsCleanup() throws Exception {
+        long session = session();
+        GameMember anna = bound(session, "player");
+        GameMember ben = bound(session, "player");
+        bound(session, "hunter");
+        long epoch = acquire(alice, A);
+        start(session, epoch);
+        var before = deliver(session, epoch, "before-the-stop-1", List.of(new GameOperation.Catch(ben.id(),
+                "Operator")), null);
+        stop(session, epoch, alice);
+        publisher.clear();
+
+        // Under the session lock, nothing starts uploads, records pings or writes mirror positions any more.
+        String stopped = GameExecutionService.NOT_RUNNING;
+        assertEquals(409, conflictOf(() -> state.apply(session, epoch, List.of(manualLive(anna))), stopped));
+        assertEquals(409, conflictOf(() -> deliver(session, epoch, "after-the-stop-1", List.of(manualLive(anna)),
+                null), stopped));
+        assertEquals(409, conflictOf(() -> deliver(session, epoch, "after-the-stop-2", List.of(
+                new GameOperation.PingDelivered(anna.id(), 1, GameState.STATIC, GameState.REAL, true, false, false,
+                        null, null, "Operator", true)), null), stopped));
+        assertEquals(409, conflictOf(() -> deliver(session, epoch, "after-the-stop-3", null, List.of(
+                new GamePingEngine.Intent(GamePingEngine.MANUAL, anna.id(), null, List.of("hunters"), null, null,
+                        null, null, null))), stopped));
+        assertEquals(0, number("SELECT COUNT(*) FROM tc_game_live_uploads WHERE gamesessionid = ?", session));
+        assertEquals(0, number("SELECT COUNT(*) FROM tc_game_deliveries WHERE gamesessionid = ?"
+                + " AND deliveryid LIKE 'after-the-stop-%'", session));
+        assertTrue(publisher.events.isEmpty());
+
+        // Cleanup and setup stay allowed, and a delivery recorded before the stop still replays.
+        assertTrue(deliver(session, epoch, "before-the-stop-1", List.of(new GameOperation.Catch(ben.id(),
+                "Operator")), null).replayed());
+        assertEquals(before.operations(), effects.lookup(session, "before-the-stop-1").operations());
+        deliver(session, epoch, "after-the-stop-4", List.of(new GameOperation.Release(ben.id()),
+                new GameOperation.PingFailed(anna.id(), "Nobody")), null);
+    }
+
+    @Test
+    void stoppingAStoppedGameEndsItsLeftovers() throws Exception {
+        long session = session();
+        GameMember anna = bound(session, "player");
+        long epoch = acquire(alice, A);
+        start(session, epoch);
+        long upload = state.apply(session, epoch, List.of(manualLive(anna))).results().getFirst().id();
+        jokers.change(session, new GameJokerService.Change(anna.id(), GameJokerRepository.HUNTER_POSITIONS, 1,
+                null), "Operator");
+        GameRequest joker = requests.submit(anna, new GameRequestService.Submission(GameRequest.HUNTER_POSITIONS,
+                null, null, null));
+        // Leftovers: the state says stopped, but an upload and a request survived (a write after an earlier stop).
+        stopGame(session);
+        publisher.clear();
+
+        GameExecutionService.State unchanged = execution.get(session);
+        assertEquals(unchanged, stop(session, epoch, alice));
+        assertEquals(GameState.ENDED, state.liveUploads(session).stream().filter(item -> item.id() == upload)
+                .findFirst().orElseThrow().state());
+        assertEquals(GameRequest.CANCELLED, request(session, joker.id()).status());
+        assertEquals(List.of("live:ended", "game:gameStopped"), publisher.events.stream()
+                .map(item -> item.category() + ":" + item.data().path("type").asText()).toList());
+        GameEvent event = publisher.events.getLast();
+        assertTrue(event.data().path("cleanup").asBoolean());
+        assertEquals(1, event.data().path("endedRequests").asInt());
+        assertEquals(1, event.data().path("endedLiveUploads").asInt());
+        assertEquals(List.of("gameStarted", "gameStopped"), history(session));
+        assertFalse(publisher.topic(GamePublisher.REQUESTS).isEmpty());
+
+        // Nothing left: a further stop changes nothing.
+        publisher.clear();
+        assertEquals(unchanged, stop(session, epoch, alice));
+        assertTrue(publisher.events.isEmpty());
+        assertEquals(List.of("gameStarted", "gameStopped"), history(session));
+
+        // The administrator's stop without control cleans up too.
+        start(session, epoch);
+        state.apply(session, epoch, List.of(manualLive(anna)));
+        stopGame(session);
+        clock.advance(Duration.ofSeconds(31));
+        stop(session, null, bob);
+        assertTrue(state.liveUploads(session).stream().noneMatch(item -> GameState.ACTIVE.equals(item.state())));
+        assertEquals("Ended leftovers of the stopped game without control of the game", text("SELECT detail"
+                + " FROM tc_game_controller_history WHERE gamesessionid = ? ORDER BY id DESC", session));
+    }
+
+    @Test
+    void theStopWithoutControlWaitsForFencedRequestsInFlight() throws Exception {
+        long session = session();
+        long epoch = acquire(alice, A);
+        start(session, epoch);
+        clock.advance(Duration.ofSeconds(31));
+        // A fenced request admitted just before the lease expired still holds the fence.
+        long hold = controller.lockShared();
+        var stopping = java.util.concurrent.CompletableFuture.supplyAsync(() -> {
+            try {
+                return stop(session, null, bob);
+            } catch (Exception error) {
+                throw new java.util.concurrent.CompletionException(error);
+            }
+        });
+        Thread.sleep(300);
+        assertFalse(stopping.isDone());
+        assertTrue(execution.get(session).running());
+        controller.unlockShared(hold);
+        assertFalse(stopping.get(10, java.util.concurrent.TimeUnit.SECONDS).running());
+    }
+
+    // Orphaned requests --------------------------------------------------------------------------------------
+
+    private GameRequest positionsRequest(GameMember member) throws Exception {
+        return requests.submit(member, new GameRequestService.Submission(GameRequest.HUNTER_POSITIONS, null, null,
+                null));
+    }
+
+    private long reservedJokers(long session) throws Exception {
+        return number("SELECT COUNT(*) FROM tc_game_joker_reservations WHERE gamesessionid = ?"
+                + " AND status = 'reserved'", session);
+    }
+
+    @Test
+    void anOrphanedExecutingRequestIsReturnedOrCancelledByItsRequester() throws Exception {
+        long session = session();
+        GameMember anna = bound(session, "player");
+        jokers.change(session, new GameJokerService.Change(anna.id(), GameJokerRepository.HUNTER_POSITIONS, 5,
+                null), "Operator");
+        long first = acquire(alice, A);
+        start(session, first);
+
+        // Claimed by the controlling Tool: the requester cannot cancel it while that Tool may still finish it.
+        GameRequest claimed = positionsRequest(anna);
+        requests.claim(session, claimed.id(), first);
+        assertStatus(409, () -> requests.cancel(anna, claimed.id()));
+        // The Tool dies after the claim: once the lease expired, the requester may cancel; the joker returns.
+        clock.advance(Duration.ofSeconds(31));
+        GameRequest cancelled = requests.cancel(anna, claimed.id());
+        assertEquals(GameRequest.CANCELLED, cancelled.status());
+        assertEquals(0, reservedJokers(session));
+        assertNull(cancelled.epoch());
+
+        // After a takeover whose return failed, the request stays executing under the old epoch: the server's
+        // per-second retry returns it, and until then the requester may cancel it.
+        long second = acquire(alice, A);
+        GameRequest stuck = positionsRequest(anna);
+        requests.claim(session, stuck.id(), second);
+        controller.takeover(bob, B, "Desk");
+        assertEquals(GameRequest.APPROVED, request(session, stuck.id()).status());
+        execute("UPDATE tc_game_requests SET status = 'executing', epoch = ? WHERE id = ?", second, stuck.id());
+        publisher.clear();
+        assertTrue(controller.returnStaleExecuting());
+        assertEquals(GameRequest.APPROVED, request(session, stuck.id()).status());
+        assertFalse(publisher.topic(GamePublisher.REQUESTS).isEmpty());
+        assertFalse(controller.returnStaleExecuting());
+
+        execute("UPDATE tc_game_requests SET status = 'executing', epoch = ? WHERE id = ?", second, stuck.id());
+        long third = second + 1;
+        // The new holder never claimed it: it cannot complete it, and the old holder is fenced out.
+        assertEquals(409, conflictOf(() -> effects.apply(session, third, new GameEffectsService.Delivery(
+                "orphan-completion-1", null, null, null, null, null, List.of(new GameRequestService.Completion(
+                        stuck.id(), GameRequest.SUCCEEDED, null, null)), null)), "Request " + stuck.id()
+                + " was claimed under controller epoch " + second + ", not " + third));
+        assertEquals(GameRequest.CANCELLED, requests.cancel(anna, stuck.id()).status());
+        assertEquals(0, reservedJokers(session));
+
+        // A request claimed under the current epoch completes under it.
+        GameRequest current = positionsRequest(anna);
+        requests.claim(session, current.id(), third);
+        assertStatus(409, () -> requests.cancel(anna, current.id()));
+        effects.apply(session, third, new GameEffectsService.Delivery("orphan-completion-2", null, null, null, null,
+                null, List.of(new GameRequestService.Completion(current.id(), GameRequest.SUCCEEDED, null, null)),
+                null));
+        assertEquals(GameRequest.SUCCEEDED, request(session, current.id()).status());
+    }
+
     @Test
     void anAdministratorStopsAGameWithoutControlOnlyWhileNoLeaseIsActive() throws Exception {
         long session = session();

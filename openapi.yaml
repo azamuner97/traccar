@@ -5138,7 +5138,11 @@ paths:
         one-off hunter relay as intents and reads what became of each from the outcome. A repeated delivery ID
         answers the recorded outcome; the same ID with other content answers 409. The run of a speedhunt's first
         delivered ping binds every armed speedhunt fake, and the server applies the target's own fake to the
-        target's hunter mirror positions.
+        target's hunter mirror positions. Execution needs a running game: a delivery with ping intents, a
+        pingDelivered or a liveUploadStarted answers 409 "The game is stopped" while the session's game is stopped
+        (checked under the session lock, so nothing executes after a stop commits); ending and cleanup operations
+        (liveUploadEnded, pingFailed, runEnded, breaks, catches, joker uses) stay allowed, and a recorded delivery
+        still replays. A request succeeds only under the controller epoch that claimed it (409 otherwise).
       tags: [Game Effects]
       requestBody:
         required: true
@@ -5216,13 +5220,18 @@ paths:
       summary: Starts or stops the session's game
       description: >-
         Fenced: it needs the controlling Tool's epoch. Without one, any administrator may stop the game while no
-        lease is active (recorded in the controller history and reported to the next acquisition as drift).
-        Starting is refused (409) while another session's game runs; at most one game runs per server. Stopping
-        ends the open requests (pending and approved ones are cancelled, executing ones fail; their jokers return)
-        and the active live uploads and relays (endReason gameStopped, each with its ended event; a live speedhunt
-        ping that reached nobody returns its pool joker, one that delivered the speedhunt's last ping completes it),
-        in one transaction. Each change writes a game execution event and announces the members' status. Setting the
-        current state changes nothing.
+        lease is active (recorded in the controller history and reported to the next acquisition as drift); that
+        stop holds the controller fence exclusively, so fenced requests admitted before the lease lapsed finish
+        first and no Tool acquires control meanwhile. Non-administrators get 403, whatever the lease. Starting is
+        refused (409) while another session's game runs; at most one game runs per server. Stopping ends the open
+        requests (pending and approved ones are cancelled, executing ones fail; their jokers return), the active
+        live uploads and relays (endReason gameStopped, each with its ended event; a live speedhunt ping that
+        reached nobody returns its pool joker, one that delivered the speedhunt's last ping completes it) and the
+        timetable entries still waiting for a fresh fix (skipped, reason stopped, each with its ping event; their
+        slots finish), in one transaction. Each change writes a game execution event (category game, data type
+        gameStarted or gameStopped) and announces the members' status. Starting a running game changes nothing.
+        Stopping a stopped game ends whatever is left over (the same effects; the game event carries cleanup true)
+        and otherwise changes nothing.
       tags: [Game Sessions]
       parameters:
         - $ref: '#/components/parameters/GameControllerEpoch'
@@ -5373,6 +5382,10 @@ paths:
     post:
       operationId: cancelGameRequest
       summary: The requester cancels a request that waits for approval or execution; its joker returns
+      description: >-
+        Pending and approved requests can be cancelled. An executing request can be cancelled only while nobody
+        can finish it: no Tool holds the controller lease, or the request was claimed under an older controller
+        epoch than the lease's (a late delivery of the old Tool is refused by the epoch fence). Otherwise 409.
       tags: [Game Members]
       responses:
         '200':

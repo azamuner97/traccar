@@ -36,6 +36,9 @@ import java.util.Set;
  * {@code onDelivered} and {@code onNotDelivered}, so it commits with the ping) and a one-off hunter relay (path
  * {@code relay}, its joker use in {@code onDelivered}), which leaves a {@code tc_game_relays} row when it delivers.
  *
+ * <p>A delivery with ping intents, {@code pingDelivered} or {@code liveUploadStarted} answers 409
+ * ({@value GameExecutionService#NOT_RUNNING}) unless the session's game runs; a recorded delivery still replays.
+ *
  * <p>The order is the effects transaction's: validate, lock the session and then the touched member states in
  * ascending order, apply, advance the member and session revisions, commit, and only then publish positions,
  * invalidations and pushes through the {@link GamePublisher}. The transaction makes no network calls. Repeating a
@@ -175,6 +178,10 @@ public class GameEffectsService {
                 }
                 return replay(transaction, (long) row[0], (String) row[3]);
             }
+            if (!list(delivery.pings()).isEmpty()) {
+                // A ping intent writes mirror positions: never on a stopped game (its operations check the same).
+                GameExecutionService.requireRunning(transaction, sessionId);
+            }
             long rowId = transaction.insert("INSERT INTO tc_game_deliveries (gamesessionid, deliveryid, epoch,"
                     + " requesthash, outcome, createdat) VALUES (?, ?, ?, ?, ?, ?)", sessionId, delivery.deliveryId(),
                     epoch, hash, "{}", transaction.now());
@@ -228,7 +235,8 @@ public class GameEffectsService {
         Set<Long> locked = new java.util.TreeSet<>(GameOperations.members(transaction, sessionId, operations));
         locked.addAll(GamePingEngine.members(transaction, sessionId, intents));
         transaction.lockMemberStates(locked);
-        GameOperations applied = new GameOperations(transaction, sessionId, "Tool", objectMapper, publisher);
+        GameOperations applied = new GameOperations(transaction, sessionId, "Tool", objectMapper, publisher)
+                .fencedBy(epoch);
 
         List<RequestOutcome> requestOutcomes = new ArrayList<>();
         for (GameRequest request : GameRequestService.complete(transaction, sessionId, list(delivery.requests()),

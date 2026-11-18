@@ -13,6 +13,8 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import jakarta.inject.Inject;
 import jakarta.inject.Singleton;
 import jakarta.ws.rs.ForbiddenException;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -37,7 +39,10 @@ import java.util.Set;
  * request per joker type; the hunters' speedhunt actions on one participant are serialized and carry the
  * participant's member state revision. Requests never expire: they stay open until the Tool handles them, the member
  * cancels them or the game stops; a change of control returns a request still executing under an older epoch to
- * {@code approved}. Whether a request needs the operator's approval comes from the session settings
+ * {@code approved}, and the server retries that every second until it succeeds ({@link #returnStale}). The requester
+ * may cancel a request that is {@code executing} only while it is orphaned: no lease is active, or it was claimed
+ * under an older epoch than the lease's (a late delivery of the old Tool is refused by the epoch fence). A request
+ * succeeds only under the epoch that claimed it. Whether a request needs the operator's approval comes from the session settings
  * ({@code request_approvals}); the controlling Tool decides, claims and completes requests, and their outcomes commit
  * inside effects deliveries together with joker accounting.
  *
@@ -46,6 +51,8 @@ import java.util.Set;
  */
 @Singleton
 public class GameRequestService {
+
+    private static final Logger LOGGER = LoggerFactory.getLogger(GameRequestService.class);
 
     /** The same answer for every participant, so it never reveals whom a speedhunt targets. */
     public static final String BREAK_UNAVAILABLE = GameOperations.BREAK_UNAVAILABLE;
@@ -471,7 +478,33 @@ public class GameRequestService {
         });
     }
 
-    /** The requester cancels a request that waits for approval or execution; its joker returns. */
+    /** The lease row: its epoch, and whether it is active at {@code now}. */
+    private record Lease(long epoch, boolean active) {
+    }
+
+    private static Lease lease(GameTransaction transaction) throws SQLException {
+        Instant now = transaction.now();
+        return transaction.first("SELECT epoch, state, expiresat FROM tc_game_controller WHERE id = 1", rows -> {
+            Instant expires = GameTime.get(rows, "expiresat");
+            return new Lease(rows.getLong("epoch"), GameControllerService.STATE_ACTIVE.equals(rows.getString("state"))
+                    && expires != null && expires.isAfter(now));
+        }).orElse(new Lease(0, false));
+    }
+
+    /**
+     * Whether an {@code executing} request has nobody to finish it: no lease is active, or it was claimed under an
+     * older epoch than the lease's. Neither its old Tool (refused by the epoch fence) nor a new one (which never
+     * claimed it) can complete it.
+     */
+    private static boolean orphaned(GameTransaction transaction, GameRequest request) throws SQLException {
+        Lease lease = lease(transaction);
+        return !lease.active() || request.epoch() == null || request.epoch() < lease.epoch();
+    }
+
+    /**
+     * The requester cancels a request that waits for approval or execution, or one that is executing while orphaned
+     * (no active lease, or claimed under an older epoch); its joker returns.
+     */
     public GameRequest cancel(GameMember requester, long id) throws Exception {
         long sessionId = requester.gameSessionId();
         return transactions.write(transaction -> {
@@ -482,7 +515,9 @@ public class GameRequestService {
             if (request.requesterMemberId() == null || request.requesterMemberId() != requester.id()) {
                 throw new ForbiddenException("Only the requester can cancel this request");
             }
-            if (!GameRequest.PENDING.equals(request.status()) && !GameRequest.APPROVED.equals(request.status())) {
+            boolean waiting = GameRequest.PENDING.equals(request.status())
+                    || GameRequest.APPROVED.equals(request.status());
+            if (!waiting && !(GameRequest.EXECUTING.equals(request.status()) && orphaned(transaction, request))) {
                 throw GameErrors.conflict("The request can no longer be cancelled");
             }
             var settled = GameRequestRepository.finish(transaction, request, GameRequest.CANCELLED,
@@ -573,8 +608,9 @@ public class GameRequestService {
 
     /**
      * Records request outcomes inside an effects transaction: {@code succeeded} after execution, {@code failed} or
-     * {@code rejected} while open. Repeating the outcome a request already has changes nothing. A fake is checked
-     * again before it is armed; a refusal is a 400, so the Tool records a failure and the joker returns.
+     * {@code rejected} while open. Repeating the outcome a request already has changes nothing. Under a controller
+     * epoch ({@link GameOperations#epoch()}), a request succeeds only under the epoch that claimed it (409). A fake is
+     * checked again before it is armed; a refusal is a 400, so the Tool records a failure and the joker returns.
      */
     static List<GameRequest> complete(GameTransaction transaction, long sessionId, List<Completion> completions,
                                       GameOperations applied) throws SQLException {
@@ -598,6 +634,11 @@ public class GameRequestService {
                 }
                 throw GameErrors.conflict("Request " + completion.id() + " cannot become " + completion.status()
                         + " from " + request.status());
+            }
+            if (GameRequest.SUCCEEDED.equals(completion.status()) && applied.epoch() != null
+                    && request.epoch() != null && !request.epoch().equals(applied.epoch())) {
+                throw GameErrors.conflict("Request " + completion.id() + " was claimed under controller epoch "
+                        + request.epoch() + ", not " + applied.epoch());
             }
             if (GameRequest.SUCCEEDED.equals(completion.status()) && GameRequest.FAKE_PING.equals(request.type())) {
                 if (request.parameters().hasNonNull("entryId")) {
@@ -635,7 +676,8 @@ public class GameRequestService {
      * Returns the requests still {@code executing} under an epoch older than {@code epoch} to {@code approved}, one
      * transaction per session, after a change of control. Their delivery was not recorded: a recorded one ended
      * the request with it, and the epoch fence rejects anything the old controller sends later. The new controller
-     * decides them again. Returns the affected sessions.
+     * decides them again. A session that fails is logged and skipped; {@link #returnStale} retries it. Returns the
+     * affected sessions.
      */
     public Set<Long> returnExecuting(long epoch) throws Exception {
         List<Long> sessions = transactions.read(transaction -> transaction.list("SELECT DISTINCT gamesessionid"
@@ -644,25 +686,50 @@ public class GameRequestService {
         Set<Long> affected = new LinkedHashSet<>();
         for (long sessionId : sessions) {
             try {
-                boolean changed = transactions.write(transaction -> {
-                    transaction.lockSession(sessionId);
-                    int count = transaction.update("UPDATE tc_game_requests SET status = ?, epoch = NULL,"
-                            + " updatedat = ? WHERE gamesessionid = ? AND status = ? AND (epoch IS NULL OR epoch < ?)",
-                            GameRequest.APPROVED, transaction.now(), sessionId, GameRequest.EXECUTING, epoch);
-                    if (count > 0) {
-                        transaction.bumpSession();
-                        publishRequests(transaction, sessionId, GameRequestRepository.Settled.none());
-                    }
-                    return count > 0;
-                });
-                if (changed) {
+                if (returnExecuting(sessionId, epoch)) {
                     affected.add(sessionId);
                 }
             } catch (jakarta.ws.rs.NotFoundException deletedMeanwhile) {
                 // The session was deleted with its requests after the scan.
+            } catch (Exception error) {
+                LOGGER.warn("Executing game requests of session {} could not be returned", sessionId, error);
             }
         }
         return affected;
+    }
+
+    /**
+     * The retry of {@link #returnExecuting} (every second, from {@code TaskGameController}): returns the requests of
+     * the running session still {@code executing} under an epoch older than the lease's, which a failed return after
+     * a change of control left behind. One indexed read while there is nothing to return. Stopped sessions have no
+     * open request.
+     */
+    public boolean returnStale() throws Exception {
+        Optional<Long[]> stale = transactions.read(transaction -> {
+            Optional<Long> running = GameExecutionService.runningSession(transaction);
+            if (running.isEmpty()) {
+                return Optional.empty();
+            }
+            long epoch = lease(transaction).epoch();
+            return transaction.exists("SELECT 1 FROM tc_game_requests WHERE gamesessionid = ? AND status = ?"
+                    + " AND (epoch IS NULL OR epoch < ?)", running.get(), GameRequest.EXECUTING, epoch)
+                    ? Optional.of(new Long[] {running.get(), epoch}) : Optional.empty();
+        });
+        return stale.isPresent() && returnExecuting(stale.get()[0], stale.get()[1]);
+    }
+
+    private boolean returnExecuting(long sessionId, long epoch) throws Exception {
+        return transactions.write(transaction -> {
+            transaction.lockSession(sessionId);
+            int count = transaction.update("UPDATE tc_game_requests SET status = ?, epoch = NULL,"
+                    + " updatedat = ? WHERE gamesessionid = ? AND status = ? AND (epoch IS NULL OR epoch < ?)",
+                    GameRequest.APPROVED, transaction.now(), sessionId, GameRequest.EXECUTING, epoch);
+            if (count > 0) {
+                transaction.bumpSession();
+                publishRequests(transaction, sessionId, GameRequestRepository.Settled.none());
+            }
+            return count > 0;
+        });
     }
 
 }

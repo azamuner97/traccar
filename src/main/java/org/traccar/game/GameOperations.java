@@ -25,6 +25,10 @@ import java.util.TreeSet;
  * each against the current state of its row. It is shared by {@link GameStateService} and the effects delivery,
  * and collects what the transaction must publish after commit.
  *
+ * <p>Execution needs a running game: {@code pingDelivered} and {@code liveUploadStarted} answer 409
+ * ({@value GameExecutionService#NOT_RUNNING}) on a stopped session, while ending and cleanup operations
+ * ({@code liveUploadEnded}, {@code pingFailed}, {@code runEnded}, breaks, catches) stay allowed.
+ *
  * <p>Member state revisions advance only with changes that hunters and spectators can observe: catches, runs and
  * pings, breaks that start or end, and live uploads that reach hunters or belong to a speedhunt. Private changes
  * (planned, waiting, cancelled and missed breaks, fakes, joker uses, hunter relays) leave them unchanged, because
@@ -59,6 +63,7 @@ public final class GameOperations {
     private final ObjectMapper objectMapper;
     private final GamePublisher publisher;
     private GameSettings settings;
+    private Long epoch;
 
     private final List<Result> results = new ArrayList<>();
     private final List<FakeOutcome> fakes = new ArrayList<>();
@@ -82,6 +87,16 @@ public final class GameOperations {
         this.actor = actor;
         this.objectMapper = objectMapper == null ? DEFAULT_MAPPER : objectMapper;
         this.publisher = publisher;
+    }
+
+    /** The controller epoch that fenced these operations (an effects delivery); null for the server's own. */
+    Long epoch() {
+        return epoch;
+    }
+
+    GameOperations fencedBy(long value) {
+        epoch = value;
+        return this;
     }
 
     /** Who applies these operations: {@code Tool} for a delivery, {@code Server} for its own execution. */
@@ -344,7 +359,6 @@ public final class GameOperations {
     // Speedhunts --------------------------------------------------------------------------------------------
 
     private void pingDelivered(int index, GameOperation.PingDelivered item) throws Exception {
-        GameMember target = participant(item.targetMemberId());
         boolean live = GameState.LIVE.equals(item.mode());
         if (!live && !GameState.STATIC.equals(item.mode())) {
             throw GameErrors.invalid("A ping is static or live");
@@ -352,6 +366,8 @@ public final class GameOperations {
         if (!GameState.REAL.equals(item.source()) && !GameState.OPERATOR_FAKE.equals(item.source())) {
             throw GameErrors.invalid("A ping's source is real or operatorFake");
         }
+        GameExecutionService.requireRunning(transaction, session);
+        GameMember target = participant(item.targetMemberId());
         if (caught(target.id())) {
             throw GameErrors.conflict("The " + target.label() + " is out of the game");
         }
@@ -560,6 +576,7 @@ public final class GameOperations {
         if (!relay && !item.toHunters() && !item.toPlayers() && !item.toSupporters()) {
             throw GameErrors.invalid("A live upload names its audiences");
         }
+        GameExecutionService.requireRunning(transaction, session);
         GameMember member = participant(relay ? item.recipientMemberId() : item.sourceMemberId());
         if (caught(member.id())) {
             throw GameErrors.conflict("The " + member.label() + " is out of the game");

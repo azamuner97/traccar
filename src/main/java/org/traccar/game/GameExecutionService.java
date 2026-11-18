@@ -45,6 +45,8 @@ public class GameExecutionService {
     /** The reason open requests and live uploads end with when the game stops. */
     public static final String GAME_STOPPED = "gameStopped";
     public static final String STOPPED_MESSAGE = "The game was stopped";
+    /** The refusal of execution on a session whose game is not running (409). */
+    public static final String NOT_RUNNING = "The game is stopped";
 
     /** The game state of a session; {@code changedAt} is null while it was never started. */
     public record State(long gameSessionId, String state, String changedAt, String changedBy) {
@@ -112,9 +114,10 @@ public class GameExecutionService {
 
     /**
      * Starts or stops the game. With {@code epoch} the caller must hold the lease (the controller fence admitted
-     * it). Without one only {@code stopped} is accepted, from an administrator, while no lease is active; the
-     * shared fence is held meanwhile, so no Tool acquires control in between. Setting the state the session already
-     * has changes nothing.
+     * it). Without one only {@code stopped} is accepted, from an administrator, while no lease is active; the fence
+     * is held exclusively meanwhile, so fenced requests admitted before the lease lapsed finish first and no Tool
+     * acquires control in between. Starting a running game changes nothing; stopping a stopped game ends what is
+     * left over (an active live upload, an open request, a waiting timetable entry) and changes nothing else.
      */
     public State change(long sessionId, String requested, long userId, Long epoch) throws Exception {
         if (!RUNNING.equals(requested) && !STOPPED.equals(requested)) {
@@ -128,14 +131,13 @@ public class GameExecutionService {
             throw GameControllerService.locked("Starting the game requires control of the game ("
                     + GameControllerService.EPOCH_HEADER + " header missing)");
         }
-        long stamp = controller.lockShared();
-        try {
-            if (controller.status().active()) {
-                throw GameControllerService.locked("Tool controls the game; stop it in Tool, or release control first");
-            }
-            return apply(sessionId, requested, userId, null);
-        } finally {
-            controller.unlockShared(stamp);
+        return controller.whileUncontrolled(() -> apply(sessionId, requested, userId, null));
+    }
+
+    /** Refuses execution (409 {@value #NOT_RUNNING}) unless the session's game runs; under the session lock. */
+    static void requireRunning(GameTransaction transaction, long sessionId) throws SQLException {
+        if (!running(transaction, sessionId)) {
+            throw GameErrors.conflict(NOT_RUNNING);
         }
     }
 
@@ -157,10 +159,15 @@ public class GameExecutionService {
         return transactions.write(transaction -> {
             transaction.lockSession(sessionId);
             State current = read(transaction, sessionId);
-            if (current.state().equals(requested)) {
+            boolean start = RUNNING.equals(requested);
+            boolean cleanup = current.state().equals(requested);
+            if (cleanup && start) {
                 return current;
             }
-            boolean start = RUNNING.equals(requested);
+            Stopped leftovers = cleanup ? stopEffects(transaction, publisher, sessionId) : null;
+            if (cleanup && leftovers.nothing()) {
+                return current;
+            }
             Holder lease = holder(transaction);
             String who = epoch != null && lease.userLabel() != null ? lease.userLabel()
                     : userLabel(transaction, userId);
@@ -176,24 +183,27 @@ public class GameExecutionService {
             }
             Instant now = transaction.now();
             String changedBy = GameJokerRepository.clip(label, 128);
-            try {
-                if (transaction.update("UPDATE tc_game_session_state SET state = ?, changedat = ?, changedby = ?,"
-                        + " runningkey = ? WHERE gamesessionid = ?", requested, now, changedBy, start ? 1 : null,
-                        sessionId) == 0) {
-                    transaction.update("INSERT INTO tc_game_session_state (gamesessionid, state, changedat, changedby,"
-                            + " runningkey) VALUES (?, ?, ?, ?, ?)", sessionId, requested, now, changedBy,
-                            start ? 1 : null);
+            if (!cleanup) {
+                try {
+                    if (transaction.update("UPDATE tc_game_session_state SET state = ?, changedat = ?, changedby = ?,"
+                            + " runningkey = ? WHERE gamesessionid = ?", requested, now, changedBy, start ? 1 : null,
+                            sessionId) == 0) {
+                        transaction.update("INSERT INTO tc_game_session_state (gamesessionid, state, changedat,"
+                                + " changedby, runningkey) VALUES (?, ?, ?, ?, ?)", sessionId, requested, now,
+                                changedBy, start ? 1 : null);
+                    }
+                } catch (SQLException error) {
+                    if (GameErrors.constraintViolation(error)) {
+                        throw GameErrors.conflict("Another game is running; stop it before starting this one");
+                    }
+                    throw error;
                 }
-            } catch (SQLException error) {
-                if (GameErrors.constraintViolation(error)) {
-                    throw GameErrors.conflict("Another game is running; stop it before starting this one");
-                }
-                throw error;
             }
-            Stopped stopped = start ? new Stopped(0, 0, 0, false, Set.of(), false)
-                    : stopEffects(transaction, publisher, sessionId);
+            Stopped stopped = start ? Stopped.NONE : cleanup ? leftovers : stopEffects(transaction, publisher, sessionId);
 
-            String detail = epoch == null ? "Stopped without control of the game" : null;
+            String detail = cleanup ? "Ended leftovers of the stopped game"
+                    + (epoch == null ? " without control of the game" : "")
+                    : epoch == null ? "Stopped without control of the game" : null;
             transaction.insert("INSERT INTO tc_game_controller_history (epoch, event, userid, userlabel, instanceid,"
                     + " label, gamesessionid, detail, occurredat) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", lease.epoch(),
                     start ? "gameStarted" : "gameStopped", epoch != null ? lease.userId() : userId,
@@ -210,8 +220,12 @@ public class GameExecutionService {
                 data.put("endedLiveUploads", stopped.uploads());
                 data.put("skippedTimetableEntries", stopped.timetableEntries());
             }
+            if (cleanup) {
+                data.put("cleanup", true);
+            }
             GameLogService.event(transaction, publisher, sessionId, GameEvent.GAME,
-                    (start ? "Game started by " : "Game stopped by ") + changedBy
+                    (start ? "Game started by " : cleanup ? "Leftovers of the stopped game ended by "
+                            : "Game stopped by ") + changedBy
                             + (epoch == null ? " (without control of the game)" : ""), data);
 
             transaction.bumpSession();
@@ -235,9 +249,15 @@ public class GameExecutionService {
         });
     }
 
-    /** What stopping the game ended. */
-    private record Stopped(int requests, int uploads, int timetableEntries, boolean requestsChanged,
+    /** What stopping the game ended; {@code slots} counts the claimed timetable slots it finished. */
+    private record Stopped(int requests, int uploads, int timetableEntries, int slots, boolean requestsChanged,
                            Set<Long> jokerMembers, boolean pool) {
+
+        static final Stopped NONE = new Stopped(0, 0, 0, 0, false, Set.of(), false);
+
+        boolean nothing() {
+            return requests == 0 && uploads == 0 && timetableEntries == 0 && slots == 0;
+        }
     }
 
     /**
@@ -270,13 +290,14 @@ public class GameExecutionService {
             requests++;
         }
         Set<Long> fakeOwners = new HashSet<>();
+        int slots = GameTimetableRepository.slots(transaction, sessionId, GameTimetableRepository.CLAIMED).size();
         int entries = GameTimetableService.stopWaiting(transaction, publisher, sessionId, fakeOwners);
         if (entries > 0) {
             owners.addAll(fakeOwners);
             transaction.afterCommit(() -> publisher.invalidate(
                     new GamePublisher.Invalidation(sessionId, GamePublisher.TIMETABLE, null)));
         }
-        return new Stopped(requests, uploads.size(), entries, requests > 0, owners, pool);
+        return new Stopped(requests, uploads.size(), entries, slots, requests > 0, owners, pool);
     }
 
     // Test events -------------------------------------------------------------------------------------------
