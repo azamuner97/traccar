@@ -477,6 +477,80 @@ public abstract class GameSchemaTest {
     }
 
     @Test
+    void openRequestsOfStoppedSessionsEndWithTheirJokersAndModel2HistoryGoes() throws Exception {
+        // Review SC-9, SC-11.
+        DataSource database = database(false);
+        GameSchemaFixture.executionBefore(database, "game-execution-6-");
+        String request = "INSERT INTO tc_game_requests (gamesessionid, type, requestermemberid, requesterrole,"
+                + " targetmemberid, parameters, status, createdat, updatedat)"
+                + " VALUES (?, 'break', ?, 'player', ?, '{}', ?, ?, ?)";
+        String reserved = "INSERT INTO tc_game_joker_reservations (gamesessionid, memberid, type, requestid, status,"
+                + " overallocated, createdat, updatedat) VALUES (?, ?, 'break', ?, 'reserved', FALSE, ?, ?)";
+        long stopped;
+        long running;
+        long pending;
+        long executing;
+        long succeeded;
+        long kept;
+        long pendingJoker;
+        long executingJoker;
+        long keptJoker;
+        try (Connection connection = database.getConnection()) {
+            stopped = session(connection);
+            long anna = player(connection, stopped, 1);
+            pending = insert(connection, request, stopped, anna, anna, "pending", T0, T0);
+            pendingJoker = insert(connection, reserved, stopped, anna, pending, T0, T0);
+            executing = insert(connection, request, stopped, anna, anna, "executing", T0, T0);
+            executingJoker = insert(connection, reserved, stopped, anna, executing, T0, T0);
+            succeeded = insert(connection, request, stopped, anna, anna, "succeeded", T0, T0);
+            running = session(connection);
+            long ben = player(connection, running, 1);
+            execute(connection, "INSERT INTO tc_game_session_state (gamesessionid, state, changedat, runningkey)"
+                    + " VALUES (?, 'running', ?, 1)", running, T0);
+            kept = insert(connection, request, running, ben, ben, "approved", T0, T0);
+            keptJoker = insert(connection, reserved, running, ben, kept, T0, T0);
+            for (String event : List.of("acquired", "executing", "stoppedExecuting", "gameStopped")) {
+                execute(connection, "INSERT INTO tc_game_controller_history (epoch, event, occurredat)"
+                        + " VALUES (1, ?, ?)", event, T0);
+            }
+        }
+        GameSchemaFixture.apply(database, GameSchemaFixture.MASTER);
+        try (Connection connection = database.getConnection()) {
+            assertEquals(1, number(connection, "SELECT COUNT(*) FROM tc_game_requests WHERE id = ?"
+                    + " AND status = 'cancelled' AND message = 'The game was stopped' AND completedat IS NOT NULL",
+                    pending));
+            assertEquals(1, number(connection, "SELECT COUNT(*) FROM tc_game_requests WHERE id = ?"
+                    + " AND status = 'failed'", executing));
+            assertEquals(1, number(connection, "SELECT COUNT(*) FROM tc_game_requests WHERE id = ?"
+                    + " AND status = 'succeeded'", succeeded));
+            assertEquals(1, number(connection, "SELECT COUNT(*) FROM tc_game_requests WHERE id = ?"
+                    + " AND status = 'approved'", kept));
+            for (long joker : List.of(pendingJoker, executingJoker)) {
+                assertEquals(1, number(connection, "SELECT COUNT(*) FROM tc_game_joker_reservations"
+                        + " WHERE id = ? AND status = 'released'", joker));
+                assertEquals(1, number(connection, "SELECT COUNT(*) FROM tc_game_joker_ledger"
+                        + " WHERE reservationid = ? AND kind = 'release'", joker));
+            }
+            assertEquals(1, number(connection, "SELECT COUNT(*) FROM tc_game_joker_reservations"
+                    + " WHERE id = ? AND status = 'reserved'", keptJoker));
+            assertEquals(0, number(connection, "SELECT COUNT(*) FROM tc_game_joker_ledger WHERE reservationid = ?",
+                    keptJoker));
+            assertEquals(List.of("acquired", "gameStopped"), historyEvents(connection));
+        }
+    }
+
+    private static List<String> historyEvents(Connection connection) throws SQLException {
+        List<String> events = new java.util.ArrayList<>();
+        try (var statement = connection.prepareStatement("SELECT event FROM tc_game_controller_history ORDER BY id");
+             var rows = statement.executeQuery()) {
+            while (rows.next()) {
+                events.add(rows.getString(1));
+            }
+        }
+        return events;
+    }
+
+    @Test
     void poolJokersBelongToTheSessionAndMemberJokersToAMember() throws Exception {
         try (Connection connection = source.getConnection()) {
             long session = session(connection);

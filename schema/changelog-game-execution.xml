@@ -322,4 +322,52 @@
     </sql>
   </changeSet>
 
+  <!--
+    Review fixes (package E):
+
+    - SC-9: a stopped game has no open request. Requests left open by the phase-0 migration (or written to a
+      stopped session before the stop became a barrier) are ended as a stop ends them: pending and approved ones
+      cancelled, executing ones failed, "The game was stopped", and their reserved jokers released with a ledger
+      row. Sessions whose game runs keep theirs.
+    - SC-11: controller history keeps only the events of the documented enum; model 2's executing and
+      stoppedExecuting rows (from the removed setExecuting) are dropped.
+
+    Each changeset is plain DML, so a failure rolls it back as a whole and it can run again.
+  -->
+  <changeSet author="traccar-tool" id="game-execution-6-stopped-requests">
+    <sql>
+      UPDATE tc_game_fake_ping_plans SET openentryid = NULL, unboundmemberid = NULL
+        WHERE reservationid IN (SELECT r.id FROM tc_game_joker_reservations r
+          JOIN tc_game_requests q ON q.gamesessionid = r.gamesessionid AND q.id = r.requestid
+          WHERE r.status = 'reserved' AND q.status IN ('pending', 'approved', 'executing')
+            AND NOT EXISTS (SELECT 1 FROM tc_game_session_state s
+              WHERE s.gamesessionid = q.gamesessionid AND s.state = 'running'));
+      INSERT INTO tc_game_joker_ledger (gamesessionid, memberid, type, kind, quantity, requestid, reservationid,
+          actor, detail, occurredat)
+        SELECT r.gamesessionid, r.memberid, r.type, 'release', 1, r.requestid, r.id, NULL,
+            CASE WHEN q.status = 'executing' THEN 'Request failed' ELSE 'Request cancelled' END, q.updatedat
+          FROM tc_game_joker_reservations r
+          JOIN tc_game_requests q ON q.gamesessionid = r.gamesessionid AND q.id = r.requestid
+          WHERE r.status = 'reserved' AND q.status IN ('pending', 'approved', 'executing')
+            AND NOT EXISTS (SELECT 1 FROM tc_game_session_state s
+              WHERE s.gamesessionid = q.gamesessionid AND s.state = 'running');
+      UPDATE tc_game_joker_reservations SET status = 'released'
+        WHERE status = 'reserved' AND requestid IN (SELECT q.id FROM tc_game_requests q
+          WHERE q.status IN ('pending', 'approved', 'executing')
+            AND NOT EXISTS (SELECT 1 FROM tc_game_session_state s
+              WHERE s.gamesessionid = q.gamesessionid AND s.state = 'running'));
+      UPDATE tc_game_requests SET
+          status = CASE WHEN status = 'executing' THEN 'failed' ELSE 'cancelled' END,
+          message = 'The game was stopped', completedat = updatedat
+        WHERE status IN ('pending', 'approved', 'executing')
+          AND gamesessionid NOT IN (SELECT gamesessionid FROM tc_game_session_state WHERE state = 'running');
+    </sql>
+  </changeSet>
+
+  <changeSet author="traccar-tool" id="game-execution-6-controller-history">
+    <sql>
+      DELETE FROM tc_game_controller_history WHERE event IN ('executing', 'stoppedExecuting');
+    </sql>
+  </changeSet>
+
 </databaseChangeLog>
