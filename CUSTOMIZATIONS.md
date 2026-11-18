@@ -163,7 +163,11 @@ decides only which Tool may make decisions. A server restart ends an active
 lease; a Tool that lost control re-acquires it automatically by naming its last
 epoch (`resumeEpoch`), which is granted only while nobody acquired control
 since. A change of control ends no request: a new epoch returns requests still
-`executing` under an older one to `approved`.
+`executing` under an older one to `approved`, and `TaskGameController` returns
+any such request of the running game about once per second. While no lease is
+active, or once the request's epoch is older than the lease's, the requester may
+cancel an `executing` request; a delivery may complete a request only under the
+epoch that claimed it.
 
 ### Game state
 
@@ -180,17 +184,26 @@ passed while the game was stopped starts late and ends at its planned end, and
 a planned break whose planned end passed before it could start is missed and
 returns its joker. Stopping the game moves no break deadline.
 Changing the state is fenced, except that any administrator may stop a game
-without an epoch while no lease is active. Stopping ends the open requests
-(waiting ones are cancelled, executing ones fail; their jokers return) and the
-active live uploads and relays (`gameStopped`) in one transaction. Each start
-and stop is recorded in the controller history (`gameStarted`,
-`gameStopped`) and written as a `game` execution event.
+without an epoch while no lease is active; that stop takes the controller fence
+exclusively, so it waits for fenced requests in flight and is refused (423) if a
+lease became active meanwhile. Stopping ends the open requests (waiting ones are
+cancelled, executing ones fail; their jokers return), the active live uploads
+and relays (`gameStopped`) and the waiting timetable cells (skipped, `stopped`)
+in one transaction. The stop is a barrier: on a stopped game, `pingDelivered`,
+`liveUploadStarted` and effects deliveries with ping intents answer 409 "The
+game is stopped" (ending uploads and other cleanup stay allowed), and stopping a
+stopped game ends whatever was left open (`cleanup: true` in its event). Each
+start and stop is recorded in the controller history (`gameStarted`,
+`gameStopped`) and written as a `game` execution event. Members read
+`timetableRunning` in their status (the toggle is on and the game runs).
 
 Execution events are session log rows with a `data` column (JSON, at most
 4 KB) in the categories `game`, `timetable`, `live`, `relay` and `break`. After
 commit they are pushed to administrators only as
 `{"gameEvents": [{"id", "gameSessionId", "category", "occurredAt", "message",
-"data"}]}`; members never receive them. The Tool catches up with
+"data"}]}`, once per transaction and, per session, in event ID order
+(`GameEventSequencer`); members never receive them. `ConnectionManager` keeps
+the administrator flag of connected accounts, so no push reads the database. The Tool catches up with
 `GET /api/game-sessions/{id}/logs?events=true&after=<id>`.
 `POST /api/game-sessions/{id}/events/test` writes a `game` test event (never
 fenced) for outage drills. `GET /api/game-sessions/{id}/effects/{deliveryId}`
@@ -206,7 +219,9 @@ with HTTP 423 otherwise (`GameControllerFilter`):
   timetable changes and execution toggle) and the game state (except the
   administrator stop described above). Configuration of a session that is not
   running (name, settings, credentials, geofence plans, device list, timetable,
-  logs) needs only its revision check;
+  logs) and session creation need only their revision check; the game state is
+  checked again under the session lock (`GameUnfencedWrites`), so such a write
+  that meets a game started meanwhile answers 423;
 - writes to `/api/game-notifications` and `/api/game-proximity`;
 - while a lease is held, standard mutations (devices, groups, users,
   permissions, geofences, `DELETE /api/positions`) of the Traccar resources any
@@ -219,7 +234,12 @@ with HTTP 423 otherwise (`GameControllerFilter`):
   its body (400 otherwise), and permission bodies are read as the permission
   resource reads them (keys matched case-insensitively by class name, values
   also from strings);
-- any request that carries an epoch must carry the current one.
+- a game write (configuration included) or a fenced Traccar mutation that
+  carries an epoch must carry the current one; `/api/game-controller/*`, the
+  test event and other Traccar endpoints ignore the header;
+- a failed check answers 423 to administrators only: other accounts get 403,
+  and the game state without an epoch is locked only for administrators, so
+  members never learn whether a Tool controls the game.
 
 Member writes (`/api/game-requests`, `/api/game-jokers`) are never fenced; they
 check again under the session lock that the member is still active and bound to
@@ -469,9 +489,11 @@ cells) and edit it with all-or-nothing changesets
 409 for a stale `baseRevision`, the recorded result for a retried `changeId`,
 422 listing every failing change). Cells follow the Tool's grammar
 (`TimetableInstruction`: `x`, blank, `b`, target codes, `lat,lon[|code]`) and
-are stored canonical. `PUT …/timetable/execution {enabled}` switches execution
-on and off; it runs only while the toggle is on and the game runs, whatever the
-lease does, and switches itself off when no slot is left.
+are stored canonical; at most 20000 cells of slots still to run (done slots are
+history and do not count). `PUT …/timetable/execution {enabled}` switches
+execution on and off; it runs only while the toggle is on and the game runs,
+whatever the lease does, and switches itself off when no slot is left. Members
+read whether it runs from `timetableRunning` in their status.
 
 `TaskGameExecution` ticks every second on its own thread (`GameScheduler`).
 The timetable runner claims a due slot (a slot more than 30 s late is missed),
@@ -483,7 +505,9 @@ coordinates. A cell waits up to the fresh-fix wait (setting
 `timetable_fresh_fix_wait_seconds`, default 30 s) for a fix no older than the
 freshness window before its slot (`timetable_freshness_window_seconds`,
 default 20 s), reacting to arriving positions (`ConnectionManager` position
-observer), and is otherwise sent with the last known position. Each outcome
+observer, plus one shared fallback poll of all awaited trackers every 200 ms),
+and is otherwise sent with the last known position. A fix counts only from the
+tracker bound when the intent's transaction runs. Each outcome
 commits with its positions and is a `timetable` execution event (`slotStarted`,
 `ping`, `slotFinished`, `slotMissed`, `execution`). Effects deliveries carry
 ping intents too (`pings`, one outcome each); the guarded fake positions and
@@ -501,8 +525,10 @@ need (`useJoker`, `overAllocate`, `pingNumber`, `startedBy`).
 runs, whatever the lease does: a participant's upload is one engine intent with
 its audiences and the latest position (paths `speedhunt`, `live`,
 `geofenceLive`), a relay sends every active hunter's latest position to the
-recipient's per-hunter mirrors. A late tick sends the current position once;
-nothing is replayed. A live speedhunt ping's first delivered sample applies
+recipient's per-hunter mirrors (a hunter whose fix has no usable time counts as
+without a position). A late tick sends the current position once; nothing is
+replayed, and a tick that reaches its transaction after the deadline sends
+nothing. A live speedhunt ping's first delivered sample applies
 `pingDelivered` (and starts the speedhunt with its pool joker); a relay uses its
 "Get hunter positions" joker with its first tick that delivers. Uploads end at
 their deadline, with a stop, with a catch of their source (or relay

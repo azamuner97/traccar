@@ -146,6 +146,17 @@ speak only model 2.
   server, for example the image `compose.yml` pins, started with
   `--tmpfs /var/lib/mysql` on a port other than the development database's.
   Never point them at the development database.
+- Never change a changeset that a database may have applied (its checksum
+  would change and Liquibase would refuse to start); add a new changeset. On
+  MySQL every DDL statement commits on its own, so a changeset that fails
+  halfway cannot run again: give a new changeset one DDL statement, or guard
+  each step with `preConditions onFail="MARK_RAN"` (`tableExists`,
+  `columnExists`, ...) as `changelog-game-model-2.xml` does. Data fixes in plain
+  DML roll back as a whole. The earlier multi-statement changesets of
+  `changelog-game-execution.xml` stay as they are (review SC-10): a
+  changeset-level precondition can only skip a whole changeset, which would
+  leave out the rest of one that failed halfway, and splitting them would
+  change the checksums of applied changesets.
 - Traccar Tool's OpenAPI contract test reads `openapi.yaml`; run it with
   `TRACCAR_OPENAPI=../traccar/openapi.yaml venv_traccar/bin/python -m unittest discover -s tests`
   from `Traccar-Tool` after changing game endpoints.
