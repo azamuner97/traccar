@@ -301,6 +301,39 @@ public abstract class GameStatusTest extends GameTestBase {
         assertNotEquals(hunter, statusOf(game.hunter()).hash());
     }
 
+    @Test
+    void theStatusSaysWhetherTheTimetableRuns() throws Exception {
+        // Review WC-1: members tell "due and about to be sent" from "not running" by the toggle and the game state.
+        Game game = game();
+        long session = game.session();
+        var timetables = new GameTimetableService(transactions, mapper, publisher);
+        GameStatus.Status off = statusOf(game.anna());
+        assertTrue(off.running());
+        assertFalse(off.timetableRunning());
+        assertEquals(off.timetableRunning(), mapper.valueToTree(off).get("timetableRunning").asBoolean());
+
+        publisher.clear();
+        timetables.setExecution(session, true, game.hunter().userId());
+        assertFalse(publisher.topic(GamePublisher.STATUS).isEmpty());
+        GameStatus.Status on = statusOf(game.anna());
+        assertTrue(on.timetableRunning());
+        assertNotEquals(off.hash(), on.hash());
+        assertTrue(statusOf(game.hunter()).timetableRunning());
+        assertTrue(statusOf(game.spectator()).timetableRunning());
+
+        // A stopped game runs no timetable, whatever the toggle says.
+        stopGame(session);
+        GameStatus.Status stopped = statusOf(game.anna());
+        assertFalse(stopped.running());
+        assertFalse(stopped.timetableRunning());
+
+        startGame(session);
+        publisher.clear();
+        timetables.setExecution(session, false, game.hunter().userId());
+        assertFalse(publisher.topic(GamePublisher.STATUS).isEmpty());
+        assertFalse(statusOf(game.anna()).timetableRunning());
+    }
+
     // Hunters and spectators --------------------------------------------------------------------------------
 
     @Test

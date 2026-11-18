@@ -113,16 +113,23 @@ public class GameStatusService {
             case GameMember.SPECTATOR -> view.spectator();
             default -> throw new ForbiddenException("This account does not take part in a game");
         };
+        boolean timetableRunning = view.active
+                && GameTimetableRepository.header(transaction, member.gameSessionId()).enabled();
         return new GameStatus.Status(member.gameSessionId(), member.id(), member.role(), member.number(),
-                member.displayName(), view.active, transaction.now().toString(),
-                hash(member.role(), view.active, projection), projection);
+                member.displayName(), view.active, timetableRunning, transaction.now().toString(),
+                hash(member.role(), view.active, timetableRunning, projection), projection);
     }
 
-    /** A hash of what the member observes: role, game state and projection; no identity, time or revision. */
-    static String hash(String role, boolean running, GameStatus.Projection projection) throws Exception {
+    /**
+     * A hash of what the member observes: role, game state, timetable execution and projection; no identity, time or
+     * revision.
+     */
+    static String hash(String role, boolean running, boolean timetableRunning, GameStatus.Projection projection)
+            throws Exception {
         Map<String, Object> content = new LinkedHashMap<>();
         content.put("role", role);
         content.put("running", running);
+        content.put("timetableRunning", timetableRunning);
         content.put("status", projection);
         byte[] digest = MessageDigest.getInstance("SHA-256").digest(
                 CANONICAL.writeValueAsString(content).getBytes(StandardCharsets.UTF_8));

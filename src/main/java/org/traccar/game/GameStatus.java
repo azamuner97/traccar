@@ -33,12 +33,14 @@ public final class GameStatus {
 
     /**
      * A member's status: the caller's own membership, whether the game runs (its game state, never whether a Tool
-     * is connected), the server time for countdowns, and the role projection. {@code hash} identifies the content of
-     * the projection (not the session revision, which members never see), so it changes only with what this member
-     * can observe.
+     * is connected), whether the timetable runs ({@code timetableRunning}: its execution toggle is on and the game
+     * runs, so the server sends due timetable pings), the server time for countdowns, and the role projection.
+     * {@code hash} identifies the content of the projection and both flags (not the session revision, which members
+     * never see), so it changes only with what this member can observe.
      */
     public record Status(long gameSessionId, long memberId, String role, int number, String displayName,
-                         boolean running, String serverTime, String hash, Projection status) {
+                         boolean running, boolean timetableRunning, String serverTime, String hash,
+                         Projection status) {
     }
 
     /** One of the role projections. */

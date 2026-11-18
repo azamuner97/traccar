@@ -8410,10 +8410,10 @@ components:
     GameStatus:
       type: object
       description: >-
-        The caller's membership, whether the game runs (its game state; never whether a Tool is connected), the
-        server time for countdowns, a hash of the
-        projection (it changes only with what this member observes; members never see the session revision) and the
-        role projection.
+        The caller's membership, whether the game runs (its game state; never whether a Tool is connected), whether
+        the timetable runs, the server time for countdowns, a hash of the projection and both flags (it changes only
+        with what this member observes; members never see the session revision) and the role projection. A change
+        of the game state or of the timetable execution toggle invalidates `game-status`.
       properties:
         gameSessionId:
           $ref: '#/components/schemas/Id'
@@ -8427,6 +8427,12 @@ components:
           type: string
         running:
           type: boolean
+        timetableRunning:
+          type: boolean
+          description: >-
+            True while the timetable's execution toggle is on and the game runs, so the server sends due timetable
+            pings. While false, a past-due `scheduled` entry is not about to be sent: it waits for the game or for
+            the operator to switch execution on (and is then marked missed if its time is long past).
         serverTime:
           $ref: '#/components/schemas/Time'
         hash:

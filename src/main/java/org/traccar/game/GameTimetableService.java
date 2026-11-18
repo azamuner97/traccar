@@ -607,6 +607,12 @@ public class GameTimetableService {
         });
     }
 
+    /** After commit: members read their status again, whose {@code timetableRunning} follows the toggle. */
+    static void executionChanged(GameTransaction transaction, GamePublisher publisher, long sessionId) {
+        transaction.afterCommit(() -> publisher.invalidate(
+                new GamePublisher.Invalidation(sessionId, GamePublisher.STATUS, null)));
+    }
+
     /** After commit: members read their timetable again, fake owners their jokers. */
     static void changed(GameTransaction transaction, GamePublisher publisher, long sessionId, Set<Long> owners) {
         transaction.afterCommit(() -> publisher.invalidate(
@@ -640,6 +646,7 @@ public class GameTimetableService {
                     GameExecutionService.userLabel(transaction, userId));
             transaction.bumpSession();
             changed(transaction, publisher, sessionId, owners);
+            executionChanged(transaction, publisher, sessionId);
             return execution(transaction, sessionId);
         });
     }

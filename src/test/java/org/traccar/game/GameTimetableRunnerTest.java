@@ -177,6 +177,7 @@ public abstract class GameTimetableRunnerTest extends GameTestBase {
         assertEquals(anna.trackerId().longValue(), annaPing.get("trackerId").asLong());
         assertArrayEquals(new double[] {46.5, 7.5}, latest(game.mirror(anna, "hunters")));
         // Ben has no position at all: at the end of the wait his ping fails.
+        int statusReads = publisher.topic(GamePublisher.STATUS).size();
         advanceTo(T0.plusSeconds(89));
         assertEquals(GameTimetableRepository.SCHEDULED, status(slot, ben));
         advanceTo(T0.plusSeconds(90));
@@ -187,10 +188,11 @@ public abstract class GameTimetableRunnerTest extends GameTestBase {
         assertEquals(2, finished.get("counts").get("sent").asInt());
         assertEquals(1, finished.get("counts").get("skipped").asInt());
         assertEquals(1, finished.get("counts").get("failed").asInt());
-        // No scheduled slot is left: the toggle switches itself off.
+        // No scheduled slot is left: the toggle switches itself off, and members read timetableRunning again.
         advanceTo(T0.plusSeconds(91));
         assertEquals("completed", events(GameTimetableEvents.EXECUTION).getLast().get("state").asText());
         assertFalse(timetables.get(game.session()).execution().enabled());
+        assertTrue(publisher.topic(GamePublisher.STATUS).size() > statusReads);
         assertEquals(List.of("slotStarted", "ping", "ping", "ping", "ping", "slotFinished", "execution"), types());
         // Every event reached the log, in order, for the Tool's catch-up.
         var logged = new GameLogService(transactions).list(game.session(),

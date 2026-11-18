@@ -276,6 +276,7 @@ public class GameTimetableRunner implements GameExecutionRunner<GameTimetableRun
             GameTimetableRepository.setEnabled(transaction, sessionId, false);
             GameTimetableEvents.execution(transaction, publisher, sessionId, "completed", null);
             transaction.bumpSession();
+            GameTimetableService.executionChanged(transaction, publisher, sessionId);
             return null;
         });
     }
