@@ -380,37 +380,6 @@ public final class GameJokerRepository {
     /** SQL condition for plans whose reservation is armed. */
     public static final String ARMED = "r.status = 'reserved' AND (r.requestid IS NULL OR q.status = 'succeeded')";
 
-    /**
-     * Releases armed timetable fakes whose entry is no longer active or no longer reaches the hunters, after a new
-     * timetable version was published.
-     *
-     * @return the members whose fakes were released
-     */
-    public static Set<Long> timetableChanged(GameTransaction transaction, long sessionId) throws SQLException {
-        Set<Long> owners = new LinkedHashSet<>();
-        record Planned(long reservationId, long memberId, Boolean active, String content) {
-        }
-        List<Planned> planned = transaction.list("SELECT p.reservationid, p.memberid, e.active, e.content"
-                + " FROM tc_game_fake_ping_plans p JOIN tc_game_joker_reservations r"
-                + " ON r.gamesessionid = p.gamesessionid AND r.id = p.reservationid"
-                + " LEFT JOIN tc_game_requests q ON q.gamesessionid = r.gamesessionid AND q.id = r.requestid"
-                + " JOIN tc_game_timetable_entries e ON e.gamesessionid = p.gamesessionid"
-                + " AND e.id = p.timetableentryid WHERE p.gamesessionid = ? AND " + ARMED,
-                rows -> new Planned(rows.getLong(1), rows.getLong(2), rows.getBoolean(3), rows.getString(4)),
-                sessionId);
-        for (Planned item : planned) {
-            String detail = !item.active() ? "Its timetable ping was removed"
-                    : !GameTimetableService.fakeEligible(item.content())
-                            ? "Its timetable ping no longer reaches the hunters" : null;
-            if (detail != null) {
-                release(transaction, reservation(transaction, sessionId, item.reservationId()).orElseThrow(),
-                        null, detail);
-                owners.add(item.memberId());
-            }
-        }
-        return owners;
-    }
-
     /** Members holding the given reservations (pool reservations have none). */
     public static Set<Long> owners(GameTransaction transaction, long sessionId, List<Long> reservationIds)
             throws SQLException {

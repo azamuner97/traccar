@@ -441,6 +441,63 @@ public abstract class GamePingEngineTest extends GameTestBase {
     }
 
     @Test
+    void oneSharedPollServesEveryWait() throws Exception {
+        // Review SE-3: one poll (one read) for all waiting trackers, instead of one per wait.
+        Game game = game();
+        var anna = waiting(game, game.anna(), 30, null);
+        var ben = waiting(game, game.ben(), 30, null);
+        scheduler.runPending();
+        assertEquals(3, scheduler.pending(), "two timeouts and one poll");
+        scheduler.advance(Duration.ofSeconds(2));
+        trackerPosition(game.anna().trackerId(), 46.6, 7.6, T0.plusSeconds(2));
+        trackerPosition(game.ben().trackerId(), 46.7, 7.7, T0.plusSeconds(2));
+        scheduler.advance(Duration.ofMillis(GamePingEngine.POLL_MILLIS));
+        assertEquals(GamePingEngine.SENT, anna.getNow(null).status());
+        assertEquals(GamePingEngine.SENT, ben.getNow(null).status());
+        assertArrayEquals(new double[] {46.6, 7.6}, latest(game.annaToHunters()));
+        assertArrayEquals(new double[] {46.7, 7.7}, latest(game.benToHunters()));
+        assertEquals(0, scheduler.pending(), "the poll ends with the last wait");
+    }
+
+    @Test
+    void aFixOfTheTrackerBoundBeforeARebindIsNotSent() throws Exception {
+        // Review SE-6: the wait listens to the tracker bound when it began; a swap during the wait leaves its fix out.
+        Game game = game();
+        var pending = waiting(game, game.anna(), 30, null);
+        scheduler.runPending();
+        long old = game.anna().trackerId();
+        long replacement = device();
+        transactions.write(transaction -> transaction.update(
+                "UPDATE tc_game_session_members SET trackerid = ? WHERE id = ?", replacement, game.anna().id()));
+        trackerPosition(replacement, 45.1, 7.1, T0.minusSeconds(60));
+        waiter.arrived(arriving(old, 46.9, 7.9, T0.plusSeconds(1)));
+        scheduler.runPending();
+        var outcome = pending.getNow(null);
+        assertNotNull(outcome);
+        assertArrayEquals(new double[] {45.1, 7.1}, latest(game.annaToHunters()));
+        assertTrue(outcome.position().stale());
+    }
+
+    @Test
+    void aHunterFixWithoutAUsableTimeDoesNotFailTheRelay() throws Exception {
+        // Review SE-5: a tracker without a clock stores 1970; that hunter counts as without a position.
+        long session = session();
+        GameMember recipient = bound(session, GameMember.PLAYER);
+        GameMember good = bound(session, GameMember.HUNTER);
+        GameMember clockless = bound(session, GameMember.HUNTER);
+        long goodMirror = resources.addMirror(session, device(), good.id(), null, recipient.id()).deviceId();
+        resources.addMirror(session, device(), clockless.id(), null, recipient.id());
+        trackerPosition(good.trackerId(), 46.2, 7.2, T0.minusSeconds(30));
+        trackerPosition(clockless.trackerId(), 46.3, 7.3, java.time.Instant.EPOCH);
+        var outcome = run(session, new GamePingEngine.Intent(GamePingEngine.RELAY, null, recipient.id(), null,
+                null, null, null, null, null), GamePingEngine.Context.NONE);
+        assertEquals(GamePingEngine.SENT, outcome.status());
+        assertEquals(List.of(good.id()), outcome.hunters());
+        assertEquals("1 hunter(s) without a position", outcome.detail());
+        assertArrayEquals(new double[] {46.2, 7.2}, latest(goodMirror));
+    }
+
+    @Test
     void noWaitWhenNothingNeedsAFreshFix() throws Exception {
         Game game = game();
         trackerPosition(game.anna().trackerId(), REAL_LAT, REAL_LON, T0.minusSeconds(5));
@@ -500,7 +557,8 @@ public abstract class GamePingEngineTest extends GameTestBase {
         scheduler.runPending();
         scheduler.advance(Duration.ofSeconds(1));
         wanted[0] = false;
-        scheduler.advance(Duration.ofMillis(GamePingEngine.POLL_MILLIS));
+        // The poll asks about once per second (review SE-3), not on every poll.
+        scheduler.advance(Duration.ofMillis(GamePingEngine.POLL_MILLIS * GamePingEngine.WANTED_POLLS));
         assertTrue(pending.isDone());
         assertNull(pending.getNow(null));
         assertEquals(0, waiter.pending());

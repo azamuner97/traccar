@@ -48,7 +48,13 @@ public class GamePositionWaiter {
     public CompletableFuture<GamePositions.Fix> await(long deviceId, Instant minimumFixTime) {
         CompletableFuture<GamePositions.Fix> future = new CompletableFuture<>();
         Wait wait = new Wait(minimumFixTime, future);
-        waits.computeIfAbsent(deviceId, key -> new CopyOnWriteArrayList<>()).add(wait);
+        // Registration and removal both run inside the map's atomic compute, so a wait is never added to a list that
+        // a concurrent removal has just detached (SE-2).
+        waits.compute(deviceId, (key, list) -> {
+            List<Wait> result = list == null ? new CopyOnWriteArrayList<>() : list;
+            result.add(wait);
+            return result;
+        });
         future.whenComplete((value, error) -> waits.computeIfPresent(deviceId, (key, list) -> {
             list.remove(wait);
             return list.isEmpty() ? null : list;

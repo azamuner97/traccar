@@ -36,10 +36,11 @@ import java.util.Set;
  * slot is editable while it is {@code scheduled} and more than {@value #FREEZE_SECONDS} s ahead (a move's new time
  * too); cells hold valid instructions ({@link TimetableInstruction}), stored trimmed and canonical; cells name
  * active players and supporters listed as participants; slot times are unique; the plan holds at most
- * {@value #MAX_ENTRIES} present entries. An armed fake is released, and its owner told, when its entry is cancelled,
- * its content becomes ineligible, or its slot moves. {@code baseRevision} must be the current revision (409); a
- * repeated {@code changeId} answers the recorded result, or 409 with other content. A rejection lists every failing
- * change (422, {@link Rejected}). Execution never changes the plan revision.
+ * {@value #MAX_ENTRIES} present entries in slots still to run (done slots' history does not count). An armed fake
+ * is released, and its owner told, when its entry is cancelled, its content becomes ineligible, or its slot moves.
+ * {@code baseRevision} must be the current revision (409); a repeated {@code changeId} answers the recorded result,
+ * or 409 with other content. A rejection lists every failing change (422, {@link Rejected}). Execution never changes
+ * the plan revision.
  */
 @Singleton
 public class GameTimetableService {
@@ -588,9 +589,9 @@ public class GameTimetableService {
                 apply.apply(changes.get(i));
             }
             if (apply.errors.isEmpty()
-                    && GameTimetableRepository.presentCount(transaction, sessionId) > MAX_ENTRIES) {
+                    && GameTimetableRepository.activeCount(transaction, sessionId) > MAX_ENTRIES) {
                 apply.errors.add(new ChangeError(null, null, null, null, "tooManyEntries",
-                        "A timetable holds at most " + MAX_ENTRIES + " cells"));
+                        "A timetable holds at most " + MAX_ENTRIES + " cells still to run"));
             }
             if (!apply.errors.isEmpty()) {
                 throw new Rejected(apply.errors);

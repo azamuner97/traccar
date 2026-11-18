@@ -136,6 +136,32 @@ public abstract class GameTimetableTest extends GameTestBase {
     // Changes -----------------------------------------------------------------------------------------------
 
     @Test
+    void theCellLimitCountsOnlySlotsStillToRun() throws Exception {
+        // Review SE-8: the history of done slots does not use up the limit of 20000 cells.
+        Game game = game();
+        Instant now = clock.instant();
+        var result = apply(game.session(),
+                add("done", now.plusSeconds(600), cells(game.anna(), "", game.ben(), "")),
+                add("next", now.plusSeconds(1200), cells(game.anna(), "", game.ben(), "")));
+        long done = result.slots().get("done");
+        java.util.function.Supplier<Integer> active = () -> {
+            try {
+                return transactions.read(transaction -> GameTimetableRepository.activeCount(transaction,
+                        game.session()));
+            } catch (Exception error) {
+                throw new IllegalStateException(error);
+            }
+        };
+        assertEquals(4, active.get());
+        transactions.write(transaction -> {
+            transaction.lockSession(game.session());
+            GameTimetableRepository.finish(transaction, game.session(), done);
+            return null;
+        });
+        assertEquals(2, active.get());
+    }
+
+    @Test
     void slotsAndCellsAreEditedAllOrNothingAndKeepTheirIds() throws Exception {
         Game game = game();
         Instant now = clock.instant();

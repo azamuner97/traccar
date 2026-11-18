@@ -230,11 +230,12 @@ public final class GameTimetableRepository {
     }
 
     /** The number of present entries, for the limit. */
-    public static int presentCount(GameTransaction transaction, long sessionId) throws SQLException {
+    /** The present cells of slots still to run ({@code scheduled} or {@code claimed}); done slots are history. */
+    public static int activeCount(GameTransaction transaction, long sessionId) throws SQLException {
         return transaction.first("SELECT COUNT(*) FROM tc_game_timetable_entries e JOIN tc_game_timetable_slots s"
                 + " ON s.gamesessionid = e.gamesessionid AND s.id = e.slotid WHERE e.gamesessionid = ?"
-                + " AND e.status <> ? AND s.state <> ?", rows -> rows.getInt(1), sessionId, CANCELLED, REMOVED)
-                .orElse(0);
+                + " AND e.status <> ? AND s.state IN (?, ?)", rows -> rows.getInt(1), sessionId, CANCELLED,
+                SCHEDULED, CLAIMED).orElse(0);
     }
 
     /** A member's present entries. */

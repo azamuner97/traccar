@@ -4784,9 +4784,10 @@ paths:
       description: >-
         Checked at commit under the session lock. A slot is editable while scheduled and more than 15 s ahead (a
         move's new time too); cells hold valid instructions, stored trimmed and canonical; cells name active players
-        and supporters listed as participants; slot times are unique; at most 20000 present cells. An armed fake is
-        released, and its owner told, when its cell is cancelled, becomes ineligible, or its slot moves. A repeated
-        changeId with the same content answers the recorded result (replayed true); with other content 409.
+        and supporters listed as participants; slot times are unique; at most 20000 present cells in slots still to
+        run (`scheduled` or `claimed`; done slots are history and do not count). An armed fake is released, and its
+        owner told, when its cell is cancelled, becomes ineligible, or its slot moves. A repeated changeId with the
+        same content answers the recorded result (replayed true); with other content 409.
         baseRevision must be the current revision, else 409. Fenced on the running session.
       tags: [Game Sessions]
       requestBody:

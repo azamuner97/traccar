@@ -201,13 +201,17 @@ public class GameLiveUploadRunner implements GameExecutionRunner<GameLiveUploadR
         return status == null ? null : status + ":" + reason + ":" + String.join(",", delivered);
     }
 
-    private GamePingEngine.Hooks hooks(long sessionId, long uploadId) {
+    GamePingEngine.Hooks hooks(long sessionId, long uploadId) {
         AtomicReference<GameState.LiveUpload> before = new AtomicReference<>();
         return new GamePingEngine.Hooks() {
             @Override
             public boolean proceed(GameTransaction transaction) throws Exception {
                 var upload = GameStateRepository.upload(transaction, sessionId, uploadId).orElse(null);
                 if (upload == null || !upload.active() || !GameExecutionService.running(transaction, sessionId)) {
+                    return false;
+                }
+                // A tick decided before the deadline may run after it: no sample after the time is up (SE-7).
+                if (upload.deadline() != null && !upload.deadline().isAfter(transaction.now())) {
                     return false;
                 }
                 before.set(upload);

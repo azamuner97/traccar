@@ -254,6 +254,25 @@ public abstract class GameLiveUploadRunnerTest extends GameTestBase {
     }
 
     @Test
+    void aTickThatReachesItsTransactionAfterTheDeadlineSendsNothing() throws Exception {
+        // Review SE-7: a tick decided before the deadline but run after it writes no sample.
+        Game game = game();
+        lease(game.session(), EPOCH);
+        long upload = start(game, new GameOperation.LiveUploadStarted(GameState.MANUAL, game.anna().id(), null, true,
+                false, false, 5, T0.plusSeconds(30).toString(), null, null, null, null, null, null));
+        startRunner();
+        GamePingEngine.Hooks hooks = runner.hooks(game.session(), upload);
+        GameTransactions.Work<Boolean> proceed = transaction -> {
+            transaction.lockSession(game.session());
+            return hooks.proceed(transaction);
+        };
+        clock.set(T0.plusSeconds(29));
+        assertTrue(transactions.write(proceed));
+        clock.set(T0.plusSeconds(30));
+        assertFalse(transactions.write(proceed));
+    }
+
+    @Test
     void waitingForLocationIsWrittenOnceAndTheFirstPositionResumesTheUploads() throws Exception {
         Game game = game();
         GameMember ben = game.ben();

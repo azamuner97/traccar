@@ -18,8 +18,10 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.TreeSet;
@@ -75,6 +77,8 @@ public class GamePingEngine {
 
     /** Poll interval of the latest positions while waiting for a fresh fix (fallback of the position hook). */
     public static final long POLL_MILLIS = 200;
+    /** Every how many polls a waiting intent's {@link Hooks#wanted} is asked: once per second. */
+    static final int WANTED_POLLS = 5;
     public static final int MAX_WAIT_SECONDS = 60;
     public static final int MAX_PINGS = 50;
 
@@ -151,7 +155,7 @@ public class GamePingEngine {
         default void completed(GameTransaction transaction, Outcome outcome) throws Exception {
         }
 
-        /** Whether the intent is still wanted while it waits for a fresh fix; checked on every poll. */
+        /** Whether the intent is still wanted while it waits for a fresh fix; asked about once per second. */
         default boolean wanted() {
             return true;
         }
@@ -297,6 +301,16 @@ public class GamePingEngine {
     private final GamePublisher publisher;
     private final GamePositionWaiter waiter;
     private final GameScheduler scheduler;
+
+    /** A freshness wait that the shared poll checks. */
+    private record Polled(long tracker, Instant minimum, Hooks hooks,
+                          java.util.function.Consumer<GamePositions.Fix> complete) {
+    }
+
+    /** The waits of the shared poll by tracker, and the poll itself; touched on the execution thread only. */
+    private final Map<Long, List<Polled>> polled = new LinkedHashMap<>();
+    private GameScheduler.Handle poll;
+    private long polls;
 
     @Inject
     public GamePingEngine(GameTransactions transactions, ObjectMapper objectMapper, GamePublisher publisher,
@@ -478,8 +492,11 @@ public class GamePingEngine {
         if (!GameMember.hasState(source.role())) {
             throw GameErrors.invalid("The " + source.label() + " is not a player or supporter");
         }
+        // A fix handed over by the wait counts only from the tracker bound now: a rebind during the wait (SE-6)
+        // leaves the old tracker's fix out.
         GamePositions.Fix fix = source.trackerId() == null ? null
-                : newer(supplied, GamePositions.latest(transaction, source.trackerId()));
+                : newer(supplied != null && supplied.deviceId() == source.trackerId() ? supplied : null,
+                        GamePositions.latest(transaction, source.trackerId()));
         JokerFake joker = context.jokerFake();
         if (joker != null) {
             // Only a fake that is still armed applies; a cancelled one leaves the real position to the hunters.
@@ -601,7 +618,9 @@ public class GamePingEngine {
             for (GameMember hunter : hunters) {
                 Optional<GamePositions.Fix> fix = hunter.trackerId() == null ? Optional.empty()
                         : GamePositions.latest(transaction, hunter.trackerId());
-                if (fix.isEmpty()) {
+                // A fix without a usable time (a tracker without a clock stores 1970) counts as no position, so
+                // one hunter cannot fail the relay of the others (SE-5).
+                if (fix.isEmpty() || fix.get().fixTime() == null || fix.get().fixTime().isBefore(GameTime.MIN)) {
                     noPosition++;
                     continue;
                 }
@@ -718,7 +737,7 @@ public class GamePingEngine {
             // (caught, a break that leaves only the hunters, nobody to receive it, a coordinate for every
             // audience) is decided at once.
             Decision decision = decide(transaction, sessionId, source, intent,
-                    new GamePositions.Fix(0, 0, minimum), false);
+                    new GamePositions.Fix(source.trackerId(), 0, 0, minimum), false);
             return decision.real().isEmpty() ? null : source.trackerId();
         });
     }
@@ -746,9 +765,11 @@ public class GamePingEngine {
         CompletableFuture<GamePositions.Fix> arrival = waiter.await(tracker, minimum);
         AtomicBoolean done = new AtomicBoolean();
         List<GameScheduler.Handle> handles = new ArrayList<>();
+        List<Polled> registered = new ArrayList<>(1);
         Runnable stop = () -> {
             handles.forEach(GameScheduler.Handle::cancel);
             arrival.cancel(false);
+            registered.forEach(this::unpoll);
         };
         java.util.function.Consumer<GamePositions.Fix> complete = fix -> {
             if (done.compareAndSet(false, true)) {
@@ -756,27 +777,64 @@ public class GamePingEngine {
                 finish(sessionId, intent, context, hooks, fix, result);
             }
         };
+        Polled entry = new Polled(tracker, minimum, hooks, complete);
+        registered.add(entry);
+        poll(entry);
         arrival.thenAccept(fix -> scheduler.execute(() -> complete.accept(fix)));
         handles.add(scheduler.schedule(() -> complete.accept(null), waitMillis));
-        handles.add(scheduler.repeat(() -> {
-            if (done.get()) {
-                return;
-            }
-            if (!hooks.wanted()) {
-                complete.accept(null);
-                return;
-            }
-            try {
-                Optional<GamePositions.Fix> stored = transactions.read(
-                        transaction -> GamePositions.latest(transaction, tracker));
-                if (stored.isPresent() && stored.get().fixTime() != null
-                        && !stored.get().fixTime().isBefore(minimum)) {
-                    complete.accept(stored.get());
+    }
+
+    private void poll(Polled entry) {
+        polled.computeIfAbsent(entry.tracker(), key -> new ArrayList<>()).add(entry);
+        if (poll == null) {
+            poll = scheduler.repeat(this::pollAll, POLL_MILLIS, POLL_MILLIS);
+        }
+    }
+
+    private void unpoll(Polled entry) {
+        List<Polled> list = polled.get(entry.tracker());
+        if (list != null && list.remove(entry) && list.isEmpty()) {
+            polled.remove(entry.tracker());
+        }
+        if (polled.isEmpty() && poll != null) {
+            poll.cancel();
+            poll = null;
+        }
+    }
+
+    /**
+     * The fallback poll shared by every freshness wait (SE-3): one read of the latest positions of all awaited
+     * trackers, and about once per second whether each waiting intent is still wanted.
+     */
+    private void pollAll() {
+        List<Polled> entries = polled.values().stream().flatMap(List::stream).toList();
+        if (entries.isEmpty()) {
+            return;
+        }
+        if (++polls % WANTED_POLLS == 0) {
+            for (Polled entry : entries) {
+                if (!entry.hooks().wanted()) {
+                    entry.complete().accept(null);
                 }
-            } catch (Exception error) {
-                LOGGER.warn("Latest position poll failed", error);
             }
-        }, POLL_MILLIS, POLL_MILLIS));
+        }
+        Set<Long> trackers = Set.copyOf(polled.keySet());
+        if (trackers.isEmpty()) {
+            return;
+        }
+        Map<Long, GamePositions.Fix> latest;
+        try {
+            latest = transactions.read(transaction -> GamePositions.latest(transaction, trackers));
+        } catch (Exception error) {
+            LOGGER.warn("Latest position poll failed", error);
+            return;
+        }
+        for (Polled entry : entries) {
+            GamePositions.Fix fix = latest.get(entry.tracker());
+            if (fix != null && fix.fixTime() != null && !fix.fixTime().isBefore(entry.minimum())) {
+                entry.complete().accept(fix);
+            }
+        }
     }
 
     private void finish(long sessionId, Intent intent, Context context, Hooks hooks, GamePositions.Fix fix,

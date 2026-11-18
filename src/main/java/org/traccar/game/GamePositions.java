@@ -15,6 +15,8 @@ import java.sql.Timestamp;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
 import java.util.Date;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -34,12 +36,12 @@ public final class GamePositions {
 
     public static final String PROTOCOL = "osmand";
 
-    /** A tracker's position as the engine uses it: coordinate and fix time. */
-    public record Fix(double latitude, double longitude, Instant fixTime) {
+    /** A tracker's position as the engine uses it: the tracker, coordinate and fix time. */
+    public record Fix(long deviceId, double latitude, double longitude, Instant fixTime) {
 
         static Fix of(Position position) {
             Date time = position.getFixTime() != null ? position.getFixTime() : position.getDeviceTime();
-            return new Fix(position.getLatitude(), position.getLongitude(),
+            return new Fix(position.getDeviceId(), position.getLatitude(), position.getLongitude(),
                     time == null ? null : time.toInstant());
         }
     }
@@ -168,7 +170,25 @@ public final class GamePositions {
     public static Optional<Fix> latest(GameTransaction transaction, long deviceId) throws SQLException {
         return transaction.first("SELECT p.latitude, p.longitude, p.fixtime FROM tc_positions p"
                 + " JOIN tc_devices d ON d.positionid = p.id WHERE d.id = ?",
-                rows -> new Fix(rows.getDouble(1), rows.getDouble(2), rows.getTimestamp(3).toInstant()), deviceId);
+                rows -> new Fix(deviceId, rows.getDouble(1), rows.getDouble(2), rows.getTimestamp(3).toInstant()),
+                deviceId);
+    }
+
+    /** The latest stored fixes of these trackers in one read per 500, by tracker; trackers without one are left out. */
+    public static Map<Long, Fix> latest(GameTransaction transaction, Collection<Long> deviceIds) throws SQLException {
+        Map<Long, Fix> result = new LinkedHashMap<>();
+        List<Long> ids = List.copyOf(new LinkedHashSet<>(deviceIds));
+        for (int from = 0; from < ids.size(); from += 500) {
+            List<Long> chunk = ids.subList(from, Math.min(ids.size(), from + 500));
+            String marks = String.join(", ", Collections.nCopies(chunk.size(), "?"));
+            for (Fix fix : transaction.list("SELECT d.id, p.latitude, p.longitude, p.fixtime FROM tc_positions p"
+                    + " JOIN tc_devices d ON d.positionid = p.id WHERE d.id IN (" + marks + ")",
+                    rows -> new Fix(rows.getLong(1), rows.getDouble(2), rows.getDouble(3),
+                            rows.getTimestamp(4).toInstant()), chunk.toArray())) {
+                result.put(fix.deviceId(), fix);
+            }
+        }
+        return result;
     }
 
 }
