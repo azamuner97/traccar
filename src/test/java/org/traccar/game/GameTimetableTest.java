@@ -141,8 +141,8 @@ public abstract class GameTimetableTest extends GameTestBase {
         Game game = game();
         Instant now = clock.instant();
         var result = apply(game.session(),
-                add("done", now.plusSeconds(600), cells(game.anna(), "", game.ben(), "")),
-                add("next", now.plusSeconds(1200), cells(game.anna(), "", game.ben(), "")));
+                add("done", now.plusSeconds(600), cells(game.anna(), "p", game.ben(), "p")),
+                add("next", now.plusSeconds(1200), cells(game.anna(), "p", game.ben(), "p")));
         long done = result.slots().get("done");
         java.util.function.Supplier<Integer> active = () -> {
             try {
@@ -167,8 +167,8 @@ public abstract class GameTimetableTest extends GameTestBase {
         Instant now = clock.instant();
         long before = revision(game.session());
         var result = apply(game.session(),
-                add("first", now.plusSeconds(600), cells(game.anna(), " ", game.ben(), "2p2h")),
-                add("second", now.plusSeconds(1200), cells(game.anna(), "X")),
+                add("first", now.plusSeconds(600), cells(game.anna(), " P ", game.ben(), "2p2h")),
+                add("second", now.plusSeconds(1200), cells(game.anna(), " ")),
                 set(null, "second", game.ben(), " 47.1 , 8.5 | 2s "));
         assertEquals(2, result.revision());
         assertFalse(result.replayed());
@@ -177,11 +177,13 @@ public abstract class GameTimetableTest extends GameTestBase {
         long second = result.slots().get("second");
         var read = timetables.get(game.session());
         assertEquals(List.of(first, second), read.slots().stream().map(GameTimetableService.Slot::id).toList());
-        // Stored trimmed and canonical: blank stays a real ping.
-        assertEquals(List.of("", "2P2H"), read.slots().get(0).entries().stream()
+        // Stored trimmed and canonical; a blank cell is no entry, so addSlot leaves it out.
+        assertEquals(List.of("p", "2P2H"), read.slots().get(0).entries().stream()
                 .map(GameTimetableService.Entry::content).toList());
-        assertEquals(List.of("x", "47.1,8.5|2S"), read.slots().get(1).entries().stream()
+        assertEquals(List.of("47.1,8.5|2S"), read.slots().get(1).entries().stream()
                 .map(GameTimetableService.Entry::content).toList());
+        assertEquals(0L, number("SELECT COUNT(*) FROM tc_game_timetable_entries WHERE slotid = ? AND memberid = ?",
+                second, game.anna().id()));
         assertEquals(now.plusSeconds(15), read.frozenUntil());
         assertEquals(now, read.serverTime());
         assertEquals(now.plusSeconds(600), read.execution().nextSlotAt());
@@ -202,17 +204,25 @@ public abstract class GameTimetableTest extends GameTestBase {
         apply(game.session(), set(first, null, game.anna(), "2H"));
         assertEquals(annaFirst, entry(timetables, game.session(), first, game.anna().id()).id());
         assertEquals(GameTimetableRepository.SCHEDULED, status(annaFirst));
+        // A blank setCell is no entry: it clears the cell like clearCell, and inserts nothing on an absent one.
+        apply(game.session(), set(first, null, game.anna(), "  "), set(second, null, game.anna(), ""));
+        assertEquals(GameTimetableRepository.CANCELLED, status(annaFirst));
+        assertEquals(List.of(game.ben().id()), slot(game.session(), first).entries().stream()
+                .map(GameTimetableService.Entry::memberId).toList());
+        assertEquals(1, slot(game.session(), second).entries().size());
+        apply(game.session(), set(first, null, game.anna(), "2H"));
+        assertEquals(annaFirst, entry(timetables, game.session(), first, game.anna().id()).id());
         // A removed slot keeps its rows (fakes reference entries) but disappears, and frees its time.
         apply(game.session(), remove(second));
         assertNull(slot(game.session(), second));
         assertEquals(GameTimetableRepository.REMOVED, text("SELECT state FROM tc_game_timetable_slots WHERE id = ?",
                 second));
-        assertEquals(List.of(GameTimetableRepository.CANCELLED, GameTimetableRepository.CANCELLED),
+        assertEquals(List.of(GameTimetableRepository.CANCELLED),
                 strings("SELECT status FROM tc_game_timetable_entries WHERE slotid = ?", second));
-        long again = apply(game.session(), add("again", now.plusSeconds(1200), cells(game.anna(), "")))
+        long again = apply(game.session(), add("again", now.plusSeconds(1200), cells(game.anna(), "p")))
                 .slots().get("again");
         assertNotEquals(second, again);
-        assertEquals(7, timetables.get(game.session()).revision());
+        assertEquals(9, timetables.get(game.session()).revision());
     }
 
     @Test
@@ -220,10 +230,10 @@ public abstract class GameTimetableTest extends GameTestBase {
         Game game = game();
         GameMember outsider = bound(game.session(), GameMember.PLAYER);
         Instant now = clock.instant();
-        var result = apply(game.session(), add("a", now.plusSeconds(600), cells(game.anna(), "")),
-                add("b", now.plusSeconds(700), cells(game.anna(), "")),
-                add("c", now.plusSeconds(800), cells(game.anna(), "")),
-                add("d", now.plusSeconds(900), cells(game.anna(), "")));
+        var result = apply(game.session(), add("a", now.plusSeconds(600), cells(game.anna(), "p")),
+                add("b", now.plusSeconds(700), cells(game.anna(), "p")),
+                add("c", now.plusSeconds(800), cells(game.anna(), "p")),
+                add("d", now.plusSeconds(900), cells(game.anna(), "p")));
         long a = result.slots().get("a");
         long b = result.slots().get("b");
         long c = result.slots().get("c");
@@ -237,7 +247,7 @@ public abstract class GameTimetableTest extends GameTestBase {
         apply(game.session(), add("y", now.plusSeconds(16), Map.of()));
         assertEquals(List.of("frozen"), rejected(game.session(), move(a, now.plusSeconds(10))));
         clock.set(now.plusSeconds(586));
-        assertEquals(List.of("frozen", "frozen"), rejected(game.session(), set(a, null, game.ben(), ""),
+        assertEquals(List.of("frozen", "frozen"), rejected(game.session(), set(a, null, game.ben(), "p"),
                 move(a, now.plusSeconds(5000))));
         clock.set(now);
         // Every failing change is listed, in order, with its code; the valid one is not applied either.
@@ -247,10 +257,10 @@ public abstract class GameTimetableTest extends GameTestBase {
                 set(d, null, game.anna(), "2H"),
                 add("dup", now.plusSeconds(600), Map.of()),
                 set(a, null, game.anna(), "2Q"),
-                set(a, null, game.hunter(), ""),
-                set(a, null, outsider, ""),
-                set(9_999_999L, null, game.anna(), ""),
-                set(null, "missing", game.anna(), ""),
+                set(a, null, game.hunter(), "p"),
+                set(a, null, outsider, "p"),
+                set(9_999_999L, null, game.anna(), "p"),
+                set(null, "missing", game.anna(), "p"),
                 add("valid", now.plusSeconds(2000), cells(game.anna(), "b")),
                 add("valid", now.plusSeconds(2100), Map.of()),
                 add("time", null, Map.of()),
@@ -258,7 +268,7 @@ public abstract class GameTimetableTest extends GameTestBase {
                 column(game.anna(), null),
                 new GameTimetableService.Change("swap", null, a, null, null, null, null, null, null),
                 set(a, null, game.anna(), null),
-                add("member", now.plusSeconds(2200), Map.of("not-a-number", ""))));
+                add("member", now.plusSeconds(2200), Map.of("not-a-number", "p"))));
         assertEquals(List.of("claimed", "done", "removed", "duplicateTime", "invalidInstruction", "inactiveMember",
                 "notParticipant", "unknownSlot", "unknownKey", "invalidKey", "invalidTime", "invalidOrder",
                 "duplicateParticipant", "invalidChange", "invalidInstruction", "invalidChange"),
@@ -269,6 +279,13 @@ public abstract class GameTimetableTest extends GameTestBase {
         assertEquals(game.anna().id(), error.errors().get(5 - 1).memberId());
         assertTrue(error.errors().get(4).message().contains("2Q"));
         assertEquals(4, timetables.get(game.session()).slots().size());
+        // x is no longer an instruction (blank is no ping), neither as a cell nor as a coordinate target.
+        var removed = assertThrows(GameTimetableService.Rejected.class, () -> apply(game.session(),
+                set(a, null, game.anna(), "x"), add("old", now.plusSeconds(2300), cells(game.anna(), "X")),
+                set(a, null, game.anna(), "47.1,8.5|x")));
+        assertEquals(List.of("invalidInstruction", "invalidInstruction", "invalidInstruction"),
+                removed.errors().stream().map(GameTimetableService.ChangeError::code).toList());
+        assertTrue(removed.errors().stream().allMatch(item -> item.message().contains("leave the cell blank")));
         // Shape errors answer 400 before any transaction.
         for (var changeSet : List.of(new GameTimetableService.ChangeSet("short", 0L, List.of()),
                 new GameTimetableService.ChangeSet("change-" + UUID.randomUUID(), null, List.of()),
@@ -288,7 +305,7 @@ public abstract class GameTimetableTest extends GameTestBase {
         Game game = game();
         long current = timetables.get(game.session()).revision();
         var changeSet = new GameTimetableService.ChangeSet("change-retry-1", current, List.of(add("k",
-                clock.instant().plusSeconds(600), cells(game.anna(), ""))));
+                clock.instant().plusSeconds(600), cells(game.anna(), "p"))));
         var first = timetables.changes(game.session(), changeSet);
         var replay = timetables.changes(game.session(), changeSet);
         assertTrue(replay.replayed());
@@ -331,8 +348,8 @@ public abstract class GameTimetableTest extends GameTestBase {
         assertEquals(List.of("inactiveMember"), rejected(game.session(), column(game.hunter(), null)));
 
         // Without history, removing a column removes it with its editable cells.
-        var result = apply(game.session(), add("past", now.plusSeconds(60), cells(game.anna(), "", game.ben(), "")),
-                add("future", now.plusSeconds(600), cells(game.anna(), "", game.ben(), "", game.carla(), "")));
+        var result = apply(game.session(), add("past", now.plusSeconds(60), cells(game.anna(), "p", game.ben(), "p")),
+                add("future", now.plusSeconds(600), cells(game.anna(), "p", game.ben(), "p", game.carla(), "p")));
         long future = result.slots().get("future");
         apply(game.session(), dropColumn(game.carla()));
         assertEquals(2, timetables.get(game.session()).participants().size());
@@ -356,7 +373,7 @@ public abstract class GameTimetableTest extends GameTestBase {
         assertEquals(GameMember.RETIRED, read.participants().stream()
                 .filter(item -> item.memberId() == game.anna().id()).findFirst().orElseThrow().state());
         assertFalse(publisher.topic(GamePublisher.TIMETABLE).isEmpty());
-        assertEquals(List.of("inactiveMember"), rejected(game.session(), set(future, null, game.anna(), "")));
+        assertEquals(List.of("inactiveMember"), rejected(game.session(), set(future, null, game.anna(), "p")));
         // After a role change (retire + new member) the new member is planned anew.
         GameMember renewed = members.changeRole(game.session(), game.carla().id(), GameMember.PLAYER, null,
                 "Carla again");
@@ -380,12 +397,12 @@ public abstract class GameTimetableTest extends GameTestBase {
         Game game = game();
         Instant now = clock.instant();
         var result = apply(game.session(),
-                add("move", now.plusSeconds(600), cells(game.anna(), "")),
-                add("content", now.plusSeconds(700), cells(game.anna(), "")),
-                add("eligible", now.plusSeconds(800), cells(game.anna(), "")),
-                add("clear", now.plusSeconds(900), cells(game.anna(), "")),
-                add("remove", now.plusSeconds(1000), cells(game.anna(), "")),
-                add("retire", now.plusSeconds(1100), cells(game.anna(), "")));
+                add("move", now.plusSeconds(600), cells(game.anna(), "p")),
+                add("content", now.plusSeconds(700), cells(game.anna(), "p")),
+                add("eligible", now.plusSeconds(800), cells(game.anna(), "p")),
+                add("clear", now.plusSeconds(900), cells(game.anna(), "p")),
+                add("remove", now.plusSeconds(1000), cells(game.anna(), "p")),
+                add("retire", now.plusSeconds(1100), cells(game.anna(), "p")));
         Map<String, Long> fakes = new java.util.HashMap<>();
         for (String key : List.of("move", "content", "eligible", "clear", "remove")) {
             fakes.put(key, armFake(game.session(), game.anna(), entry(timetables, game.session(),
@@ -395,7 +412,7 @@ public abstract class GameTimetableTest extends GameTestBase {
         apply(game.session(), move(result.slots().get("move"), now.plusSeconds(650)));
         assertEquals(GameJokerRepository.RELEASED, reservationStatus(fakes.get("move")));
         assertEquals(Set.of(game.anna().id()), publisher.topic(GamePublisher.JOKERS).getFirst().members());
-        // Still reaching the hunters keeps the fake; b, x, codes without hunters and coordinates release it.
+        // Still reaching the hunters keeps the fake; b, codes without hunters, coordinates and blank release it.
         apply(game.session(), set(result.slots().get("eligible"), null, game.anna(), "2s2h"));
         assertEquals(GameJokerRepository.RESERVED, reservationStatus(fakes.get("eligible")));
         apply(game.session(), set(result.slots().get("content"), null, game.anna(), "47.1,8.5"));
@@ -425,8 +442,8 @@ public abstract class GameTimetableTest extends GameTestBase {
         lease(game.session());
         Instant now = clock.instant();
         var result = apply(game.session(),
-                add("inside", now.plusSeconds(300), cells(game.anna(), "", game.ben(), "")),
-                add("after", now.plusSeconds(3600), cells(game.anna(), "", game.ben(), "")));
+                add("inside", now.plusSeconds(300), cells(game.anna(), "p", game.ben(), "p")),
+                add("after", now.plusSeconds(3600), cells(game.anna(), "p", game.ben(), "p")));
         long inside = armFake(game.session(), game.anna(), entry(timetables, game.session(),
                 result.slots().get("inside"), game.anna().id()).id(), 46.5, 7.5);
         long after = armFake(game.session(), game.anna(), entry(timetables, game.session(),
@@ -448,12 +465,104 @@ public abstract class GameTimetableTest extends GameTestBase {
     }
 
     @Test
+    void theOperatorReadShowsJokerAndBreakEffectsThatMembersNeverSee() throws Exception {
+        // timetable-instructions-effects-plan.md, 8.2 and 8.3: derived on each read, never stored.
+        Game game = game();
+        lease(game.session());
+        Instant now = clock.instant();
+        var result = apply(game.session(),
+                add("soon", now.plusSeconds(300), cells(game.ben(), "47.1,8.5|2P")),
+                add("joker", now.plusSeconds(600), cells(game.anna(), "p", game.ben(), "2P2H")),
+                add("break", now.plusSeconds(3700), cells(game.anna(), "p")),
+                add("both", now.plusSeconds(4000), cells(game.anna(), "2H")),
+                add("after", now.plusSeconds(4300), cells(game.anna(), "p")));
+        long revision = timetables.get(game.session()).revision();
+        var pings = timetables.pings(game.anna()).stream().map(GameTimetableService.Ping::entryId).toList();
+        var hunterSlots = timetables.hunterSlots(game.session());
+        java.util.function.Function<String, GameTimetableService.Entry> anna = key -> {
+            try {
+                return entry(timetables, game.session(), result.slots().get(key), game.anna().id());
+            } catch (Exception error) {
+                throw new IllegalStateException(error);
+            }
+        };
+        assertTrue(timetables.get(game.session()).slots().stream().flatMap(item -> item.entries().stream())
+                .allMatch(item -> item.effect() == null));
+
+        long joker = armFake(game.session(), game.anna(), anna.apply("joker").id(), 46.5, 7.5);
+        long doomed = armFake(game.session(), game.anna(), anna.apply("both").id(), 46.5, 7.5);
+        jokers.change(game.session(), new GameJokerService.Change(game.anna().id(), GameJokerRepository.BREAK, 1,
+                null), "Operator");
+        jokers.change(game.session(), new GameJokerService.Change(game.ben().id(), GameJokerRepository.BREAK, 1,
+                null), "Operator");
+        deliver(game.session(), new GameOperation.BreakPlanned(game.anna().id(), now.plusSeconds(3600).toString(),
+                false));
+        deliver(game.session(), new GameOperation.BreakPlanned(game.ben().id(), now.plusSeconds(1800).toString(),
+                false));
+        long annaBreak = number("SELECT id FROM tc_game_breaks WHERE gamesessionid = ? AND memberid = ?",
+                game.session(), game.anna().id());
+        long benBreak = number("SELECT id FROM tc_game_breaks WHERE gamesessionid = ? AND memberid = ?",
+                game.session(), game.ben().id());
+        // Ben's break waits: its start passed while the game ran, so it lasts its full length from now (estimated).
+        execute("UPDATE tc_game_breaks SET state = 'waiting', plannedstart = ? WHERE id = ?", now.minusSeconds(10),
+                benBreak);
+        startGame(game.session());
+
+        // A fake joker moves the hunters to its coordinate.
+        var fake = anna.apply("joker").effect();
+        assertEquals(joker, anna.apply("joker").fakeReservationId());
+        assertEquals(new GameTimetableEffects.FakeJoker(joker, 46.5, 7.5), fake.fakeJoker());
+        assertNull(fake.pause());
+        assertEquals(List.of("players", "supporters"), fake.real());
+        assertEquals(List.of("hunters"), fake.fake());
+        assertEquals(List.of(), fake.withheld());
+        assertEquals(46.5, fake.latitude());
+        assertEquals(7.5, fake.longitude());
+        assertNull(entry(timetables, game.session(), result.slots().get("joker"), game.ben().id()).effect());
+        // A planned break of 10 minutes withholds the hunters inside its window.
+        var planned = new GameTimetableEffects.Break(annaBreak, GameState.PLANNED, now.plusSeconds(3600),
+                now.plusSeconds(4200), false);
+        var inside = anna.apply("break").effect();
+        assertEquals(planned, inside.pause());
+        assertNull(inside.fakeJoker());
+        assertEquals(List.of("players", "supporters"), inside.real());
+        assertEquals(List.of("hunters"), inside.withheld());
+        // A joker inside a planned break: the break wins, and the joker is listed (it is released at the start).
+        var both = anna.apply("both").effect();
+        assertEquals(planned, both.pause());
+        assertEquals(new GameTimetableEffects.FakeJoker(doomed, 46.5, 7.5), both.fakeJoker());
+        assertEquals(List.of(), both.real());
+        assertEquals(List.of(), both.fake());
+        assertEquals(List.of("hunters"), both.withheld());
+        assertNull(anna.apply("after").effect());
+        // A waiting break: from now for its full length, estimated; the coordinate still reaches the players.
+        var waiting = entry(timetables, game.session(), result.slots().get("soon"), game.ben().id()).effect();
+        assertEquals(new GameTimetableEffects.Break(benBreak, GameState.WAITING, now, now.plusSeconds(600), true),
+                waiting.pause());
+        assertEquals(List.of("supporters"), waiting.real());
+        assertEquals(List.of("players"), waiting.fake());
+        assertEquals(47.1, waiting.latitude());
+        assertEquals(List.of("hunters"), waiting.withheld());
+
+        // Jokers and breaks are no edits; members still see the pings of the operator's instructions.
+        assertEquals(revision, timetables.get(game.session()).revision());
+        assertEquals(pings, timetables.pings(game.anna()).stream().map(GameTimetableService.Ping::entryId).toList());
+        assertEquals(hunterSlots, timetables.hunterSlots(game.session()));
+        // Content and stored rows are unchanged.
+        assertEquals("2H", anna.apply("both").content());
+        assertEquals(List.of("47.1,8.5|2P", "p", "2P2H", "p", "2H", "p"),
+                strings("SELECT e.content FROM tc_game_timetable_entries e JOIN tc_game_timetable_slots s"
+                        + " ON s.id = e.slotid WHERE e.gamesessionid = ? ORDER BY s.scheduledat, e.memberid",
+                        game.session()));
+    }
+
+    @Test
     void theFakeCutoffIsFifteenSeconds() throws Exception {
         Game game = game();
         lease(game.session());
         Instant now = clock.instant();
-        var result = apply(game.session(), add("near", now.plusSeconds(20), cells(game.anna(), "")),
-                add("far", now.plusSeconds(40), cells(game.anna(), "")));
+        var result = apply(game.session(), add("near", now.plusSeconds(20), cells(game.anna(), "p")),
+                add("far", now.plusSeconds(40), cells(game.anna(), "p")));
         jokers.change(game.session(), new GameJokerService.Change(game.anna().id(), GameJokerRepository.FAKE_PING, 2,
                 null), "Operator");
         assertEquals(15, GameTimetableService.FAKE_CUTOFF_SECONDS);

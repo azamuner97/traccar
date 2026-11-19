@@ -263,8 +263,8 @@ public abstract class GameApiTest extends GameTestBase {
 
     @Test
     void operatorsManageSessionsMembersAndResources() throws Exception {
-        assertEquals(new GameSessionResource.Capabilities(11), sessionsApi.capabilities());
-        assertEquals(11, GameSessionService.API_VERSION);
+        assertEquals(new GameSessionResource.Capabilities(12), sessionsApi.capabilities());
+        assertEquals(12, GameSessionService.API_VERSION);
         String name = "api-" + UUID.randomUUID();
         JsonNode created = sessionsApi.create(new GameSessionResource.CreateRequest(name, 5, null,
                 json("{\"game_settings\": " + SETTINGS + "}")));
@@ -386,6 +386,19 @@ public abstract class GameApiTest extends GameTestBase {
         assertEquals("2H", timetable.get("slots").get(0).get("entries").get(0).get("content").asText());
         assertEquals(annaId, timetable.get("participants").get(0).get("memberId").asLong());
         assertEquals("stopped", timetable.get("execution").get("gameState").asText());
+        assertFalse(timetable.get("slots").get(0).get("entries").get(0).has("effect"));
+        // The operator read adds the effect of a break (or a fake joker) on a cell; the revision stays.
+        Instant breakStart = clock.instant();
+        long pause = insert("INSERT INTO tc_game_breaks (gamesessionid, memberid, state, startedat, deadline,"
+                + " plannedby, activememberid) VALUES (?, ?, 'active', ?, ?, 'operator', ?)", session, annaId,
+                breakStart, T0.plus(Duration.ofHours(2)), annaId);
+        JsonNode effect = sessionsApi.timetable(session).get("slots").get(0).get("entries").get(0).get("effect");
+        assertEquals(json("{\"fakeJoker\": null, \"break\": {\"breakId\": " + pause + ", \"state\": \"active\","
+                + " \"from\": \"" + breakStart + "\", \"until\": \"" + T0.plus(Duration.ofHours(2))
+                + "\", \"estimated\": false}, \"real\": [], \"fake\": [], \"withheld\": [\"hunters\"],"
+                + " \"latitude\": null, \"longitude\": null}").toString(), effect.toString());
+        assertEquals(1, sessionsApi.timetable(session).get("revision").asLong());
+        execute("DELETE FROM tc_game_breaks WHERE id = ?", pause);
         // A retry answers the recorded result; a rejection lists the failing changes (422).
         assertEquals(1, ((JsonNode) sessionsApi.timetableChanges(session, changeSet).getEntity()).get("revision")
                 .asLong());
@@ -580,7 +593,7 @@ public abstract class GameApiTest extends GameTestBase {
         grant(session, game.anna(), GameJokerRepository.FAKE_PING, 2);
         grant(session, game.ben(), GameJokerRepository.FAKE_PING, 1);
         timetable(timetables, session, List.of(game.anna(), game.ben()), row(T0.plus(Duration.ofHours(1)),
-                game.anna(), "", game.ben(), "b"));
+                game.anna(), "p", game.ben(), "b"));
 
         as(game.anna());
         JsonNode own = jokersApi.own();

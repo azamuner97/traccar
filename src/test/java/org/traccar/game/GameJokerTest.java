@@ -504,7 +504,7 @@ public abstract class GameJokerTest extends GameTestBase {
         GameMember hunter = bound(session, "hunter");
         Instant now = clock.instant();
         List<Long> slots = timetable(timetables, session, List.of(anna, ben),
-                row(now.plusSeconds(600), anna, "", ben, ""), row(now.plusSeconds(700), anna, "b"),
+                row(now.plusSeconds(600), anna, "p", ben, "p"), row(now.plusSeconds(700), anna, "b"),
                 row(now.plusSeconds(60), anna, "2H"), row(now.plusSeconds(900), anna, "2P2S2H"));
         long annaPing = entry(timetables, session, slots.get(0), anna.id()).id();
         long benPing = entry(timetables, session, slots.get(0), ben.id()).id();
@@ -562,8 +562,8 @@ public abstract class GameJokerTest extends GameTestBase {
         long session = running(SETTINGS);
         GameMember anna = bound(session, "player");
         Instant now = clock.instant();
-        List<Long> slots = timetable(timetables, session, List.of(anna), row(now.plusSeconds(300), anna, ""),
-                row(now.plusSeconds(3600), anna, ""));
+        List<Long> slots = timetable(timetables, session, List.of(anna), row(now.plusSeconds(300), anna, "p"),
+                row(now.plusSeconds(3600), anna, "p"));
         grant(session, anna, GameJokerRepository.FAKE_PING, 2);
         grant(session, anna, GameJokerRepository.BREAK, 1);
 
@@ -571,7 +571,7 @@ public abstract class GameJokerTest extends GameTestBase {
                 anna.id()).id())).id();
         timetables.changes(session, new GameTimetableService.ChangeSet("change-" + UUID.randomUUID(),
                 timetables.get(session).revision(), List.of(new GameTimetableService.Change(
-                        GameTimetableService.SET_CELL, null, slots.get(1), null, null, anna.id(), "x", null, null))));
+                        GameTimetableService.SET_CELL, null, slots.get(1), null, null, anna.id(), "2P", null, null))));
         requests.claim(session, request, EPOCH);
         assertStatus(400, () -> deliver(session, List.of(new GameRequestService.Completion(request,
                 GameRequest.SUCCEEDED, null, null))));

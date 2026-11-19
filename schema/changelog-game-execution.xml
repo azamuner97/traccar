@@ -65,7 +65,8 @@
       stay listed so their history remains visible.
     - tc_game_timetable_slots: the rows. activeat equals scheduledat unless the slot is removed, so the unique
       (gamesessionid, activeat) allows one live slot per time. Moving a slot changes only scheduledat.
-    - tc_game_timetable_entries: the cells. An absent cell has no entry; blank content is a real ping. Removed
+    - tc_game_timetable_entries: the cells. An absent cell has no entry, and so has a blank one (blank content is
+      no ping since game-execution-6-timetable-grammar; it used to be a real ping). Removed
       slots and cancelled entries are kept, because tc_game_fake_ping_plans references entries.
     - tc_game_timetable_changes: recorded changesets (changeId, request hash, result), so a retried changeset
       answers its recorded result.
@@ -367,6 +368,42 @@
   <changeSet author="traccar-tool" id="game-execution-6-controller-history">
     <sql>
       DELETE FROM tc_game_controller_history WHERE event IN ('executing', 'stoppedExecuting');
+    </sql>
+  </changeSet>
+
+  <!--
+    The timetable grammar (Claude outputs/timetable-instructions-effects-plan.md, 4, 11): blank is no ping and
+    stored as no entry, p pings everyone and x is no longer an instruction. Stored timetables were written in the
+    old grammar (blank meant everyone, x no ping), so every timetable is emptied, and is then unconfigured again:
+
+    1. timetable fakes are released the way game-execution-2-timetable-fakes does: their open requests end, their
+       reserved jokers return with a ledger row, and their plans are deleted (plans reference entries);
+    2. the changes, entries, slots, participants and headers of every timetable are deleted.
+
+    Users, devices, positions and the other game data stay. Plain DML, so a failure rolls it back as a whole.
+  -->
+  <changeSet author="traccar-tool" id="game-execution-6-timetable-grammar">
+    <sql>
+      UPDATE tc_game_requests SET status = 'cancelled', message = 'The timetable was replaced',
+          completedat = updatedat
+        WHERE status IN ('pending', 'approved', 'executing') AND id IN (SELECT r.requestid
+          FROM tc_game_joker_reservations r JOIN tc_game_fake_ping_plans p ON p.reservationid = r.id
+          WHERE p.timetableentryid IS NOT NULL AND r.requestid IS NOT NULL);
+      INSERT INTO tc_game_joker_ledger (gamesessionid, memberid, type, kind, quantity, requestid, reservationid,
+          actor, detail, occurredat)
+        SELECT r.gamesessionid, r.memberid, r.type, 'release', 1, r.requestid, r.id, NULL,
+            'The timetable was replaced', r.updatedat
+          FROM tc_game_joker_reservations r JOIN tc_game_fake_ping_plans p ON p.reservationid = r.id
+          WHERE p.timetableentryid IS NOT NULL AND r.status = 'reserved';
+      UPDATE tc_game_joker_reservations SET status = 'released'
+        WHERE status = 'reserved' AND id IN (SELECT reservationid FROM tc_game_fake_ping_plans
+          WHERE timetableentryid IS NOT NULL);
+      DELETE FROM tc_game_fake_ping_plans WHERE timetableentryid IS NOT NULL;
+      DELETE FROM tc_game_timetable_changes;
+      DELETE FROM tc_game_timetable_entries;
+      DELETE FROM tc_game_timetable_slots;
+      DELETE FROM tc_game_timetable_participants;
+      DELETE FROM tc_game_timetables;
     </sql>
   </changeSet>
 

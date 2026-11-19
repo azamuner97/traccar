@@ -1,24 +1,28 @@
 {
-  "description": "Timetable cell grammar (plan 1.2). Run by the server's TimetableInstructionTest and by the Tool's tests/domain/test_shared_timetable_vectors.py against parse_timetable_instruction and canonical_instruction. 'audiences' receive the real position, 'fakeAudiences' the coordinate; 'canonical' is the stored spelling.",
+  "description": "Timetable cell grammar (Claude outputs/timetable-instructions-effects-plan.md, 4). Run by the server's TimetableInstructionTest and by the Tool's tests/domain/test_shared_timetable_vectors.py against parse_timetable_instruction and canonical_instruction. Kinds: 'none' (blank: no ping, stored as no entry), 'real', 'coordinate', 'invalid'. 'audiences' receive the real position, 'fakeAudiences' the coordinate; 'canonical' is the stored spelling.",
   "cases": [
     {
-      "input": "x",
-      "kind": "skip",
-      "canonical": "x",
-      "fakeEligible": false,
-      "hunterFacing": false
-    },
-    {
-      "input": " X ",
-      "kind": "skip",
-      "canonical": "x",
-      "fakeEligible": false,
-      "hunterFacing": false
-    },
-    {
       "input": "",
-      "kind": "real",
+      "kind": "none",
       "canonical": "",
+      "audiences": [],
+      "fakeEligible": false,
+      "hunterFacing": false,
+      "note": "Blank is no ping; changesets store it as no entry"
+    },
+    {
+      "input": "   ",
+      "kind": "none",
+      "canonical": "",
+      "audiences": [],
+      "fakeEligible": false,
+      "hunterFacing": false,
+      "note": "Whitespace is blank: no ping"
+    },
+    {
+      "input": "p",
+      "kind": "real",
+      "canonical": "p",
       "audiences": [
         "hunters",
         "players",
@@ -28,9 +32,9 @@
       "hunterFacing": true
     },
     {
-      "input": "   ",
+      "input": " P ",
       "kind": "real",
-      "canonical": "",
+      "canonical": "p",
       "audiences": [
         "hunters",
         "players",
@@ -38,7 +42,22 @@
       ],
       "fakeEligible": true,
       "hunterFacing": true,
-      "note": "Whitespace is blank: a real ping, not an absent cell"
+      "note": "p is accepted in any letter case and stored in lower case"
+    },
+    {
+      "input": "x",
+      "kind": "invalid",
+      "error": "x is no longer an instruction",
+      "fakeEligible": false,
+      "hunterFacing": false,
+      "note": "x no longer means no ping; leave the cell blank"
+    },
+    {
+      "input": " X ",
+      "kind": "invalid",
+      "error": "x is no longer an instruction",
+      "fakeEligible": false,
+      "hunterFacing": false
     },
     {
       "input": "b",
@@ -363,6 +382,49 @@
       "note": "Target codes are accepted in any letter case and stored in upper case"
     },
     {
+      "input": "47.1,8.5|p",
+      "kind": "coordinate",
+      "canonical": "47.1,8.5|p",
+      "coordinate": [
+        47.1,
+        8.5
+      ],
+      "fakeAudiences": [
+        "hunters",
+        "players",
+        "supporters"
+      ],
+      "audiences": [],
+      "fakeEligible": false,
+      "hunterFacing": true,
+      "note": "|p sends the coordinate to everyone"
+    },
+    {
+      "input": "47.1,8.5 | P",
+      "kind": "coordinate",
+      "canonical": "47.1,8.5|p",
+      "coordinate": [
+        47.1,
+        8.5
+      ],
+      "fakeAudiences": [
+        "hunters",
+        "players",
+        "supporters"
+      ],
+      "audiences": [],
+      "fakeEligible": false,
+      "hunterFacing": true,
+      "note": "|p is accepted in any letter case and stored in lower case"
+    },
+    {
+      "input": "47.1,8.5|X",
+      "kind": "invalid",
+      "error": "x is no longer an instruction",
+      "fakeEligible": false,
+      "hunterFacing": false
+    },
+    {
       "input": "47.1,8.5|2P|2H",
       "kind": "invalid",
       "error": "use at most one '|' target separator",
@@ -379,7 +441,7 @@
     {
       "input": "47.1,8.5|x",
       "kind": "invalid",
-      "error": "'x' cannot be used as a coordinate target",
+      "error": "x is no longer an instruction",
       "fakeEligible": false,
       "hunterFacing": false
     },

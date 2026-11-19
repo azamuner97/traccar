@@ -30,7 +30,6 @@ public final class GameTimetableEvents {
     public static final String EXECUTION = "execution";
 
     /** Reasons of entries the runner never sent. */
-    public static final String SKIP = "skip";
     public static final String INVALID = "invalid";
     public static final String STOPPED = "stopped";
     public static final String ERROR = "error";
@@ -185,8 +184,6 @@ public final class GameTimetableEvents {
             if (outcome.jokerFake() != null && GameJokerRepository.CONSUMED.equals(outcome.jokerFake().status())) {
                 text.append(" Hunters received ").append(name).append("'s fake ping joker coordinate.");
             }
-        } else if (SKIP.equals(reason)) {
-            text.append("Skipped ").append(name);
         } else {
             text.append(GamePingEngine.FAILED.equals(status) ? "Nothing uploaded for " : "Skipped ").append(name)
                     .append(content.isEmpty() ? "" : " (" + content + ")").append(": ").append(reasonText(reason));

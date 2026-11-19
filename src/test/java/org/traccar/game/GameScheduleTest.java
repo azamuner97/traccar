@@ -141,12 +141,12 @@ public abstract class GameScheduleTest extends GameTestBase {
         GameMember hunter = plan(session, "hunter");
         Instant now = clock.instant().plusSeconds(8000);
         timetable(timetables, session, List.of(anna, ben),
-                row(now.minusSeconds(600), anna, ""),
-                row(now.minusSeconds(7200), anna, ""),
+                row(now.minusSeconds(600), anna, "p"),
+                row(now.minusSeconds(7200), anna, "p"),
                 row(now.plusSeconds(10), anna, "2H"),
                 row(now.plusSeconds(600), anna, "b", ben, "47.1,8.5|2P"),
                 row(now.plusSeconds(900), anna, "2P2S"),
-                row(now.plusSeconds(1200), anna, "", ben, "x"));
+                row(now.plusSeconds(1200), anna, "p", ben, ""));
         Instant start = clock.instant();
         clock.set(now);
         try {

@@ -114,6 +114,12 @@ public abstract class GameTimetableRunnerTest extends GameTestBase {
                 member.id());
     }
 
+    /** Stores content no changeset accepts, as a database written by another version could hold. */
+    private void invalidate(long slot, GameMember member) throws Exception {
+        execute("UPDATE tc_game_timetable_entries SET content = 'x' WHERE slotid = ? AND memberid = ?", slot,
+                member.id());
+    }
+
     private String slotState(long slot) throws Exception {
         return text("SELECT state FROM tc_game_timetable_slots WHERE id = ?", slot);
     }
@@ -145,7 +151,9 @@ public abstract class GameTimetableRunnerTest extends GameTestBase {
         GameMember ben = game.member(1);
         GameMember cleo = game.member(2);
         GameMember dana = game.member(3);
-        long slot = rows(game, row(T0.plusSeconds(60), anna, "", ben, "2H", cleo, "x", dana, "b")).getFirst();
+        long slot = rows(game, row(T0.plusSeconds(60), anna, "p", ben, "2H", cleo, "p", dana, "b")).getFirst();
+        // Changesets store only valid cells: invalid content (here the old "no ping" x) is skipped when claimed.
+        invalidate(slot, cleo);
         trackerPosition(anna.trackerId(), 46.0, 7.0, T0.minusSeconds(100));
         trackerPosition(dana.trackerId(), 46.1, 7.1, T0.plusSeconds(45));
         enable(game, true);
@@ -158,7 +166,7 @@ public abstract class GameTimetableRunnerTest extends GameTestBase {
         advanceTo(T0.plusSeconds(60));
         assertEquals(GameTimetableRepository.CLAIMED, slotState(slot));
         assertEquals(List.of("slotStarted", "ping", "ping"), types());
-        assertEquals("skip", ping(cleo).get("reason").asText());
+        assertEquals(GameTimetableEvents.INVALID, ping(cleo).get("reason").asText());
         // Dana's fix is fresh already (within the 20 s window): sent at once, to players and supporters only.
         assertEquals("sent", ping(dana).get("status").asText());
         assertArrayEquals(new double[] {46.1, 7.1}, latest(game.mirror(dana, "players")));
@@ -208,7 +216,7 @@ public abstract class GameTimetableRunnerTest extends GameTestBase {
     void aStartedEntryIsNeverSkippedForBeingLate() throws Exception {
         Game game = game(1);
         GameMember anna = game.member(0);
-        long slot = rows(game, row(T0.plusSeconds(60), anna, "")).getFirst();
+        long slot = rows(game, row(T0.plusSeconds(60), anna, "p")).getFirst();
         trackerPosition(anna.trackerId(), 46.0, 7.0, T0.minusSeconds(100));
         enable(game, true);
         startRunner();
@@ -230,8 +238,8 @@ public abstract class GameTimetableRunnerTest extends GameTestBase {
     void slotsDueWhileTheGameIsStoppedAreMissedAndStoppingSkipsWaitingEntries() throws Exception {
         Game game = game(1);
         GameMember anna = game.member(0);
-        List<Long> slots = rows(game, row(T0.plusSeconds(60), anna, ""), row(T0.plusSeconds(300), anna, ""),
-                row(T0.plusSeconds(400), anna, ""));
+        List<Long> slots = rows(game, row(T0.plusSeconds(60), anna, "p"), row(T0.plusSeconds(300), anna, "p"),
+                row(T0.plusSeconds(400), anna, "p"));
         long fake = armFake(game.session(), anna, entry(timetables, game.session(), slots.get(0), anna.id()).id(),
                 46.5, 7.5);
         long waitingFake = armFake(game.session(), anna, entry(timetables, game.session(), slots.get(1), anna.id())
@@ -278,8 +286,8 @@ public abstract class GameTimetableRunnerTest extends GameTestBase {
         Game game = game(2);
         GameMember anna = game.member(0);
         GameMember ben = game.member(1);
-        List<Long> slots = rows(game, row(T0.plusSeconds(60), anna, "", ben, ""), row(T0.plusSeconds(120), anna,
-                ""));
+        List<Long> slots = rows(game, row(T0.plusSeconds(60), anna, "p", ben, "p"), row(T0.plusSeconds(120), anna,
+                "p"));
         trackerPosition(ben.trackerId(), 46.2, 7.2, T0.plusSeconds(50));
         startGame(game.session());
         startRunner();
@@ -313,8 +321,8 @@ public abstract class GameTimetableRunnerTest extends GameTestBase {
         Game game = game(2);
         GameMember anna = game.member(0);
         GameMember ben = game.member(1);
-        List<Long> slots = rows(game, row(T0.plusSeconds(60), anna, "", ben, ""), row(T0.plusSeconds(200), anna,
-                "", ben, "x"));
+        List<Long> slots = rows(game, row(T0.plusSeconds(60), anna, "p", ben, "p"), row(T0.plusSeconds(200), anna,
+                "p", ben, "p"));
         trackerPosition(anna.trackerId(), 46.0, 7.0, T0.plusSeconds(55));
         trackerPosition(ben.trackerId(), 46.1, 7.1, T0.plusSeconds(55));
         enable(game, true);
@@ -347,8 +355,8 @@ public abstract class GameTimetableRunnerTest extends GameTestBase {
         Game game = game(1);
         Game other = game(1);
         GameMember anna = game.member(0);
-        long slot = rows(game, row(T0.plusSeconds(60), anna, "")).getFirst();
-        long otherSlot = rows(other, row(T0.plusSeconds(60), other.member(0), "")).getFirst();
+        long slot = rows(game, row(T0.plusSeconds(60), anna, "p")).getFirst();
+        long otherSlot = rows(other, row(T0.plusSeconds(60), other.member(0), "p")).getFirst();
         trackerPosition(anna.trackerId(), 46.0, 7.0, T0.plusSeconds(50));
         enable(game, true);
         enable(other, true);
@@ -394,8 +402,9 @@ public abstract class GameTimetableRunnerTest extends GameTestBase {
         GameMember eli = game.member(4);
         GameMember finn = game.member(5);
         GameMember gus = game.member(6);
-        long slot = rows(game, row(T0.plusSeconds(60), anna, "", ben, "2H", cleo, "", dana, "", eli, "", finn,
-                "x", gus, "47.0,8.0|2H")).getFirst();
+        long slot = rows(game, row(T0.plusSeconds(60), anna, "p", ben, "2H", cleo, "p", dana, "p", eli, "p", finn,
+                "p", gus, "47.0,8.0|2H")).getFirst();
+        invalidate(slot, finn);
         for (GameMember member : List.of(anna, ben, dana, eli, finn, gus)) {
             trackerPosition(member.trackerId(), 46.9, 7.4, T0.plusSeconds(50));
         }
@@ -412,7 +421,7 @@ public abstract class GameTimetableRunnerTest extends GameTestBase {
                 cleo.id(), "failed/noPosition",
                 dana.id(), "skipped/caught",
                 eli.id(), "failed/noMirror",
-                finn.id(), "skipped/skip",
+                finn.id(), "skipped/invalid",
                 gus.id(), "sent"), Map.of(
                 anna.id(), outcome(slot, anna), ben.id(), outcome(slot, ben), cleo.id(), outcome(slot, cleo),
                 dana.id(), outcome(slot, dana), eli.id(), outcome(slot, eli), finn.id(), outcome(slot, finn),
@@ -437,7 +446,7 @@ public abstract class GameTimetableRunnerTest extends GameTestBase {
         // test_execution.py: test_logs_name_only_what_is_sent_during_a_break.
         Game game = game(2);
         GameMember anna = game.member(0);
-        List<Long> slots = rows(game, row(T0.plusSeconds(60), anna, ""), row(T0.plusSeconds(120), anna, "2H"),
+        List<Long> slots = rows(game, row(T0.plusSeconds(60), anna, "p"), row(T0.plusSeconds(120), anna, "2H"),
                 row(T0.plusSeconds(180), anna, "47.0,8.0"), row(T0.plusSeconds(240), anna, "47.0,8.0|2P"));
         trackerPosition(anna.trackerId(), 46.9, 7.4, T0.plusSeconds(500));
         onBreak(game.session(), anna, T0.plusSeconds(3600));
@@ -470,8 +479,8 @@ public abstract class GameTimetableRunnerTest extends GameTestBase {
         Game game = game(2);
         GameMember anna = game.member(0);
         GameMember ben = game.member(1);
-        List<Long> slots = rows(game, row(T0.plusSeconds(60), anna, ""), row(T0.plusSeconds(120), anna, ""),
-                row(T0.plusSeconds(180), ben, ""));
+        List<Long> slots = rows(game, row(T0.plusSeconds(60), anna, "p"), row(T0.plusSeconds(120), anna, "p"),
+                row(T0.plusSeconds(180), ben, "p"));
         long used = armFake(game.session(), anna, entry(timetables, game.session(), slots.get(0), anna.id()).id(),
                 46.5, 7.5);
         long inBreak = armFake(game.session(), anna, entry(timetables, game.session(), slots.get(1), anna.id()).id(),
@@ -491,13 +500,30 @@ public abstract class GameTimetableRunnerTest extends GameTestBase {
                 "Hunters received " + anna.displayName() + "'s fake ping joker coordinate")));
         assertEquals(Set.of(anna.id()), publisher.topic(GamePublisher.JOKERS).getLast().members());
         // A break withholds the hunters, so the fake is released; so is one whose ping has no position.
-        onBreak(game.session(), anna, T0.plusSeconds(3600));
+        long pause = onBreak(game.session(), anna, T0.plusSeconds(3600));
+        Instant breakStart = clock.instant();
         advanceTo(T0.plusSeconds(150));
         assertEquals(GameJokerRepository.RELEASED, reservationStatus(inBreak));
         assertEquals("released", ping(anna).get("fake").get("status").asText());
         advanceTo(T0.plusSeconds(211));
         assertEquals(GameTimetableRepository.FAILED, status(slots.get(2), ben));
         assertEquals(GameJokerRepository.RELEASED, reservationStatus(noPosition));
+
+        // The operator read derives finished cells' effects from what is stored: the used fake ...
+        var usedEffect = entry(timetables, game.session(), slots.get(0), anna.id()).effect();
+        assertEquals(new GameTimetableEffects.FakeJoker(used, 46.5, 7.5), usedEffect.fakeJoker());
+        assertNull(usedEffect.pause());
+        assertEquals(List.of("players", "supporters"), usedEffect.real());
+        assertEquals(List.of("hunters"), usedEffect.fake());
+        assertEquals(46.5, usedEffect.latitude());
+        // ... and reason break, with the break that withheld the hunters; a released fake is no effect.
+        var breakEffect = entry(timetables, game.session(), slots.get(1), anna.id()).effect();
+        assertNull(breakEffect.fakeJoker());
+        assertEquals(new GameTimetableEffects.Break(pause, GameState.ACTIVE, breakStart, T0.plusSeconds(3600),
+                false), breakEffect.pause());
+        assertEquals(List.of("players", "supporters"), breakEffect.real());
+        assertEquals(List.of("hunters"), breakEffect.withheld());
+        assertNull(entry(timetables, game.session(), slots.get(2), ben.id()).effect());
     }
 
     @Test
@@ -505,7 +531,7 @@ public abstract class GameTimetableRunnerTest extends GameTestBase {
         // test_services.py: test_row_processor_rechecks_caught_state_after_async_fetch.
         Game game = game(1);
         GameMember anna = game.member(0);
-        long slot = rows(game, row(T0.plusSeconds(60), anna, "")).getFirst();
+        long slot = rows(game, row(T0.plusSeconds(60), anna, "p")).getFirst();
         enable(game, true);
         startGame(game.session());
         startRunner();
@@ -522,7 +548,7 @@ public abstract class GameTimetableRunnerTest extends GameTestBase {
     void theSettingsSetTheFreshnessWindowAndTheWait() throws Exception {
         Game game = game(1, "{\"timetable_freshness_window_seconds\": 5, \"timetable_fresh_fix_wait_seconds\": 10}");
         GameMember anna = game.member(0);
-        long slot = rows(game, row(T0.plusSeconds(60), anna, "")).getFirst();
+        long slot = rows(game, row(T0.plusSeconds(60), anna, "p")).getFirst();
         // 10 s before the slot is older than a 5 s window: Anna's ping waits, but only 10 s.
         trackerPosition(anna.trackerId(), 46.0, 7.0, T0.plusSeconds(50));
         enable(game, true);

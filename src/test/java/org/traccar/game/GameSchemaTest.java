@@ -539,6 +539,93 @@ public abstract class GameSchemaTest {
         }
     }
 
+    @Test
+    void theNewGrammarEmptiesTheTimetablesAndReturnsTheirFakes() throws Exception {
+        // timetable-instructions-effects-plan.md, 11: timetables written in the old grammar (blank was a real
+        // ping, x no ping) are emptied; their fakes are released the way game-execution-2-timetable-fakes does.
+        DataSource database = database(false);
+        GameSchemaFixture.executionBefore(database, "game-execution-6-timetable-grammar");
+        long session;
+        long armed;
+        long requested;
+        long request;
+        long used;
+        long speedhunt;
+        try (Connection connection = database.getConnection()) {
+            session = session(connection);
+            long anna = player(connection, session, 1);
+            long ben = player(connection, session, 2);
+            execute(connection, "INSERT INTO tc_game_timetables (gamesessionid, revision, enabled, updatedat)"
+                    + " VALUES (?, 3, FALSE, ?)", session, T0);
+            insert(connection, PARTICIPANT, session, anna, 0);
+            insert(connection, PARTICIPANT, session, ben, 1);
+            long done = insert(connection, SLOT, session, T0, "done", T0);
+            long next = insert(connection, SLOT, session, T0.plusSeconds(60), "scheduled", T0.plusSeconds(60));
+            long sent = insert(connection, ENTRY, session, done, anna, "sent");
+            long blank = insert(connection, ENTRY, session, next, anna, "scheduled");
+            long skip = insert(connection, ENTRY, session, next, ben, "scheduled");
+            execute(connection, "UPDATE tc_game_timetable_entries SET content = 'x' WHERE id = ?", skip);
+            execute(connection, "INSERT INTO tc_game_timetable_changes (gamesessionid, changeid, requesthash, result,"
+                    + " createdat) VALUES (?, 'change-old-1', 'hash', '{}', ?)", session, T0);
+            armed = reservation(connection, session, anna, "fakePing");
+            insert(connection, FAKE_PLAN, armed, session, anna, blank, null, null, blank, null);
+            request = insert(connection, "INSERT INTO tc_game_requests (gamesessionid, type, requestermemberid,"
+                    + " requesterrole, targetmemberid, parameters, status, createdat, updatedat)"
+                    + " VALUES (?, 'jokerFakePing', ?, 'player', ?, '{}', 'pending', ?, ?)",
+                    session, ben, ben, T0, T0);
+            requested = insert(connection, "INSERT INTO tc_game_joker_reservations (gamesessionid, memberid, type,"
+                    + " requestid, status, overallocated, createdat, updatedat)"
+                    + " VALUES (?, ?, 'fakePing', ?, 'reserved', FALSE, ?, ?)", session, ben, request, T0, T0);
+            insert(connection, FAKE_PLAN, requested, session, ben, skip, null, null, skip, null);
+            used = reservation(connection, session, anna, "fakePing");
+            execute(connection, "UPDATE tc_game_joker_reservations SET status = 'consumed' WHERE id = ?", used);
+            insert(connection, FAKE_PLAN, used, session, anna, sent, null, null, null, null);
+            speedhunt = reservation(connection, session, anna, "fakePing");
+            insert(connection, FAKE_PLAN, speedhunt, session, anna, null, 2, null, null, null);
+        }
+        GameSchemaFixture.apply(database, GameSchemaFixture.MASTER);
+        try (Connection connection = database.getConnection()) {
+            for (String table : List.of("tc_game_timetables", "tc_game_timetable_entries", "tc_game_timetable_slots",
+                    "tc_game_timetable_participants", "tc_game_timetable_changes")) {
+                assertEquals(0, number(connection, "SELECT COUNT(*) FROM " + table), table);
+            }
+            assertEquals(List.of(speedhunt), longs(connection, "SELECT reservationid FROM tc_game_fake_ping_plans"
+                    + " WHERE gamesessionid = ?", session));
+            for (long reservation : List.of(armed, requested)) {
+                assertEquals(1, number(connection, "SELECT COUNT(*) FROM tc_game_joker_reservations"
+                        + " WHERE id = ? AND status = 'released'", reservation));
+                assertEquals(1, number(connection, "SELECT COUNT(*) FROM tc_game_joker_ledger"
+                        + " WHERE reservationid = ? AND kind = 'release'", reservation));
+            }
+            // A used fake stays used; the speedhunt fake is not the timetable's.
+            assertEquals(1, number(connection, "SELECT COUNT(*) FROM tc_game_joker_reservations"
+                    + " WHERE id = ? AND status = 'consumed'", used));
+            assertEquals(1, number(connection, "SELECT COUNT(*) FROM tc_game_joker_reservations"
+                    + " WHERE id = ? AND status = 'reserved'", speedhunt));
+            assertEquals(0, number(connection, "SELECT COUNT(*) FROM tc_game_joker_ledger WHERE reservationid IN"
+                    + " (?, ?)", used, speedhunt));
+            assertEquals(1, number(connection, "SELECT COUNT(*) FROM tc_game_requests WHERE id = ?"
+                    + " AND status = 'cancelled' AND message = 'The timetable was replaced'"
+                    + " AND completedat IS NOT NULL", request));
+            // Members and the session stay.
+            assertEquals(2, number(connection, "SELECT COUNT(*) FROM tc_game_session_members WHERE gamesessionid = ?",
+                    session));
+        }
+    }
+
+    private static List<Long> longs(Connection connection, String sql, Object... params) throws SQLException {
+        List<Long> result = new java.util.ArrayList<>();
+        try (PreparedStatement statement = connection.prepareStatement(sql)) {
+            bind(statement, params);
+            try (ResultSet rows = statement.executeQuery()) {
+                while (rows.next()) {
+                    result.add(rows.getLong(1));
+                }
+            }
+        }
+        return result;
+    }
+
     private static List<String> historyEvents(Connection connection) throws SQLException {
         List<String> events = new java.util.ArrayList<>();
         try (var statement = connection.prepareStatement("SELECT event FROM tc_game_controller_history ORDER BY id");

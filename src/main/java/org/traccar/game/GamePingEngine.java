@@ -251,12 +251,12 @@ public class GamePingEngine {
         List<String> fake = ordered(fakeAudiences);
         List<String> withheld = List.of();
         if (state.sourceOnBreak()) {
-            // A break withholds the hunters from the participant's pings, real or fake.
-            if (real.contains(TimetableInstruction.HUNTERS) || fake.contains(TimetableInstruction.HUNTERS)) {
-                withheld = List.of(TimetableInstruction.HUNTERS);
-            }
-            real = without(real, Set.copyOf(withheld));
-            fake = without(fake, Set.copyOf(withheld));
+            // A break withholds the hunters from the participant's pings, real or fake: the same step the
+            // timetable's effects show (GameTimetableEffects).
+            GameTimetableEffects.Audiences kept = GameTimetableEffects.withhold(real, fake);
+            real = kept.real();
+            fake = kept.fake();
+            withheld = kept.withheld();
             if (real.isEmpty() && fake.isEmpty()) {
                 return new Decision(SKIPPED, BREAK, List.of(), List.of(), withheld, false, false, null);
             }

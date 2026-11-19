@@ -79,7 +79,7 @@ public abstract class GamePingEngineTest extends GameTestBase {
         }
         long reservation = 0;
         if (state.get("jokerFake").asBoolean()) {
-            long slot = timetable(timetables, session, List.of(source), row(T0.plusSeconds(600), source, ""))
+            long slot = timetable(timetables, session, List.of(source), row(T0.plusSeconds(600), source, "p"))
                     .getFirst();
             reservation = armFake(session, source, entry(timetables, session, slot, source.id()).id(), 1.5, 2.5);
         }
@@ -271,7 +271,7 @@ public abstract class GamePingEngineTest extends GameTestBase {
         Game game = game();
         trackerPosition(game.anna().trackerId(), REAL_LAT, REAL_LON, T0);
         long slot = timetable(timetables, game.session(), List.of(game.anna()), row(T0.plusSeconds(600),
-                game.anna(), "")).getFirst();
+                game.anna(), "p")).getFirst();
         long fake = armFake(game.session(), game.anna(), entry(timetables, game.session(), slot, game.anna().id())
                 .id(), 1.5, 2.5);
         long positions = number("SELECT COUNT(*) FROM tc_positions");

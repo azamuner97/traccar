@@ -10,6 +10,7 @@ import jakarta.inject.Inject;
 import jakarta.inject.Singleton;
 import jakarta.ws.rs.WebApplicationException;
 
+import java.sql.SQLException;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -138,13 +139,55 @@ public class GameBreakRunner implements GameExecutionRunner<GameBreakRunner.Work
      * and the break waited while it ran or the start is no older than the grace.
      */
     static boolean onTime(GameTransaction transaction, long sessionId, GameState.Break pause, Instant now)
-            throws Exception {
+            throws SQLException {
         Instant limit = pause.plannedStart().plusSeconds(START_GRACE_SECONDS);
         Instant since = GameExecutionService.runningSince(transaction, sessionId).orElse(null);
         if (since == null || since.isAfter(limit)) {
             return false;
         }
         return GameState.WAITING.equals(pause.state()) || !now.isAfter(limit);
+    }
+
+    /**
+     * When a break protects its member, as these rules will run it ({@code from} inclusive, {@code until}
+     * exclusive); {@code estimated} when its start is not known yet. Used for the timetable's effects
+     * ({@link GameTimetableEffects}).
+     */
+    public record Window(Instant from, Instant until, boolean estimated) {
+        public boolean contains(Instant time) {
+            return !time.isBefore(from) && time.isBefore(until);
+        }
+    }
+
+    /**
+     * The window of a current break at {@code now}, or null when it protects nobody from now on:
+     * <ul>
+     * <li>active: from its start to its {@code deadline} (none once the deadline passed);</li>
+     * <li>planned, start ahead: from {@code plannedStart} for {@code breakMinutes};</li>
+     * <li>planned or waiting, start passed and on time ({@code onTime}, see {@link #onTime}): it starts as soon as it
+     * can and lasts its full length, from now, estimated;</li>
+     * <li>planned or waiting, start passed late (the game was not running): from now to its planned end, none once
+     * that end passed (the break is missed).</li>
+     * </ul>
+     * A pending break has no window while {@code breakMinutes} is null, because it can't start.
+     */
+    public static Window window(GameState.Break pause, Double breakMinutes, Instant now, boolean onTime) {
+        if (pause.active()) {
+            return pause.deadline() != null && pause.deadline().isAfter(now)
+                    ? new Window(pause.startedAt(), pause.deadline(), false) : null;
+        }
+        if (!pause.pending() || breakMinutes == null) {
+            return null;
+        }
+        long seconds = GameSettings.breakSeconds(breakMinutes);
+        if (pause.plannedStart().isAfter(now)) {
+            return new Window(pause.plannedStart(), pause.plannedStart().plusSeconds(seconds), false);
+        }
+        if (onTime) {
+            return new Window(now, now.plusSeconds(seconds), true);
+        }
+        Instant plannedEnd = pause.plannedStart().plusSeconds(seconds);
+        return plannedEnd.isAfter(now) ? new Window(now, plannedEnd, false) : null;
     }
 
     private void start(long sessionId, long breakId) throws Exception {

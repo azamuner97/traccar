@@ -11,7 +11,7 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * The timetable cell grammar (plan 1.2) against the shared vectors {@code timetable-instructions.json}, which the
+ * The timetable cell grammar (timetable-instructions-effects-plan.md, 4) against the shared vectors {@code timetable-instructions.json}, which the
  * Tool's suite runs against {@code parse_timetable_instruction}.
  */
 public class TimetableInstructionTest {
@@ -36,6 +36,7 @@ public class TimetableInstructionTest {
             assertEquals(item.get("canonical").asText(), instruction.canonical(), input);
             // The canonical spelling parses to itself.
             assertEquals(instruction, TimetableInstruction.parse(instruction.canonical()), input);
+            assertEquals(kind.equals("none"), instruction.none(), input);
             assertEquals(GameVectors.strings(item.get("audiences")), instruction.audiences(), input);
             if (kind.equals("coordinate")) {
                 assertEquals(item.get("coordinate").get(0).asDouble(), instruction.latitude(), input);
@@ -48,7 +49,12 @@ public class TimetableInstructionTest {
     @Test
     void cellsAreLimitedAndCodesNameTheirAudiences() {
         assertFalse(TimetableInstruction.parse("x".repeat(513)).valid());
-        assertTrue(TimetableInstruction.parse(null).fakeEligible());
+        assertTrue(TimetableInstruction.parse(null).none());
+        assertFalse(TimetableInstruction.parse(null).fakeEligible());
+        assertTrue(TimetableInstruction.parse("p").fakeEligible());
+        assertFalse(TimetableInstruction.parse("x").valid());
+        assertFalse(TimetableInstruction.parse("47.1,8.5|x").valid());
+        assertFalse(TimetableInstruction.parse("47.1,8.5|b").valid());
         assertEquals("2P2S2H", TimetableInstruction.code(TimetableInstruction.AUDIENCES));
         assertEquals("-", TimetableInstruction.code(List.of()));
         assertEquals("2S2H", TimetableInstruction.code(List.of("supporters", "hunters")));

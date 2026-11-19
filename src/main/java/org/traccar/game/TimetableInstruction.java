@@ -16,24 +16,27 @@ import java.util.regex.Pattern;
 
 /**
  * One timetable cell, parsed by the grammar of the Tool's {@code parse_timetable_instruction}
- * ({@code domain/timetable.py}, plan 1.2):
+ * ({@code domain/timetable.py}; Claude outputs/timetable-instructions-effects-plan.md, 4):
  * <ul>
- * <li>{@code x}: no ping;</li>
- * <li>blank: the real position to hunters, players and supporters;</li>
+ * <li>blank or whitespace: no ping ({@link Kind#NONE}). Changesets store a blank cell as no entry, so a stored entry
+ * is never blank;</li>
+ * <li>{@code p}: the real position to hunters, players and supporters;</li>
  * <li>{@code b}: the real position to players and supporters (break mode);</li>
  * <li>a target code ({@code 2H}, {@code 2S}, {@code 2S2H}, {@code 2P}, {@code 2P2H}, {@code 2P2S},
  * {@code 2P2S2H}): the real position to the code's audiences;</li>
  * <li>{@code lat,lon} or {@code lat,lon|code}: the coordinate as a fake to the code's audiences (default
- * {@code 2H}), and the real position to the remaining audiences.</li>
+ * {@code 2H}; {@code p} names all three), and the real position to the remaining audiences;</li>
+ * <li>anything else is invalid, including {@code x} (formerly "no ping"), {@code lat,lon|x} and
+ * {@code lat,lon|b}.</li>
  * </ul>
  * Content is trimmed. Unlike the Tool, the server also accepts lowercase target codes and stores every valid cell
- * in its canonical spelling ({@code X} → {@code x}, {@code 2h} → {@code 2H}, {@code 47.1 , 8.5 | 2p} →
- * {@code 47.1,8.5|2P}); coordinate numbers keep their digits.
+ * in its canonical spelling ({@code P} → {@code p}, {@code 2h} → {@code 2H}, {@code 47.1 , 8.5 | 2p} →
+ * {@code 47.1,8.5|2P}, {@code 47.1,8.5|P} → {@code 47.1,8.5|p}); coordinate numbers keep their digits.
  */
 public record TimetableInstruction(Kind kind, String canonical, List<String> audiences, Double latitude,
                                    Double longitude, List<String> fakeAudiences, String error) {
 
-    public enum Kind { SKIP, REAL, COORDINATE, INVALID }
+    public enum Kind { NONE, REAL, COORDINATE, INVALID }
 
     public static final String HUNTERS = "hunters";
     public static final String PLAYERS = "players";
@@ -41,6 +44,10 @@ public record TimetableInstruction(Kind kind, String canonical, List<String> aud
     /** Audiences in delivery order: hunters first, then players, then supporters (the Tool's order). */
     public static final List<String> AUDIENCES = List.of(HUNTERS, PLAYERS, SUPPORTERS);
     public static final int MAX_LENGTH = 512;
+
+    /** The real ping to everyone, and the coordinate target naming everyone. */
+    public static final String ALL = "p";
+    static final String X_REMOVED = "x is no longer an instruction; leave the cell blank for no ping";
 
     private static final String SEPARATOR = "|";
     private static final Pattern COMPONENT = Pattern.compile("[+-]?(?:[0-9]+(?:\\.[0-9]*)?|\\.[0-9]+)");
@@ -96,18 +103,22 @@ public record TimetableInstruction(Kind kind, String canonical, List<String> aud
         return new TimetableInstruction(Kind.REAL, canonical, audiences, null, null, List.of(), null);
     }
 
-    /** Parses one cell; null reads as blank. */
+    /** Parses one cell; null reads as blank (no ping). */
     public static TimetableInstruction parse(String value) {
         String normalized = value == null ? "" : value.strip();
         if (normalized.length() > MAX_LENGTH) {
             return new TimetableInstruction(Kind.INVALID, normalized, List.of(), null, null, List.of(),
                     "a timetable cell has at most " + MAX_LENGTH + " characters");
         }
-        if (normalized.equalsIgnoreCase("x")) {
-            return new TimetableInstruction(Kind.SKIP, "x", List.of(), null, null, List.of(), null);
-        }
         if (normalized.isEmpty()) {
-            return real("", AUDIENCES);
+            return new TimetableInstruction(Kind.NONE, "", List.of(), null, null, List.of(), null);
+        }
+        if (normalized.equalsIgnoreCase(ALL)) {
+            return real(ALL, AUDIENCES);
+        }
+        if (normalized.equalsIgnoreCase("x")) {
+            return new TimetableInstruction(Kind.INVALID, normalized, List.of(), null, null, List.of(),
+                    "timetable value '" + normalized + "': " + X_REMOVED);
         }
         if (normalized.equalsIgnoreCase("b")) {
             return real("b", List.of(PLAYERS, SUPPORTERS));
@@ -132,7 +143,7 @@ public record TimetableInstruction(Kind kind, String canonical, List<String> aud
                 return invalid(normalized, "the target code after '|' is empty");
             }
             if (targetValue.equalsIgnoreCase("x")) {
-                return invalid(normalized, "'x' cannot be used as a coordinate target");
+                return invalid(normalized, X_REMOVED + " ('x' cannot be used as a coordinate target)");
             }
             if (targetValue.equalsIgnoreCase("b")) {
                 return invalid(normalized, "break mode 'b' cannot be used as a coordinate target");
@@ -158,7 +169,8 @@ public record TimetableInstruction(Kind kind, String canonical, List<String> aud
         if (longitude < -180 || longitude > 180) {
             return invalid(normalized, "longitude must be between -180 and 180");
         }
-        List<String> fake = audiencesOf(targetValue);
+        boolean all = targetValue.equalsIgnoreCase(ALL);
+        List<String> fake = all ? AUDIENCES : audiencesOf(targetValue);
         if (fake == null) {
             return invalid(normalized, "target code '" + targetValue + "' is not supported");
         }
@@ -169,7 +181,7 @@ public record TimetableInstruction(Kind kind, String canonical, List<String> aud
             }
         }
         String canonical = latitudeText + "," + longitudeText
-                + (explicitTarget ? SEPARATOR + targetValue.toUpperCase(Locale.ROOT) : "");
+                + (explicitTarget ? SEPARATOR + (all ? ALL : targetValue.toUpperCase(Locale.ROOT)) : "");
         return new TimetableInstruction(Kind.COORDINATE, canonical, List.copyOf(rest), latitude, longitude, fake,
                 null);
     }
@@ -178,13 +190,14 @@ public record TimetableInstruction(Kind kind, String canonical, List<String> aud
         return kind != Kind.INVALID;
     }
 
-    public boolean skip() {
-        return kind == Kind.SKIP;
+    /** Whether the cell sends nothing: blank. */
+    public boolean none() {
+        return kind == Kind.NONE;
     }
 
     /**
-     * Whether a fake-ping joker can replace this cell: it sends the real position to the hunters (blank or a target
-     * code with hunters). Not {@code x}, {@code b}, coordinates or codes without hunters.
+     * Whether a fake-ping joker can replace this cell: it sends the real position to the hunters ({@code p} or a
+     * target code with hunters). Not blank, {@code b}, coordinates or codes without hunters.
      */
     public boolean fakeEligible() {
         return kind == Kind.REAL && audiences.contains(HUNTERS);

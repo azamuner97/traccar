@@ -84,7 +84,7 @@ tags:
   - name: Game Sessions
     description: >-
       Sessions, settings, members, resource rows, documents (including the device list), timetable and logs
-      (operators only). The game endpoints describe game data model 2 (game-session API version 11): each
+      (operators only). The game endpoints describe game data model 2 (game-session API version 12): each
       participant is a member with a stable ID, typed tables hold the game state, and the server computes every
       member's status. Operators are Traccar
       administrators. Members are resolved from the caller's account; an account without membership gets 403 from
@@ -3977,7 +3977,7 @@ paths:
   /game-sessions/capabilities:
     get:
       operationId: getGameCapabilities
-      summary: The game-session API version (11)
+      summary: The game-session API version (12)
       tags: [Game Sessions]
       responses:
         '200':
@@ -4772,7 +4772,9 @@ paths:
         frozenUntil is serverTime plus the 15 s freeze horizon: slots due before it can't change. execution.lastEventId
         is the newest execution event of the session; the Tool catches up with GET logs?events=true&after=<id> when it
         is newer than the one it showed. Removed slots and cancelled (absent) cells are not listed. A claimed slot's
-        cells read scheduled until their outcome.
+        cells read scheduled until their outcome. Each cell carries an effect when a fake-ping joker or a break
+        applies to it (GameTimetableEffect), derived on each read from the instruction and the current joker and
+        break state; joker and break changes never change the plan revision. Member endpoints never show effects.
       tags: [Game Sessions]
       responses:
         '200':
@@ -4793,7 +4795,9 @@ paths:
       summary: Applies a timetable changeset all-or-nothing
       description: >-
         Checked at commit under the session lock. A slot is editable while scheduled and more than 15 s ahead (a
-        move's new time too); cells hold valid instructions, stored trimmed and canonical; cells name active players
+        move's new time too); cells hold valid instructions, stored trimmed and canonical (GameTimetableEntry.content);
+        a blank cell is no entry: setCell with blank content clears the cell like clearCell, and addSlot leaves blank
+        cells out; cells name active players
         and supporters listed as participants; slot times are unique; at most 20000 present cells in slots still to
         run (`scheduled` or `claimed`; done slots are history and do not count). An armed fake is released, and its
         owner told, when its cell is cancelled, becomes ineligible, or its slot moves. A repeated changeId with the
@@ -7093,7 +7097,7 @@ components:
       properties:
         apiVersion:
           type: integer
-          const: 11
+          const: 12
     GameSessionSummary:
       type: object
       properties:
@@ -7460,7 +7464,9 @@ components:
           $ref: '#/components/schemas/Id'
     GameTimetableEntry:
       type: object
-      description: A present cell; fakeReservationId names the fake-ping joker armed on it.
+      description: >-
+        A present cell; fakeReservationId names the fake-ping joker armed on it, effect what jokers and breaks do to
+        it (absent when neither applies).
       required: [id, memberId, content, status]
       properties:
         id:
@@ -7470,7 +7476,12 @@ components:
         content:
           type: string
           maxLength: 512
-          description: The canonical instruction (x, blank, b, a target code, lat,lon or lat,lon|code)
+          description: >-
+            The canonical instruction, never blank (a blank cell is no entry): p (the real position to hunters,
+            players and supporters), b (players and supporters), a target code (2H, 2P, 2S, 2P2H, 2S2H, 2P2S, 2P2S2H:
+            the real position to the code's audiences), lat,lon (the coordinate to hunters, the real position to
+            players and supporters), lat,lon|code (the coordinate to the code's audiences, the real position to the
+            rest) or lat,lon|p (the coordinate to everyone). Input is trimmed, any letter case; x is invalid.
         status:
           type: string
           enum: [scheduled, sent, skipped, failed]
@@ -7479,12 +7490,79 @@ components:
         reason:
           type: string
           description: >-
-            Why a cell was not sent: inactive, caught, break, noRecipient, noMirror, noPosition, missed, stopped, skip
-            (x), invalid or error
+            Why a cell was not sent: inactive, caught, break, noRecipient, noMirror, noPosition, missed, stopped,
+            invalid or error
         detail:
           type: string
         fakeReservationId:
           $ref: '#/components/schemas/Id'
+        effect:
+          $ref: '#/components/schemas/GameTimetableEffect'
+    GameTimetableEffect:
+      type: object
+      required: [fakeJoker, break, real, fake, withheld, latitude, longitude]
+      description: >-
+        What a fake-ping joker and a break do to a cell (operators only). An open (scheduled) cell has the fake joker
+        armed on it and the break of its member whose window contains the slot time; a finished cell has the break
+        that withheld it (reason break) and the fake joker it used. A break withholds the hunters from the real and
+        the fake audiences; a fake joker moves the hunters from the real to the fake audiences with its coordinate,
+        only on cells that send the real position to the hunters; when both apply the break wins (the joker is listed
+        and is released when the break starts). real, fake and withheld are in delivery order; latitude and longitude
+        are the coordinate the fake audiences receive, null when fake is empty.
+      properties:
+        fakeJoker:
+          oneOf:
+            - type: 'null'
+            - type: object
+              required: [reservationId, latitude, longitude]
+              properties:
+                reservationId:
+                  $ref: '#/components/schemas/Id'
+                latitude:
+                  type: number
+                longitude:
+                  type: number
+        break:
+          oneOf:
+            - type: 'null'
+            - type: object
+              required: [breakId, state, from, until, estimated]
+              description: >-
+                The break and when it protects the member (from inclusive, until exclusive): active, from its start
+                to its deadline; planned, from its planned start for the break length; planned or waiting whose start
+                passed, from now for the full length (estimated) or, when the game was not running at its start, to
+                its planned end. On a finished cell whose break is no longer found every field but estimated is null.
+              properties:
+                breakId:
+                  $ref: '#/components/schemas/NullableId'
+                state:
+                  type: [string, 'null']
+                  enum: [planned, waiting, active, ended, cancelled, missed, null]
+                from:
+                  $ref: '#/components/schemas/NullableTime'
+                until:
+                  $ref: '#/components/schemas/NullableTime'
+                estimated:
+                  type: boolean
+        real:
+          type: array
+          items:
+            type: string
+            enum: [hunters, players, supporters]
+        fake:
+          type: array
+          items:
+            type: string
+            enum: [hunters, players, supporters]
+        withheld:
+          type: array
+          items:
+            type: string
+            enum: [hunters, players, supporters]
+        latitude:
+          type: [number, 'null']
+        longitude:
+          type: [number, 'null']
     GameTimetableSlotRow:
       type: object
       required: [id, scheduledAt, state, entries]

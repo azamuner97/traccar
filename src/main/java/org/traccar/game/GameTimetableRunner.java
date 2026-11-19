@@ -28,8 +28,8 @@ import java.util.concurrent.ConcurrentHashMap;
  * <li><b>Interrupted slots.</b> Open entries of a claimed slot that no wait or transaction is working on (a
  * restart) were never delivered, because outcomes commit with their positions. They run again while the slot is
  * within its start grace, and are skipped ({@code missed}) after it.</li>
- * <li><b>Due slot.</b> The earliest due slot is claimed under the session lock ({@code slotStarted}). {@code x} is
- * skipped ({@code skip}), an invalid cell ({@code invalid}); every other entry becomes one engine intent with its
+ * <li><b>Due slot.</b> The earliest due slot is claimed under the session lock ({@code slotStarted}). An invalid
+ * cell is skipped ({@code invalid}); every other entry becomes one engine intent with its
  * audiences, fake and armed joker fake, {@code minimumFixTime} = slot time − freshness window and the fresh-fix
  * wait, and {@code notAfter} = slot start + wait + {@value GameTimetableService#SAFETY_SECONDS} s. The entries wait
  * in parallel, each sent as soon as its own fix is fresh. Each outcome becomes the entry status and a {@code ping}
@@ -199,9 +199,9 @@ public class GameTimetableRunner implements GameExecutionRunner<GameTimetableRun
             List<GameTimetableRepository.Entry> send = new ArrayList<>();
             for (var entry : entries) {
                 TimetableInstruction instruction = TimetableInstruction.parse(entry.content());
-                if (instruction.skip() || !instruction.valid()) {
-                    skip(transaction, sessionId, entry, instruction.skip() ? GameTimetableEvents.SKIP
-                            : GameTimetableEvents.INVALID, owners, true);
+                if (!instruction.valid() || instruction.none()) {
+                    // Blank cells are never stored (they are no entry), so this is invalid content.
+                    skip(transaction, sessionId, entry, GameTimetableEvents.INVALID, owners, true);
                     continue;
                 }
                 if (!instruction.fakeEligible()) {

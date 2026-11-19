@@ -36,7 +36,7 @@ managed values and preserves unrelated attributes.
 
 Traccar's database is the single store of game sessions and game state
 (`schema/changelog-game-model-2.xml`, included last in `changelog-master.xml`).
-The game-session API version is **11**; `GET /api/game-sessions/capabilities`
+The game-session API version is **12**; `GET /api/game-sessions/capabilities`
 answers it, and a Tool built for another version stops at connection.
 
 - **Members.** Each participant is a member with a stable ID
@@ -488,9 +488,19 @@ cells) and edit it with all-or-nothing changesets
 `clearCell`, `addParticipant`, `removeParticipant`, `orderParticipants`;
 409 for a stale `baseRevision`, the recorded result for a retried `changeId`,
 422 listing every failing change). Cells follow the Tool's grammar
-(`TimetableInstruction`: `x`, blank, `b`, target codes, `lat,lon[|code]`) and
-are stored canonical; at most 20000 cells of slots still to run (done slots are
-history and do not count). `PUT …/timetable/execution {enabled}` switches
+(`TimetableInstruction`, `Claude outputs/timetable-instructions-effects-plan.md`):
+blank is no ping, `p` is a real ping to everyone, `b` to players and
+supporters, target codes to their audiences, `lat,lon[|code]` a coordinate to
+the code's audiences (hunters by default, `|p` everyone) and the real position
+to the rest; `x` is invalid. Cells are stored canonical, and a blank cell is no
+entry (`setCell` with blank content clears the cell, `addSlot` leaves it out);
+at most 20000 cells of slots still to run (done slots are history and do not
+count). The operator read adds each cell's `effect` when a fake-ping joker or
+a break applies to it (`GameTimetableEffects`): derived on every read from the
+instruction and the current joker and break state (break windows by
+`GameBreakRunner.window`), never stored, and never shown to members; the engine
+applies the same break step. Changeset `game-execution-6-timetable-grammar`
+emptied the timetables written in the old grammar. `PUT …/timetable/execution {enabled}` switches
 execution on and off; it runs only while the toggle is on and the game runs,
 whatever the lease does, and switches itself off when no slot is left. Members
 read whether it runs from `timetableRunning` in their status.
@@ -763,7 +773,7 @@ repository-safety contract.
 3. Deploy the combined server and web build. Its migration drops the model-1
    game tables and their data; it keeps Traccar users, devices, ordinary
    drawings and the controller epoch.
-4. Release the matching Traccar Tool (game-session API version 11) and run
+4. Release the matching Traccar Tool (game-session API version 12) and run
    Device Setup for every new session: it plans members before it creates
    devices and accounts.
 5. Confirm managed devices have category `person`, integer

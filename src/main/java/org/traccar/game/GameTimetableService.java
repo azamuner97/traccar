@@ -34,7 +34,8 @@ import java.util.Set;
  *
  * <p>Changeset rules, checked at commit under the session lock (the runner claims slots under the same lock): a
  * slot is editable while it is {@code scheduled} and more than {@value #FREEZE_SECONDS} s ahead (a move's new time
- * too); cells hold valid instructions ({@link TimetableInstruction}), stored trimmed and canonical; cells name
+ * too); cells hold valid instructions ({@link TimetableInstruction}), stored trimmed and canonical, and a blank cell
+ * is no entry ({@code setCell} with blank content clears the cell, {@code addSlot} leaves it out); cells name
  * active players and supporters listed as participants; slot times are unique; the plan holds at most
  * {@value #MAX_ENTRIES} present entries in slots still to run (done slots' history does not count). An armed fake
  * is released, and its owner told, when its entry is cancelled, its content becomes ineligible, or its slot moves.
@@ -76,10 +77,13 @@ public class GameTimetableService {
                               String state, Long trackerId) {
     }
 
-    /** A present cell; {@code fakeReservationId} names the armed fake joker on it. */
+    /**
+     * A present cell; {@code fakeReservationId} names the armed fake joker on it, {@code effect} what jokers and
+     * breaks do to it (operators only; absent when neither applies, see {@link GameTimetableEffects}).
+     */
     @JsonInclude(JsonInclude.Include.NON_NULL)
     public record Entry(long id, long memberId, String content, String status, Instant statusAt, String reason,
-                        String detail, Long fakeReservationId) {
+                        String detail, Long fakeReservationId, GameTimetableEffects.Effect effect) {
     }
 
     @JsonInclude(JsonInclude.Include.NON_NULL)
@@ -174,7 +178,10 @@ public class GameTimetableService {
                 GameTimetableRepository.lastEventId(transaction, sessionId));
     }
 
-    /** The timetable of a session inside a transaction (also for the operator snapshot). */
+    /**
+     * The timetable of a session inside a transaction (also for the operator snapshot), with the joker and break
+     * effects of its entries. Joker and break changes never change the plan revision.
+     */
     static Timetable read(GameTransaction transaction, long sessionId) throws SQLException {
         Instant now = transaction.now();
         var header = GameTimetableRepository.header(transaction, sessionId);
@@ -189,11 +196,12 @@ public class GameTimetableService {
                 "p.timetableentryid IS NOT NULL AND " + GameJokerRepository.ARMED)) {
             fakes.put(plan.timetableEntryId(), plan.reservationId());
         }
+        GameTimetableEffects.Reader effects = GameTimetableEffects.read(transaction, sessionId);
         Map<Long, List<Entry>> cells = new HashMap<>();
         for (var entry : GameTimetableRepository.present(transaction, sessionId)) {
             cells.computeIfAbsent(entry.slotId(), key -> new ArrayList<>()).add(new Entry(entry.id(),
                     entry.memberId(), entry.content(), entry.status(), entry.statusAt(), entry.reason(),
-                    entry.detail(), fakes.get(entry.id())));
+                    entry.detail(), fakes.get(entry.id()), effects.effect(entry)));
         }
         List<Slot> slots = new ArrayList<>();
         for (var slot : GameTimetableRepository.slots(transaction, sessionId)) {
@@ -345,10 +353,13 @@ public class GameTimetableService {
             return true;
         }
 
-        /** The canonical content of a valid cell, or null after recording the error. */
+        /**
+         * The canonical content of a valid cell ({@code ""} for blank, which is no entry), or null after recording
+         * the error.
+         */
         String content(String value, Long slotId, Long memberId) {
             if (value == null) {
-                error(slotId, memberId, "invalidInstruction", "A cell needs content (blank is \"\")");
+                error(slotId, memberId, "invalidInstruction", "A cell needs content (blank \"\" clears it)");
                 return null;
             }
             TimetableInstruction instruction = TimetableInstruction.parse(value);
@@ -430,7 +441,10 @@ public class GameTimetableService {
                 }
                 String content = member(memberId, null) ? content(cell.getValue(), null, memberId) : null;
                 valid &= content != null;
-                cells.put(memberId, content);
+                if (content != null && !content.isEmpty()) {
+                    // A blank cell is no entry.
+                    cells.put(memberId, content);
+                }
             }
             if (!valid) {
                 return;
@@ -479,8 +493,21 @@ public class GameTimetableService {
                 return;
             }
             String content = content(change.content(), slot.id(), change.memberId());
-            if (content != null) {
+            if (content == null) {
+                return;
+            }
+            if (content.isEmpty()) {
+                // A blank cell is no entry: like clearCell.
+                clear(slot.id(), change.memberId());
+            } else {
                 set(slot.id(), change.memberId(), content);
+            }
+        }
+
+        void clear(long slotId, long memberId) throws SQLException {
+            var entry = GameTimetableRepository.cell(transaction, sessionId, slotId, memberId);
+            if (entry.isPresent() && entry.get().present()) {
+                cancel(entry.get(), "Its timetable ping was removed");
             }
         }
 
@@ -493,10 +520,7 @@ public class GameTimetableService {
                 error(slot.id(), null, "invalidChange", "The change names no member");
                 return;
             }
-            var entry = GameTimetableRepository.cell(transaction, sessionId, slot.id(), change.memberId());
-            if (entry.isPresent() && entry.get().present()) {
-                cancel(entry.get(), "Its timetable ping was removed");
-            }
+            clear(slot.id(), change.memberId());
         }
 
         void addParticipant() throws SQLException {
