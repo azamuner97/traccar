@@ -325,7 +325,8 @@ def timetable_flow(connection, name, session_id, tmp):
     cells = {(slot["scheduledAt"][11:16], entry["memberId"]): entry["content"] for slot in stored["slots"]
              for entry in slot["entries"]}
     assert cells[(start.strftime("%H:%M"), names["Anna"])] == "2H", cells
-    assert cells[(start.strftime("%H:%M"), names["Ben"])] == "", "a blank cell is stored as a real ping"
+    assert (start.strftime("%H:%M"), names["Ben"]) not in cells, "a blank cell is no cell"
+    assert cells[(start.strftime("%H:%M"), names["Sue"])] == "p", "generated rows are filled with p"
     assert len(stored["participants"]) == 3 and len(stored["slots"]) == 4, stored
 
     # A row that locked on the server while this Tool's clock lagged is rejected, marked, and nothing is saved.
