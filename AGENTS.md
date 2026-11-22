@@ -123,7 +123,8 @@ npm run build
 
 Before commits or releases that affect integration, packaging, persistence, or
 server/web interaction, also run the full Docker integration loop and verify
-`http://localhost:8083/api/health`.
+`http://localhost:8083/api/health`. The [integration scripts](scripts/) contain
+instructions for focused checks against the local stack.
 
 ## Game data model 2
 
@@ -153,13 +154,25 @@ speak only model 2.
   each step with `preConditions onFail="MARK_RAN"` (`tableExists`,
   `columnExists`, ...) as `changelog-game-model-2.xml` does. Data fixes in plain
   DML roll back as a whole. The earlier multi-statement changesets of
-  `changelog-game-execution.xml` stay as they are (review SC-10): a
-  changeset-level precondition can only skip a whole changeset, which would
-  leave out the rest of one that failed halfway, and splitting them would
-  change the checksums of applied changesets.
+  `changelog-game-execution.xml` stay as they are. Skipping a changeset would
+  leave any remaining statements unapplied after a partial failure. Splitting
+  an applied changeset would change its checksum.
 - Traccar Tool's OpenAPI contract test reads `openapi.yaml`; run it with
   `TRACCAR_OPENAPI=../traccar/openapi.yaml venv_traccar/bin/python -m unittest discover -s tests`
   from `Traccar-Tool` after changing game endpoints.
+
+## Deployment
+
+- Deploy the combined server and pinned web build before releasing the matching
+  Tool. Run a single server instance per game database. Apply the model-1
+  migration precautions above before starting the server.
+- Set the Base64-encoded 256-bit `GAME_SESSIONS_CREDENTIAL_KEY` to encrypt
+  generated-account passwords. Local Compose reads
+  `TRACCAR_GAME_SESSIONS_CREDENTIAL_KEY`. Keep the key stable for the lifetime
+  of the database.
+- To enable native pushes, include `traccar` in the deployment's
+  `TRACCAR_NOTIFICATOR_TYPES` and provide `TRACCAR_NOTIFICATOR_TRACCAR_KEY`
+  through deployment secrets.
 
 ## Repository and data safety
 

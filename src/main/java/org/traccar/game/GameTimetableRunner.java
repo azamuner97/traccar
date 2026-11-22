@@ -62,11 +62,6 @@ public class GameTimetableRunner implements GameExecutionRunner<GameTimetableRun
         this.engine = engine;
     }
 
-    /** Entries in flight, for tests. */
-    Set<Long> inFlight() {
-        return Set.copyOf(inFlight);
-    }
-
     private static boolean past(Instant scheduledAt, Instant now) {
         return now.isAfter(scheduledAt.plusSeconds(GameTimetableService.START_GRACE_SECONDS));
     }

@@ -161,10 +161,6 @@ public class GameTimetableService {
         this.publisher = publisher;
     }
 
-    public static boolean fakeEligible(String content) {
-        return TimetableInstruction.fakeEligible(content);
-    }
-
     // Reading -----------------------------------------------------------------------------------------------
 
     static Execution execution(GameTransaction transaction, long sessionId) throws SQLException {

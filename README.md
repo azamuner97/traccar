@@ -27,11 +27,30 @@ Some of the available features include:
 
 ## Build
 
-Please read [build from source documentation](https://www.traccar.org/build/) on the official website.
+See [Project customizations](CUSTOMIZATIONS.md) for the game features in this
+fork and [Development instructions](AGENTS.md) for building the server and its
+pinned web app. Upstream build instructions are available on the
+[Traccar website](https://www.traccar.org/build/).
 
-This fork pins its customized web application as the `traccar-web` Git
-submodule. See [CUSTOMIZATIONS.md](CUSTOMIZATIONS.md) for the participant-role
-metadata contract, build behavior, and rollout order.
+## Release the Docker image
+
+The image combines this server and the exact web commit recorded in
+`traccar-web`. The [desktop Tool](https://github.com/azamuner97/Traccar-tool-for-manhunt-games)
+has its own installer and release.
+
+1. Push the web commit to GitHub first. Then commit the updated web reference in
+   this server repository and push the server's `project` branch.
+2. In GitHub Actions, run **Build Project** on `project` to check the server,
+   web app, and MySQL integration.
+3. In the server repository, set the GitHub Actions secrets
+   `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` using your Docker Hub username
+   and an access token with write permission.
+4. Run **Build Release** on `project` with a new version tag, for example
+   `6.15.3-project.1`. The `preview` value builds test artifacts. A version
+   tag publishes the installers to
+   GitHub and the images to [Docker Hub](https://hub.docker.com/r/azamuner97/traccar/tags)
+   for AMD64 and ARM64. It also updates `latest`. Use the specific version tag
+   in [the deployment configuration](docker/compose/.env.production.example).
 
 ## Team
 

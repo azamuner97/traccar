@@ -52,10 +52,6 @@ public class GlobalSatProtocolDecoder extends BaseProtocolDecoder {
         format0 = format;
     }
 
-    public void setFormat1(String format) {
-        format1 = format;
-    }
-
     private Double decodeVoltage(String value) {
         if (value.endsWith("mV")) {
             return Integer.parseInt(value.substring(0, value.length() - 2)) / 1000.0;

@@ -264,11 +264,6 @@ def add_mirror(session_id, device_id, source_member_id, destination_role=None, d
         "destinationMemberId": destination_member_id})
 
 
-def add_group(session_id, group_id, purpose, member_id=None):
-    return request("POST", f"/game-sessions/{session_id}/resources/groups", {
-        "groupId": group_id, "purpose": purpose, "memberId": member_id})
-
-
 def effects(session_id, expected=200, **parts):
     """One effects delivery under a fresh delivery ID (or ``deliveryId``)."""
     body = {"deliveryId": parts.pop("deliveryId", "audit-" + uuid4().hex), **parts}

@@ -63,10 +63,6 @@ public final class GameTransaction {
         this.readOnly = readOnly;
     }
 
-    public Connection connection() {
-        return connection;
-    }
-
     /** One timestamp for everything this transaction writes. */
     public Instant now() {
         return now;

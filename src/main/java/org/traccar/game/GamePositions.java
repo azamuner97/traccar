@@ -55,10 +55,6 @@ public final class GamePositions {
         private final Set<Long> devices = new LinkedHashSet<>();
         private final List<Position> latest = new ArrayList<>();
 
-        public boolean isEmpty() {
-            return devices.isEmpty();
-        }
-
         /** Registers the publication after commit, once per transaction. */
         public void publish(GameTransaction transaction, GamePublisher publisher) {
             if (!devices.isEmpty()) {

@@ -172,8 +172,4 @@ public class GamePushOutbox {
         return true;
     }
 
-    public void shutdown() {
-        executor.shutdown();
-    }
-
 }

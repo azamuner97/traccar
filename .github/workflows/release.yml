@@ -4,13 +4,47 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: Version
+        description: Version tag, or preview to build test artifacts
         required: true
         default: preview
 
+permissions:
+  contents: read
+
 jobs:
+  validate-version:
+    name: Validate version
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check version tag
+        env:
+          VERSION: ${{ inputs.version }}
+        shell: bash
+        run: |
+          if [[ ! "$VERSION" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,120}$ ]]; then
+            echo "Use up to 121 letters, digits, underscores, periods, or hyphens. Start with a letter, digit, or underscore."
+            exit 1
+          fi
+      - uses: actions/checkout@v6
+        if: ${{ inputs.version != 'preview' }}
+        with:
+          fetch-depth: 0
+      - name: Check whether the Git tag is already in use
+        if: ${{ inputs.version != 'preview' }}
+        env:
+          VERSION: ${{ inputs.version }}
+        shell: bash
+        run: |
+          tag="v$VERSION"
+          tagged_commit="$(git rev-parse --verify --quiet "refs/tags/${tag}^{commit}" || true)"
+          if [[ -n "$tagged_commit" && "$tagged_commit" != "$GITHUB_SHA" ]]; then
+            echo "Git tag $tag points to a different commit. Choose a new version."
+            exit 1
+          fi
+
   build-server:
     name: Build server
+    needs: validate-version
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -27,6 +61,7 @@ jobs:
         run: |
           mkdir -p out/{conf,lib,schema,templates}
           cp target/tracker-server.jar out/
+          cp LICENSE.txt out/
           cp target/lib/* out/lib/
           cp schema/* out/schema/
           cp -r templates/* out/templates/
@@ -39,6 +74,7 @@ jobs:
 
   build-web:
     name: Build web
+    needs: validate-version
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -257,23 +293,19 @@ jobs:
   publish:
     name: Publish installers
     needs: [test, build-other]
+    if: ${{ inputs.version != 'preview' }}
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/download-artifact@v8
         with:
           pattern: installers-*
           merge-multiple: true
-      - if: ${{ github.event.inputs.version == 'preview' }}
-        env:
-          S3_ACCESS_KEY: ${{ secrets.S3_ACCESS_KEY }}
-          S3_SECRET_KEY: ${{ secrets.S3_SECRET_KEY }}
-        run: |
-          sudo apt-get install -y s3cmd
-          s3cmd --acl-public put traccar-*.zip s3://traccar/builds/ --host=nyc3.digitaloceanspaces.com --host-bucket=traccar --access_key="$S3_ACCESS_KEY" --secret_key="$S3_SECRET_KEY"
-      - if: ${{ github.event.inputs.version != 'preview' }}
-        uses: softprops/action-gh-release@v3
+      - uses: softprops/action-gh-release@v3
         with:
           tag_name: v${{ github.event.inputs.version }}
+          target_commitish: ${{ github.sha }}
           files: traccar-*.zip
 
   docker:

@@ -9,11 +9,8 @@ package org.traccar.game;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.time.Instant;
-import java.util.ArrayList;
-import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Optional;
-import java.util.Set;
 
 /**
  * Joker accounting of data model 2: member inventories (tc_game_jokers), the hunters' pool (tc_game_joker_pools),
@@ -84,10 +81,6 @@ public final class GameJokerRepository {
 
         public boolean timetable() {
             return timetableEntryId != null;
-        }
-
-        public boolean speedhunt() {
-            return pingNumber != null;
         }
     }
 
@@ -380,27 +373,11 @@ public final class GameJokerRepository {
     /** SQL condition for plans whose reservation is armed. */
     public static final String ARMED = "r.status = 'reserved' AND (r.requestid IS NULL OR q.status = 'succeeded')";
 
-    /** Members holding the given reservations (pool reservations have none). */
-    public static Set<Long> owners(GameTransaction transaction, long sessionId, List<Long> reservationIds)
-            throws SQLException {
-        Set<Long> result = new LinkedHashSet<>();
-        for (long id : reservationIds) {
-            reservation(transaction, sessionId, id).map(Reservation::memberId).ifPresent(result::add);
-        }
-        return result;
-    }
-
     /** Every reservation of a session, newest first, for the operators' views; at most {@code limit}. */
     public static List<Reservation> latest(GameTransaction transaction, long sessionId, String type, String status,
                                            int limit) throws SQLException {
         return transaction.list(RESERVATIONS + " WHERE r.gamesessionid = ? AND r.type = ? AND r.status = ?"
                 + " ORDER BY r.id DESC", limit, GameJokerRepository::reservation, sessionId, type, status);
-    }
-
-    static List<Long> ids(List<Reservation> reservations) {
-        List<Long> result = new ArrayList<>();
-        reservations.forEach(item -> result.add(item.id()));
-        return result;
     }
 
 }
