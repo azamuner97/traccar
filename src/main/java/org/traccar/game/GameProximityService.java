@@ -24,8 +24,8 @@ import java.util.Set;
 import java.util.TreeSet;
 
 /**
- * Participant proximity of data model 2 (docs/participant-proximity.md): temporary reciprocal access grants
- * between players and supporters, and hunter circles.
+ * Participant proximity of data model 2 (Traccar Tool's docs/participant-proximity.md): temporary reciprocal access
+ * grants between players and supporters, and hunter circles.
  *
  * <p>The controlling Tool publishes the whole proximity content based on the revision it read. There is no
  * generation (decision 4): a reset publishes empty content with the next revision. The expected revision is checked
@@ -258,7 +258,7 @@ public class GameProximityService {
     /**
      * Deletes expired grants and circles of every session. Readers never see expired rows, so this changes no
      * revision; it keeps the access tables small, and after commit the recipients of expired grants have their
-     * device access recomputed, so their WebSocket stops carrying the target's positions (model 1's expiry).
+     * device access recomputed, so their WebSocket stops carrying the target's positions.
      *
      * @return the number of deleted grants and circles
      */

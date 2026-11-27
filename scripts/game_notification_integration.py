@@ -255,7 +255,8 @@ def bind_tracker(session_id, member_id, device_id, expected=200):
 
 
 def member(session_id, member_id):
-    return request("GET", f"/game-sessions/{session_id}/members/{member_id}")
+    members = request("GET", f"/game-sessions/{session_id}/members")
+    return next(item for item in members if item["id"] == member_id)
 
 
 def add_mirror(session_id, device_id, source_member_id, destination_role=None, destination_member_id=None):
@@ -717,7 +718,7 @@ def main(tool_source=None):
             assert own.intersection(all_received_ids) == received_ids[key], key
 
         # Identity: a tracker replacement keeps the member's personal history; unbinding the account ends access;
-        # a role change (a new member) does not carry the old member's personal history.
+        # another role is a new member (retire, plan, bind), which does not carry the old member's personal history.
         replacement = fixtures.device(PREFIX + "-player-replacement")
         bind_tracker(session_id, members["player"]["id"], replacement["id"])
         own = {record["id"] for record in page(session_id, credentials["player"])["items"]}
@@ -727,8 +728,10 @@ def main(tool_source=None):
         page(session_id, credentials["player"], expected=403)
         bind_account(session_id, members["player"]["id"], users["player"]["id"])
         assert targeted_ids["player"] in {record["id"] for record in page(session_id, credentials["player"])["items"]}
-        changed = request("POST", f"/game-sessions/{session_id}/members/{members['supporter']['id']}/role", {
-            "role": "hunter", "displayName": "supporter as hunter"})
+        request("POST", f"/game-sessions/{session_id}/members/{members['supporter']['id']}/retire", {})
+        changed = plan(session_id, "hunter", "supporter as hunter")
+        changed = bind_account(session_id, changed["id"], users["supporter"]["id"])
+        bind_tracker(session_id, changed["id"], trackers["supporter"]["id"])
         assert changed["id"] != members["supporter"]["id"] and changed["userId"] == users["supporter"]["id"]
         own = {record["id"] for record in page(session_id, credentials["supporter"])["items"]}
         assert not own.intersection(received_ids["supporter"] | {targeted_ids["supporter"]})
@@ -814,10 +817,9 @@ def main(tool_source=None):
         assert not page(session_id)["items"]
         request("POST", "/game-notifications", {**payload, "generation": reset["replacementGeneration"]})
         assert page(other_id)["items"], "A reset must leave other sessions' history alone"
-        history = request("GET", "/game-notifications/history?gameSessionId=" + str(session_id))
-        assert [item["id"] for item in history["items"]] == ["live"]
-        request("GET", "/game-notifications/history?gameSessionId=" + str(session_id), credentials=credentials["spectator"],
-                expected=403)
+        # The reset deleted the earlier generation: only the alert archived since is left.
+        assert [item["id"] for item in page(session_id)["items"]] == ["live"]
+        assert sql(f"SELECT COUNT(*) FROM tc_game_notifications WHERE gamesessionid={session_id}") == "1"
         request("DELETE", f"/game-sessions/{session_id}", expected=409)
         stop_game(session_id)
         request("DELETE", f"/game-sessions/{session_id}", expected=204)
@@ -827,8 +829,9 @@ def main(tool_source=None):
         print("MySQL/HTTP notification audit passed: member and session authorization, fencing, private targeted "
               "invalidations, hunter-group visibility, real geofence events without native links, alerts in "
               "effects deliveries, timestamps, case-sensitive IDs, hunter/spectator speedhunt names, live "
-              "recipients, tracker replacement, unbinding and role change, retired recipients, pagination, "
-              "server restart, idempotency, history after account deletion, reset races and session deletion.")
+              "recipients, tracker replacement, unbinding and a new member under another role, retired recipients, "
+              "pagination, server restart, idempotency, history after account deletion, reset races and session "
+              "deletion.")
         if tool_source:
             print("Tool monitoring audit passed: healthy position websocket, enter/exit polling for player, "
                   "supporter and two hunters, admin-only web subscriptions keyed by game session, no member "

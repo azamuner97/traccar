@@ -29,18 +29,17 @@ import java.util.Optional;
 import java.util.Set;
 
 /**
- * The computed member status of data model 2 (plan §2.1, §3.3): role projections over the typed tables, which
- * replace the status document the Tool published in model 1. Nothing writes status; each read is one transaction.
+ * The computed member status of data model 2 (plan §2.1, §3.3): role projections over the typed tables. Nothing
+ * writes status; each read is one transaction.
  *
- * <p>The projections port model 1's {@code GameRequestService.status}, {@code filter}, {@code participantOverview},
- * {@code speedhuntHistory} and {@code speedhuntStatus} and keep its visibility matrix (see {@link GameStatus}). The
- * "current" speedhunt that anonymous progress describes is the latest speedhunt's target while it still runs,
- * otherwise the newest running speedhunt, otherwise a live speedhunt ping that has not reached anyone yet.
+ * <p>The projections follow the visibility matrix of {@link GameStatus}. The "current" speedhunt that anonymous
+ * progress describes is the latest speedhunt's target while it still runs, otherwise the newest running speedhunt,
+ * otherwise a live speedhunt ping that has not reached anyone yet.
  */
 @Singleton
 public class GameStatusService {
 
-    /** Model 1's limit on an operator's live share reason. */
+    /** The limit on an operator's live share reason. */
     static final int MAX_REASON = 500;
 
     private static final ObjectMapper CANONICAL = JsonMapper.builder()
@@ -161,7 +160,7 @@ public class GameStatusService {
             this.active = GameExecutionService.running(transaction, session);
             this.settings = GameSettings.read(transaction, session);
             for (GameMember member : GameMemberRepository.list(transaction, session)) {
-                // A participant is an active player or supporter with a tracker, like model 1's published list.
+                // A participant is an active player or supporter with a tracker.
                 if (member.active() && GameMember.hasState(member.role()) && member.trackerId() != null) {
                     participants.add(member);
                 }
@@ -256,7 +255,7 @@ public class GameStatusService {
             Set<Long> listed = new HashSet<>();
             participants.forEach(member -> listed.add(member.id()));
             List<GameStatus.LiveShare> shares = new ArrayList<>();
-            for (GameStateService.LiveShare share : GameStateService.liveShares(transaction, session)) {
+            for (GameStateRepository.LiveShare share : GameStateRepository.liveShares(transaction, session)) {
                 if (!listed.contains(share.memberId())) {
                     continue;
                 }

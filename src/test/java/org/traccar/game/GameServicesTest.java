@@ -276,26 +276,6 @@ public abstract class GameServicesTest {
     }
 
     @Test
-    void renamesWithTheSettingsRevision() throws Exception {
-        long session = session();
-        String taken = sessions.get(session()).name();
-        String name = "renamed-" + UUID.randomUUID();
-
-        assertEquals(409, status(() -> sessions.rename(session, 2, name)));
-        assertEquals(409, status(() -> sessions.rename(session, 1, taken)));
-        GameSessionService.Session renamed = sessions.rename(session, 1, name);
-        assertEquals(name, renamed.name());
-        assertEquals(2, renamed.settings().revision());
-        assertEquals(settings("initial"), renamed.settings().settings());
-        assertEquals(2, renamed.revision());
-
-        assertEquals(renamed, sessions.rename(session, 1, name));
-        assertEquals(renamed, sessions.rename(session, 2, name));
-        assertEquals(409, status(() -> sessions.rename(session, 1, "other-" + UUID.randomUUID())));
-        assertEquals(404, status(() -> sessions.rename(-1, 1, name)));
-    }
-
-    @Test
     void updatesSettingsWithTheExpectedRevision() throws Exception {
         long session = session();
 
@@ -502,7 +482,6 @@ public abstract class GameServicesTest {
         assertEquals(409, status(() -> members.plan(session, "spectator", 1, "Second spectator")));
         assertEquals(409, status(() -> members.bindTracker(session, spectator.id(), device())));
         assertEquals(409, status(() -> members.retire(session, spectator.id())));
-        assertEquals(409, status(() -> members.changeRole(session, spectator.id(), "player", null, "Player")));
 
         int account = user();
         assertEquals(Long.valueOf(account), members.bindAccount(session, spectator.id(), account).userId());
@@ -708,34 +687,6 @@ public abstract class GameServicesTest {
         assertEquals(Long.valueOf(account), members.bindAccount(session, other.id(), account).userId());
         assertEquals(Long.valueOf(tracker), members.bindTracker(session, other.id(), tracker).trackerId());
         assertEquals(retired, members.get(session, player.id()));
-    }
-
-    @Test
-    void aRoleChangeRetiresTheMemberAndCreatesANewOne() throws Exception {
-        long session = session();
-        int account = user();
-        int tracker = device();
-        GameMember player = plan(session, "player");
-        members.bindAccount(session, player.id(), account);
-        members.bindTracker(session, player.id(), tracker);
-        long before = revision(session);
-
-        GameMember supporter = members.changeRole(session, player.id(), "supporter", null, "Supporter");
-        assertEquals("supporter", supporter.role());
-        assertEquals(1, supporter.number());
-        assertEquals(Long.valueOf(account), supporter.userId());
-        assertEquals(Long.valueOf(tracker), supporter.trackerId());
-        assertEquals(before + 1, revision(session));
-        GameMember old = members.get(session, player.id());
-        assertEquals(GameMember.RETIRED, old.state());
-        assertEquals("player", old.role());
-        assertEquals(409, status(() -> members.changeRole(session, player.id(), "hunter", null, "Hunter")));
-        assertEquals(409, status(() -> members.changeRole(session, supporter.id(), "supporter", null, "Same")));
-
-        GameMember spectator = members.changeRole(session, supporter.id(), "spectator", null, "Spectator");
-        assertEquals(Long.valueOf(account), spectator.userId());
-        assertNull(spectator.trackerId());
-        assertEquals(spectator.id(), members.membership(account).memberId());
     }
 
     @Test

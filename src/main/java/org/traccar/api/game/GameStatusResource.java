@@ -39,7 +39,7 @@ public class GameStatusResource extends GameApiResource {
         return noStore(status.speedhuntHistory(getUserId()));
     }
 
-    /** Anonymous speedhunt progress: of the member's session, or for administrators of the executing session. */
+    /** Anonymous speedhunt progress: of the member's session, or for administrators of the running session. */
     @GET
     @Path("speedhunt")
     public Response speedhunt() throws Exception {

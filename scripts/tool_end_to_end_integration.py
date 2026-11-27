@@ -194,9 +194,7 @@ def main(tool_source):
                 assert status["number"] == credential["number"], (login, status)
             accounts[(credential["role"], credential.get("number"))] = credentials
             user = api.request("GET", f"/users/{session['users'][login]}", credentials=credentials)
-            assert not user["administrator"] and not any(
-                key in (user.get("attributes") or {}) for key in ("traccarToolUserRole", "traccarToolSessionDeviceId",
-                                                                  "traccarToolAssignedDeviceId"))
+            assert not user["administrator"], (login, user)
         # Hunters see the players and supporters through mirrors only; players see their own tracker.
         real = {devices[unique_id]["id"] for _, unique_id, role, _ in rows if role in ("player", "supporter")}
         for key, credentials in accounts.items():
@@ -252,7 +250,7 @@ def main(tool_source):
         print("Tool device setup passed: controller lease at connection, session creation, the device list edited "
               "in the Tool's document (Excel import, a real 422 listing every failing row, a real 409) and saved, "
               "member planning from the saved list (member states not applied → bound), generated accounts bound "
-              "to members (no model-1 markers, no administrators), trackers and mirrors with role and session "
+              "to members (no administrators), trackers and mirrors with role and session "
               "markers, mirror and group rows, mirror-only hunter access, an idempotent second run, a replaced "
               "tracker rebinding to the same member, and a group change retiring hunter 2 and creating player 3.")
         timetable_flow(connection, name, session_id, tmp.name)

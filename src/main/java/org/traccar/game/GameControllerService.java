@@ -17,19 +17,10 @@ import org.slf4j.LoggerFactory;
 import org.traccar.config.Config;
 import org.traccar.config.Keys;
 
-import javax.sql.DataSource;
-import java.sql.Connection;
 import java.sql.ResultSet;
 import java.sql.SQLException;
-import java.sql.Timestamp;
-import java.sql.Types;
-import java.time.Clock;
 import java.time.Instant;
-import java.time.temporal.ChronoUnit;
-import java.util.ArrayList;
-import java.util.Calendar;
 import java.util.List;
-import java.util.TimeZone;
 import java.util.concurrent.Callable;
 import java.util.concurrent.locks.StampedLock;
 
@@ -68,24 +59,18 @@ public class GameControllerService {
                                String instanceId, String label, Long gameSessionId, String detail,
                                String occurredAt) { }
     public record Acquisition(Lease lease, boolean acquired, List<HistoryEntry> drift) { }
-    public record HistoryPage(List<HistoryEntry> items, String nextCursor, boolean hasMore) { }
 
-    private record Row(long epoch, String state, Long userId, String userLabel, String instanceId, String label,
-                       Instant acquiredAt, Instant renewedAt, Instant expiresAt) {
+    /** The lease row (tc_game_controller). */
+    record Row(long epoch, String state, Long userId, String userLabel, String instanceId, String label,
+               Instant acquiredAt, Instant renewedAt, Instant expiresAt) {
         boolean active(Instant now) {
             return STATE_ACTIVE.equals(state) && expiresAt != null && expiresAt.isAfter(now);
         }
     }
 
-    @FunctionalInterface
-    private interface Work<T> {
-        T run(Connection connection) throws Exception;
-    }
-
     private static final Logger LOGGER = LoggerFactory.getLogger(GameControllerService.class);
 
-    private final DataSource dataSource;
-    private final Clock clock;
+    private final GameTransactions transactions;
     private final int leaseSeconds;
     private final int renewSeconds;
     private final GameRequestService requests;
@@ -93,20 +78,19 @@ public class GameControllerService {
     private final StampedLock fence = new StampedLock();
 
     @Inject
-    public GameControllerService(DataSource dataSource, Config config, GameRequestService requests,
+    public GameControllerService(GameTransactions transactions, Config config, GameRequestService requests,
                                  GamePublisher publisher) {
-        this(dataSource, Clock.systemUTC(), config.getInteger(Keys.GAME_CONTROLLER_LEASE_SECONDS),
+        this(transactions, config.getInteger(Keys.GAME_CONTROLLER_LEASE_SECONDS),
                 config.getInteger(Keys.GAME_CONTROLLER_RENEW_SECONDS), requests, publisher);
     }
 
-    /** {@code requests} may be null in tests of the lease alone. */
-    public GameControllerService(DataSource dataSource, Clock clock, int leaseSeconds, int renewSeconds,
+    /** The lease's time comes from the clock of {@code transactions}; {@code requests} may be null in tests. */
+    public GameControllerService(GameTransactions transactions, int leaseSeconds, int renewSeconds,
                                  GameRequestService requests, GamePublisher publisher) {
         if (leaseSeconds < 2 || renewSeconds < 1 || renewSeconds >= leaseSeconds) {
             throw new IllegalArgumentException("Invalid game controller lease timing");
         }
-        this.dataSource = dataSource;
-        this.clock = clock;
+        this.transactions = transactions;
         this.leaseSeconds = leaseSeconds;
         this.renewSeconds = renewSeconds;
         this.requests = requests;
@@ -122,14 +106,9 @@ public class GameControllerService {
      * Whether the account is an administrator. The controller filter checks the lease only for administrators, so
      * other accounts learn nothing about it from fencing answers (review SC-5, SC-6).
      */
-    public boolean administrator(long userId) throws SQLException {
-        try (Connection connection = dataSource.getConnection();
-             var query = connection.prepareStatement("SELECT administrator FROM tc_users WHERE id = ?")) {
-            query.setLong(1, userId);
-            try (ResultSet rows = query.executeQuery()) {
-                return rows.next() && rows.getBoolean(1);
-            }
-        }
+    public boolean administrator(long userId) throws Exception {
+        return transactions.read(transaction -> transaction.first("SELECT administrator FROM tc_users WHERE id = ?",
+                rows -> rows.getBoolean(1), userId).orElse(false));
     }
 
     /** Parses the epoch header; a malformed value is a client error, a missing one is {@code null}. */
@@ -179,79 +158,18 @@ public class GameControllerService {
 
     // --- persistence helpers ------------------------------------------------------------------------------
 
-    private <T> T transaction(Work<T> work) throws Exception {
-        try (var connection = dataSource.getConnection()) {
-            connection.setAutoCommit(false);
-            try {
-                T result = work.run(connection);
-                connection.commit();
-                return result;
-            } catch (Exception error) {
-                connection.rollback();
-                throw error;
-            }
-        }
-    }
+    private static final String HISTORY = "SELECT id, epoch, event, userid, userlabel, instanceid, label,"
+            + " gamesessionid, detail, occurredat FROM tc_game_controller_history";
 
-    private static Calendar utc() {
-        return Calendar.getInstance(TimeZone.getTimeZone("UTC"));
-    }
-
-    private Instant now() {
-        return clock.instant().truncatedTo(ChronoUnit.MILLIS);
-    }
-
-    private static Instant instant(ResultSet rows, String column) throws SQLException {
-        Timestamp value = rows.getTimestamp(column, utc());
-        return value == null ? null : value.toInstant();
-    }
-
-    private static String iso(Instant value) {
-        return value == null ? null : value.toString();
-    }
-
-    private static Long nullableLong(ResultSet rows, String column) throws SQLException {
-        long value = rows.getLong(column);
-        return rows.wasNull() ? null : value;
-    }
-
-    private static void setTime(java.sql.PreparedStatement query, int index, Instant value) throws SQLException {
-        if (value == null) {
-            query.setNull(index, Types.TIMESTAMP);
-        } else {
-            query.setTimestamp(index, Timestamp.from(value), utc());
-        }
-    }
-
-    private static void setLong(java.sql.PreparedStatement query, int index, Long value) throws SQLException {
-        if (value == null) {
-            query.setNull(index, Types.BIGINT);
-        } else {
-            query.setLong(index, value);
-        }
-    }
-
-    private static String text(String value, int length) {
-        if (value == null) {
-            return null;
-        }
-        String cleaned = value.replaceAll("\\p{Cntrl}", " ").trim();
-        return cleaned.length() > length ? cleaned.substring(0, length) : cleaned;
-    }
-
-    private Row row(Connection connection, boolean lock) throws SQLException {
-        try (var query = connection.prepareStatement("SELECT * FROM tc_game_controller WHERE id = 1"
-                + (lock ? " FOR UPDATE" : ""))) {
-            try (var rows = query.executeQuery()) {
-                if (!rows.next()) {
-                    throw new IllegalStateException("Game controller row is missing");
-                }
-                return new Row(rows.getLong("epoch"), rows.getString("state"), nullableLong(rows, "userid"),
-                        rows.getString("userlabel"), rows.getString("instanceid"), rows.getString("label"),
-                        instant(rows, "acquiredat"),
-                        instant(rows, "renewedat"), instant(rows, "expiresat"));
-            }
-        }
+    /** The lease row; {@code lock} locks it until the transaction ends. */
+    static Row row(GameTransaction transaction, boolean lock) throws SQLException {
+        return transaction.first("SELECT epoch, state, userid, userlabel, instanceid, label, acquiredat, renewedat,"
+                + " expiresat FROM tc_game_controller WHERE id = 1" + (lock ? " FOR UPDATE" : ""),
+                rows -> new Row(rows.getLong("epoch"), rows.getString("state"),
+                        GameTransaction.longOrNull(rows, "userid"), rows.getString("userlabel"),
+                        rows.getString("instanceid"), rows.getString("label"), GameTime.get(rows, "acquiredat"),
+                        GameTime.get(rows, "renewedat"), GameTime.get(rows, "expiresat")))
+                .orElseThrow(() -> new IllegalStateException("Game controller row is missing"));
     }
 
     private Lease lease(Row row, Instant now) {
@@ -259,49 +177,24 @@ public class GameControllerService {
         String state = STATE_ACTIVE.equals(row.state()) && !active ? "expired" : row.state();
         Holder holder = row.instanceId() == null ? null
                 : new Holder(row.userId(), row.userLabel(), row.instanceId(), row.label());
-        return new Lease(row.epoch(), state, active, holder, iso(row.acquiredAt()), iso(row.renewedAt()),
-                iso(row.expiresAt()), now.toString(), leaseSeconds, renewSeconds);
+        return new Lease(row.epoch(), state, active, holder, GameTime.text(row.acquiredAt()),
+                GameTime.text(row.renewedAt()), GameTime.text(row.expiresAt()), now.toString(), leaseSeconds,
+                renewSeconds);
     }
 
-    private static String userLabel(Connection connection, long userId) throws SQLException {
-        try (var query = connection.prepareStatement("SELECT name,email FROM tc_users WHERE id = ?")) {
-            query.setLong(1, userId);
-            try (var rows = query.executeQuery()) {
-                if (!rows.next()) {
-                    return null;
-                }
-                String label = rows.getString("name");
-                return text(label == null || label.isBlank() ? rows.getString("email") : label, 128);
-            }
-        }
+    private static long history(GameTransaction transaction, long epoch, String event, Long userId, String userLabel,
+                                String instanceId, String label, String detail, Instant at) throws SQLException {
+        return transaction.insert("INSERT INTO tc_game_controller_history"
+                + " (epoch, event, userid, userlabel, instanceid, label, gamesessionid, detail, occurredat)"
+                + " VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?)", epoch, event, userId,
+                GameJokerRepository.clip(userLabel, 128), instanceId, GameJokerRepository.clip(label, 128),
+                GameJokerRepository.clip(detail, 512), at);
     }
 
-    private long history(Connection connection, long epoch, String event, Long userId, String userLabel,
-                         String instanceId, String label, Long gameSessionId, String detail, Instant at)
+    private static void historyFor(GameTransaction transaction, Row row, String event, String detail, Instant at)
             throws SQLException {
-        try (var query = connection.prepareStatement("INSERT INTO tc_game_controller_history"
-                + " (epoch,event,userid,userlabel,instanceid,label,gamesessionid,detail,occurredat)"
-                + " VALUES (?,?,?,?,?,?,?,?,?)", java.sql.Statement.RETURN_GENERATED_KEYS)) {
-            query.setLong(1, epoch);
-            query.setString(2, event);
-            setLong(query, 3, userId);
-            query.setString(4, text(userLabel, 128));
-            query.setString(5, instanceId);
-            query.setString(6, text(label, 128));
-            setLong(query, 7, gameSessionId);
-            query.setString(8, text(detail, 512));
-            setTime(query, 9, at);
-            query.executeUpdate();
-            try (var keys = query.getGeneratedKeys()) {
-                return keys.next() ? keys.getLong(1) : 0;
-            }
-        }
-    }
-
-    private void historyFor(Connection connection, Row row, String event, String detail, Instant at)
-            throws SQLException {
-        history(connection, row.epoch(), event, row.userId(), row.userLabel(), row.instanceId(), row.label(),
-                null, detail, at);
+        history(transaction, row.epoch(), event, row.userId(), row.userLabel(), row.instanceId(), row.label(),
+                detail, at);
     }
 
     /**
@@ -322,13 +215,8 @@ public class GameControllerService {
         }
     }
 
-    private void end(Connection connection, String state, Instant at) throws SQLException {
-        try (var query = connection.prepareStatement("UPDATE tc_game_controller SET state = ?,"
-                + " endedat = ? WHERE id = 1")) {
-            query.setString(1, state);
-            setTime(query, 2, at);
-            query.executeUpdate();
-        }
+    private static void end(GameTransaction transaction, String state, Instant at) throws SQLException {
+        transaction.update("UPDATE tc_game_controller SET state = ?, endedat = ? WHERE id = 1", state, at);
     }
 
     private static String instanceId(String value) {
@@ -340,46 +228,29 @@ public class GameControllerService {
 
     private static HistoryEntry entry(ResultSet rows) throws SQLException {
         return new HistoryEntry(rows.getLong("id"), rows.getLong("epoch"), rows.getString("event"),
-                nullableLong(rows, "userid"), rows.getString("userlabel"), rows.getString("instanceid"),
-                rows.getString("label"), nullableLong(rows, "gamesessionid"), rows.getString("detail"),
-                iso(instant(rows, "occurredat")));
+                GameTransaction.longOrNull(rows, "userid"), rows.getString("userlabel"),
+                rows.getString("instanceid"), rows.getString("label"),
+                GameTransaction.longOrNull(rows, "gamesessionid"), rows.getString("detail"),
+                GameTime.text(GameTime.get(rows, "occurredat")));
     }
 
     /**
      * Unfenced administrator changes since the previous acquisition: edits of game-owned resources, and games
      * stopped without control.
      */
-    private List<HistoryEntry> drift(Connection connection, long acquisitionId) throws SQLException {
-        long since = 0;
-        try (var query = connection.prepareStatement("SELECT MAX(id) FROM tc_game_controller_history"
-                + " WHERE id < ? AND event IN ('acquired','takeover')")) {
-            query.setLong(1, acquisitionId);
-            try (var rows = query.executeQuery()) {
-                if (rows.next()) {
-                    since = rows.getLong(1);
-                }
-            }
-        }
-        List<HistoryEntry> result = new ArrayList<>();
-        try (var query = connection.prepareStatement("SELECT * FROM tc_game_controller_history"
-                + " WHERE (event = 'unfencedEdit' OR event = 'gameStopped' AND instanceid IS NULL)"
-                + " AND id > ? AND id < ? ORDER BY id")) {
-            query.setLong(1, since);
-            query.setLong(2, acquisitionId);
-            query.setMaxRows(200);
-            try (var rows = query.executeQuery()) {
-                while (rows.next()) {
-                    result.add(entry(rows));
-                }
-            }
-        }
-        return result;
+    private static List<HistoryEntry> drift(GameTransaction transaction, long acquisitionId) throws SQLException {
+        long since = transaction.first("SELECT MAX(id) FROM tc_game_controller_history"
+                + " WHERE id < ? AND event IN ('acquired','takeover')", rows -> rows.getLong(1), acquisitionId)
+                .orElse(0L);
+        return transaction.list(HISTORY + " WHERE (event = 'unfencedEdit' OR event = 'gameStopped'"
+                + " AND instanceid IS NULL) AND id > ? AND id < ? ORDER BY id", 200, GameControllerService::entry,
+                since, acquisitionId);
     }
 
     // --- lease operations ---------------------------------------------------------------------------------
 
     public Lease status() throws Exception {
-        return transaction(connection -> lease(row(connection, false), now()));
+        return transactions.read(transaction -> lease(row(transaction, false), transaction.now()));
     }
 
     /** Verifies that {@code epoch} is the active lease of {@code userId}; throws 423 otherwise. */
@@ -387,9 +258,9 @@ public class GameControllerService {
         if (epoch == null) {
             throw locked("This change requires the game controller lease (" + EPOCH_HEADER + " header missing)");
         }
-        return transaction(connection -> {
-            Instant now = now();
-            Row row = row(connection, false);
+        return transactions.read(transaction -> {
+            Instant now = transaction.now();
+            Row row = row(transaction, false);
             if (!row.active(now)) {
                 throw locked("The game controller lease has expired or was released; resume control in Tool");
             }
@@ -400,8 +271,9 @@ public class GameControllerService {
         });
     }
 
-    private Acquisition start(Connection connection, Row current, long userId, String instanceId, String label,
-                              boolean force, Instant now) throws Exception {
+    private Acquisition start(GameTransaction transaction, Row current, long userId, String instanceId, String label,
+                              boolean force) throws Exception {
+        Instant now = transaction.now();
         String event = "acquired";
         String detail = null;
         if (current.active(now)) {
@@ -410,30 +282,19 @@ public class GameControllerService {
             }
             event = "takeover";
             detail = "Took over from " + describe(current);
-            historyFor(connection, current, "takenOver", "Taken over by " + text(label, 128), now);
+            historyFor(transaction, current, "takenOver", "Taken over by " + GameJokerRepository.clip(label, 128),
+                    now);
         } else if (STATE_ACTIVE.equals(current.state())) {
-            historyFor(connection, current, "expired", null, current.expiresAt());
+            historyFor(transaction, current, "expired", null, current.expiresAt());
         }
         long epoch = current.epoch() + 1;
-        String user = userLabel(connection, userId);
-        Instant expires = now.plusSeconds(leaseSeconds);
-        try (var query = connection.prepareStatement("UPDATE tc_game_controller SET epoch = ?, state = ?,"
-                + " userid = ?, userlabel = ?, instanceid = ?, label = ?, acquiredat = ?,"
-                + " renewedat = ?, expiresat = ?, endedat = NULL WHERE id = 1")) {
-            query.setLong(1, epoch);
-            query.setString(2, STATE_ACTIVE);
-            query.setLong(3, userId);
-            query.setString(4, user);
-            query.setString(5, instanceId);
-            query.setString(6, text(label, 128));
-            setTime(query, 7, now);
-            setTime(query, 8, now);
-            setTime(query, 9, expires);
-            query.executeUpdate();
-        }
-        long id = history(connection, epoch, event, userId, user, instanceId, label, null, detail, now);
-        Row updated = row(connection, false);
-        return new Acquisition(lease(updated, now), true, drift(connection, id));
+        String user = GameMemberRepository.userLabel(transaction, userId).orElse(null);
+        transaction.update("UPDATE tc_game_controller SET epoch = ?, state = ?, userid = ?, userlabel = ?,"
+                + " instanceid = ?, label = ?, acquiredat = ?, renewedat = ?, expiresat = ?, endedat = NULL"
+                + " WHERE id = 1", epoch, STATE_ACTIVE, userId, user, instanceId,
+                GameJokerRepository.clip(label, 128), now, now, now.plusSeconds(leaseSeconds));
+        long id = history(transaction, epoch, event, userId, user, instanceId, label, detail, now);
+        return new Acquisition(lease(row(transaction, false), now), true, drift(transaction, id));
     }
 
     private static String describe(Row row) {
@@ -457,9 +318,9 @@ public class GameControllerService {
     public Acquisition acquire(long userId, String instanceId, String label, Long resumeEpoch) throws Exception {
         instanceId(instanceId);
         return exclusive(() -> {
-            Acquisition result = transaction(connection -> {
-                Instant now = now();
-                Row current = row(connection, true);
+            Acquisition result = transactions.write(transaction -> {
+                Instant now = transaction.now();
+                Row current = row(transaction, true);
                 if (current.active(now) && instanceId.equals(current.instanceId())
                         && current.userId() != null && current.userId() == userId) {
                     return new Acquisition(lease(current, now), false, List.of());
@@ -470,7 +331,7 @@ public class GameControllerService {
                     throw GameErrors.conflict("Control of the game changed since controller epoch " + resumeEpoch
                             + " (now " + current.epoch() + "); resume control explicitly");
                 }
-                return start(connection, current, userId, instanceId, label, false, now);
+                return start(transaction, current, userId, instanceId, label, false);
             });
             if (result.acquired()) {
                 changed(result.lease().epoch());
@@ -483,10 +344,8 @@ public class GameControllerService {
     public Acquisition takeover(long userId, String instanceId, String label) throws Exception {
         instanceId(instanceId);
         return exclusive(() -> {
-            Acquisition result = transaction(connection -> {
-                Row current = row(connection, true);
-                return start(connection, current, userId, instanceId, label, true, now());
-            });
+            Acquisition result = transactions.write(transaction -> start(transaction, row(transaction, true), userId,
+                    instanceId, label, true));
             changed(result.lease().epoch());
             return result;
         });
@@ -494,22 +353,18 @@ public class GameControllerService {
 
     public Lease renew(long userId, long epoch, String instanceId) throws Exception {
         instanceId(instanceId);
-        return transaction(connection -> {
-            Instant now = now();
-            Row row = row(connection, true);
+        return transactions.write(transaction -> {
+            Instant now = transaction.now();
+            Row row = row(transaction, true);
             if (!row.active(now) || row.epoch() != epoch || row.userId() == null || row.userId() != userId
                     || !instanceId.equals(row.instanceId())) {
                 throw locked(row.epoch() != epoch && row.active(now)
                         ? "The game controller lease was taken over by " + describe(row)
                         : "The game controller lease has expired; resume control in Tool");
             }
-            try (var query = connection.prepareStatement(
-                    "UPDATE tc_game_controller SET renewedat = ?, expiresat = ? WHERE id = 1")) {
-                setTime(query, 1, now);
-                setTime(query, 2, now.plusSeconds(leaseSeconds));
-                query.executeUpdate();
-            }
-            return lease(row(connection, false), now);
+            transaction.update("UPDATE tc_game_controller SET renewedat = ?, expiresat = ? WHERE id = 1", now,
+                    now.plusSeconds(leaseSeconds));
+            return lease(row(transaction, false), now);
         });
     }
 
@@ -517,15 +372,15 @@ public class GameControllerService {
     public Lease release(long userId, long epoch) throws Exception {
         return exclusive(() -> {
             boolean[] released = new boolean[1];
-            Lease result = transaction(connection -> {
-                Instant now = now();
-                Row row = row(connection, true);
+            Lease result = transactions.write(transaction -> {
+                Instant now = transaction.now();
+                Row row = row(transaction, true);
                 if (row.active(now) && row.epoch() == epoch && row.userId() != null && row.userId() == userId) {
-                    historyFor(connection, row, "released", null, now);
-                    end(connection, "released", now);
+                    historyFor(transaction, row, "released", null, now);
+                    end(transaction, "released", now);
                     released[0] = true;
                 }
-                return lease(row(connection, false), now);
+                return lease(row(transaction, false), now);
             });
             if (released[0]) {
                 changed(null);
@@ -540,18 +395,18 @@ public class GameControllerService {
      */
     public boolean endAfterRestart() throws Exception {
         return exclusive(() -> {
-            boolean ended = transaction(connection -> {
-                Instant now = now();
-                Row row = row(connection, true);
+            boolean ended = transactions.write(transaction -> {
+                Instant now = transaction.now();
+                Row row = row(transaction, true);
                 if (!STATE_ACTIVE.equals(row.state())) {
                     return false;
                 }
                 if (row.active(now)) {
-                    historyFor(connection, row, "serverRestart", null, now);
-                    end(connection, "restarted", now);
+                    historyFor(transaction, row, "serverRestart", null, now);
+                    end(transaction, "restarted", now);
                 } else {
-                    historyFor(connection, row, "expired", null, row.expiresAt());
-                    end(connection, "expired", row.expiresAt());
+                    historyFor(transaction, row, "expired", null, row.expiresAt());
+                    end(transaction, "expired", row.expiresAt());
                 }
                 return true;
             });
@@ -577,13 +432,13 @@ public class GameControllerService {
             return false;
         }
         return exclusive(() -> {
-            boolean expired = transaction(connection -> {
-                Row row = row(connection, true);
-                if (!STATE_ACTIVE.equals(row.state()) || row.active(now())) {
+            boolean expired = transactions.write(transaction -> {
+                Row row = row(transaction, true);
+                if (!STATE_ACTIVE.equals(row.state()) || row.active(transaction.now())) {
                     return false;
                 }
-                historyFor(connection, row, "expired", null, row.expiresAt());
-                end(connection, "expired", row.expiresAt());
+                historyFor(transaction, row, "expired", null, row.expiresAt());
+                end(transaction, "expired", row.expiresAt());
                 return true;
             });
             if (expired) {
@@ -595,39 +450,8 @@ public class GameControllerService {
 
     /** Records an administrator edit of a game-owned resource made while no lease was held. */
     public void recordUnfencedEdit(long userId, String detail) throws Exception {
-        transaction(connection -> {
-            Row row = row(connection, false);
-            history(connection, row.epoch(), "unfencedEdit", userId, userLabel(connection, userId), null, null,
-                    null, detail, now());
-            return null;
-        });
-    }
-
-    public HistoryPage history(String cursor, int requestedLimit) throws Exception {
-        int limit = requestedLimit == 0 ? 100 : requestedLimit;
-        if (limit < 1 || limit > 500 || cursor != null && !cursor.matches("[0-9]{1,19}")) {
-            throw new BadRequestException("Invalid history pagination");
-        }
-        long before = cursor == null ? Long.MAX_VALUE : Long.parseLong(cursor);
-        return transaction(connection -> {
-            List<HistoryEntry> items = new ArrayList<>();
-            boolean more = false;
-            try (var query = connection.prepareStatement(
-                    "SELECT * FROM tc_game_controller_history WHERE id < ? ORDER BY id DESC")) {
-                query.setLong(1, before);
-                query.setMaxRows(limit + 1);
-                try (var rows = query.executeQuery()) {
-                    while (rows.next()) {
-                        if (items.size() == limit) {
-                            more = true;
-                            break;
-                        }
-                        items.add(entry(rows));
-                    }
-                }
-            }
-            String next = items.isEmpty() ? null : Long.toString(items.getLast().id());
-            return new HistoryPage(items, next, more);
-        });
+        transactions.write(transaction -> history(transaction, row(transaction, false).epoch(), "unfencedEdit",
+                userId, GameMemberRepository.userLabel(transaction, userId).orElse(null), null, null, detail,
+                transaction.now()));
     }
 }

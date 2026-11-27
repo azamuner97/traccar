@@ -423,8 +423,15 @@ public class ConnectionManager implements BroadcastInterface {
     }
 
     private void refreshDeviceAccess(long userId) throws StorageException {
+        if (refreshDeviceSets(userId)) {
+            listeners.getOrDefault(userId, Set.of()).forEach(UpdateListener::onUpdateDeviceAccess);
+        }
+    }
+
+    /** Re-reads the devices a connected account may see; true when they changed. */
+    private boolean refreshDeviceSets(long userId) throws StorageException {
         if (!listeners.containsKey(userId)) {
-            return;
+            return false;
         }
         Set<Long> current = storage.getObjects(Device.class, new Request(new Columns.Include("id"),
                 new Condition.Permission(User.class, userId, Device.class))).stream()
@@ -442,9 +449,7 @@ public class ConnectionManager implements BroadcastInterface {
             deviceUsers.computeIfAbsent(deviceId, ignored -> new HashSet<>()).add(userId);
         }
         userDevices.put(userId, current);
-        if (!current.equals(before)) {
-            listeners.getOrDefault(userId, Set.of()).forEach(UpdateListener::onUpdateDeviceAccess);
-        }
+        return !current.equals(before);
     }
 
     @Override
@@ -454,7 +459,8 @@ public class ConnectionManager implements BroadcastInterface {
         }
         for (long userId : userIds) {
             try {
-                refreshDeviceAccess(userId);
+                // Every listed account hears of it once, whether or not its device set changed.
+                refreshDeviceSets(userId);
                 listeners.getOrDefault(userId, Set.of()).forEach(UpdateListener::onUpdateDeviceAccess);
             } catch (StorageException error) {
                 LOGGER.warn("Proximity device access refresh failed", error);

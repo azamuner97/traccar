@@ -10,7 +10,7 @@ import java.time.Instant;
 import java.util.List;
 
 /**
- * One kind of server execution (plan B2): timetable slots (phase 1), later live uploads, relays and break timers.
+ * One kind of server execution (plan B2): timetable slots, live uploads and relays, or break timers.
  * The execution task asks every runner which work is due for the running session and runs it in order on the
  * execution thread; the task owns the order and the gate (the game must run).
  *

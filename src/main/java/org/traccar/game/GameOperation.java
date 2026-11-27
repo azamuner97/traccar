@@ -14,9 +14,8 @@ import com.fasterxml.jackson.databind.JsonNode;
  * One typed game state operation of an effects delivery (plan §3.2), in JSON {@code {"type": "catch", ...}}.
  *
  * <p>The server validates each operation against the current state of its row and answers 409 for an illegal
- * transition; it compares deadlines but never schedules anything. Times are ISO-8601 instants. Speedhunt fakes are
- * not operations: a run's first delivered ping binds every armed speedhunt fake, and the server applies the target's
- * own fake to the target's hunter mirror positions.
+ * transition. Times are ISO-8601 instants. Speedhunt fakes are not operations: a run's first delivered ping binds
+ * every armed speedhunt fake, and the server applies the target's own fake to the target's hunter mirror positions.
  */
 @JsonTypeInfo(use = JsonTypeInfo.Id.NAME, property = "type")
 @JsonSubTypes({
@@ -27,7 +26,6 @@ import com.fasterxml.jackson.databind.JsonNode;
     @JsonSubTypes.Type(value = GameOperation.RunEnded.class, name = "runEnded"),
     @JsonSubTypes.Type(value = GameOperation.LiveUploadStarted.class, name = "liveUploadStarted"),
     @JsonSubTypes.Type(value = GameOperation.LiveUploadEnded.class, name = "liveUploadEnded"),
-    @JsonSubTypes.Type(value = GameOperation.BreakPlanned.class, name = "breakPlanned"),
     @JsonSubTypes.Type(value = GameOperation.BreakStarted.class, name = "breakStarted"),
     @JsonSubTypes.Type(value = GameOperation.BreakCancelled.class, name = "breakCancelled"),
     @JsonSubTypes.Type(value = GameOperation.Checkpoint.class, name = "checkpoint"),
@@ -103,10 +101,6 @@ public sealed interface GameOperation {
 
     /** An active live upload ends: an operator's stop, a {@code speedhuntStopLivePing} request. */
     record LiveUploadEnded(long liveUploadId, String endReason) implements GameOperation {
-    }
-
-    /** An operator plans a member's break; without an available break joker it needs {@code overAllocate}. */
-    record BreakPlanned(long memberId, String plannedStart, Boolean overAllocate) implements GameOperation {
     }
 
     /**

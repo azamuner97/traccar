@@ -26,7 +26,7 @@ public abstract class GameEffectsTest extends GameTestBase {
     private GameEffectsService effects;
     private GameRequestService requests;
     private GameJokerService jokers;
-    private GameStateService state;
+    private GameStateFixture state;
     private GameNotificationService notifications;
     private final List<String> sent = new ArrayList<>();
     private final List<Long> failing = new ArrayList<>();
@@ -42,7 +42,7 @@ public abstract class GameEffectsTest extends GameTestBase {
         effects = effectsService();
         requests = new GameRequestService(transactions, mapper, publisher);
         jokers = new GameJokerService(transactions, publisher);
-        state = new GameStateService(transactions, mapper, publisher);
+        state = new GameStateFixture(transactions, mapper, publisher);
         notifications = new GameNotificationService(transactions, publisher);
         outbox = new GamePushOutbox(transactions, (userId, notificator, subject, message) -> {
             if (failing.contains(userId)) {
@@ -143,7 +143,7 @@ public abstract class GameEffectsTest extends GameTestBase {
         String id = id();
         var delivery = new GameEffectsService.Delivery(id, List.of(),
                 List.of(speedhunt(game.anna(), 1, List.of("hunters", "players"))), null, null,
-                List.of(new GameLogService.LogInput(GameLogService.SPEEDHUNT, T0.toString(),
+                List.of(new GameLogService.LogInput("speedhunt", T0.toString(),
                         "Speedhunt started")), null, null);
         long before = revision(game.session());
         var outcome = deliver(game.session(), delivery);
@@ -220,7 +220,7 @@ public abstract class GameEffectsTest extends GameTestBase {
         assertStatus(400, () -> deliver(game.session(), new GameEffectsService.Delivery(id(), List.of(), null,
                 null, null, null, null, List.of(new GameJokerService.Use(game.anna().id(),
                         GameJokerRepository.BREAK, true, null)))));
-        assertEquals(List.of(), jokers.reconcile(game.session()));
+        assertEquals(List.of(), reconcile(game.session()));
     }
 
     // No raw positions --------------------------------------------------------------------------------------
@@ -331,7 +331,7 @@ public abstract class GameEffectsTest extends GameTestBase {
                 "teleport", game.ben().id(), null, List.of("hunters"), null, null, null, null, null))));
         assertStatus(400, () -> deliver(game.session(), pings(id(), intent(game.ben(), List.of(), null,
                 null))));
-        assertEquals(List.of(), jokers.reconcile(game.session()));
+        assertEquals(List.of(), reconcile(game.session()));
     }
 
     @Test
@@ -365,11 +365,6 @@ public abstract class GameEffectsTest extends GameTestBase {
         // The JSON API does not know the operation at all.
         assertThrows(Exception.class, () -> mapper.readValue("{\"type\": \"liveUploadSample\", \"liveUploadId\": "
                 + upload + "}", GameOperation.class));
-    }
-
-    private static void assertOffset(double latitude, double planned) {
-        double meters = Math.abs(latitude - planned) * 111_320;
-        assertTrue(meters <= 20.5, "offset " + meters);
     }
 
     @Test
@@ -459,7 +454,7 @@ public abstract class GameEffectsTest extends GameTestBase {
         assertStatus(409, () -> deliver(game.session(), new GameEffectsService.Delivery(id(), List.of(), null,
                 new GameEffectsService.NotificationInput(UUID.randomUUID().toString(), List.of(alert)), null, null,
                 null, null)));
-        assertEquals(List.of(), jokers.reconcile(game.session()));
+        assertEquals(List.of(), reconcile(game.session()));
     }
 
     @Test

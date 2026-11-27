@@ -168,6 +168,22 @@ public class ConnectionManagerTest {
     }
 
     @Test
+    public void testGameAccessInvalidatesDevicesOncePerAccountWhenItsDevicesChange() throws Exception {
+        Device device = new Device();
+        device.setId(100);
+        when(storage.getObjects(eq(Device.class), any(Request.class))).thenReturn(List.of(device));
+        connectionManager.updateGameAccess(true, java.util.Set.of(1L, 2L));
+        verify(listener, times(1)).onUpdateDeviceAccess();
+        verify(secondListener, times(1)).onUpdateDeviceAccess();
+
+        reset(listener, secondListener);
+        when(storage.getObjects(eq(Device.class), any(Request.class))).thenReturn(List.of());
+        connectionManager.updateGameAccess(false, java.util.Set.of(1L));
+        verify(listener, times(1)).onUpdateDeviceAccess();
+        verify(secondListener, never()).onUpdateDeviceAccess();
+    }
+
+    @Test
     public void testTargetedGameNotificationInvalidationStaysPrivateAcrossBroadcast() throws Exception {
         // The game publisher resolves the recipient member's account; nobody else hears of the alert.
         when(storage.getObject(eq(User.class), any(Request.class))).thenReturn(new User());

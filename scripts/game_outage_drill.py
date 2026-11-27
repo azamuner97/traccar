@@ -167,7 +167,7 @@ def main(tool_source, gap):
         assert resumed.state == CONTROLLING and resumed.epoch == snapshot.epoch + 1 and resumed.resumed == 1, \
             resumed
         api.CONTROLLER["epoch"] = resumed.epoch
-        history = [item["event"] for item in api.request("GET", "/game-controller/history?limit=5")["items"]]
+        history = api.sql("SELECT event FROM tc_game_controller_history ORDER BY id DESC LIMIT 5").split()
         assert "takeover" not in history[:2], history
 
         assert gateway.state()["state"] == "running"

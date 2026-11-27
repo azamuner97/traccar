@@ -15,7 +15,7 @@ import java.util.List;
  * What members see of the game (plan §3.3): the role projections of {@link GameStatusService}, computed from the
  * typed tables. Times are ISO-8601 strings, because Traccar's {@code ObjectMapper} has no JSR-310 module.
  *
- * <p>The projections follow the model-1 visibility matrix (implementation plan, Stage 5):
+ * <p>The projections follow this visibility matrix:
  * <ul>
  * <li>Players and supporters: the catch roster, anonymous speedhunt progress (also when it targets themselves),
  * the running-speedhunt fake choice, and only their own break, armed fakes and planned breaks.</li>

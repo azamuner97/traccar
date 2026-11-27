@@ -24,7 +24,10 @@ import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Collection;
+import java.util.HashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.TimeZone;
 import java.util.UUID;
@@ -458,12 +461,12 @@ public abstract class GameTestBase {
     // Timetables --------------------------------------------------------------------------------------------
 
     /** A timetable row to add: its time and each member's cell. */
-    protected record Row(Instant at, java.util.Map<Long, String> cells) {
+    protected record Row(Instant at, Map<Long, String> cells) {
     }
 
     /** A row with cells given as (member, content) pairs. */
     protected static Row row(Instant at, Object... cells) {
-        java.util.Map<Long, String> map = new java.util.LinkedHashMap<>();
+        Map<Long, String> map = new java.util.LinkedHashMap<>();
         for (int i = 0; i < cells.length; i += 2) {
             map.put(((GameMember) cells[i]).id(), (String) cells[i + 1]);
         }
@@ -485,7 +488,7 @@ public abstract class GameTestBase {
             }
         }
         for (int i = 0; i < rows.length; i++) {
-            java.util.Map<String, String> cells = new java.util.LinkedHashMap<>();
+            Map<String, String> cells = new java.util.LinkedHashMap<>();
             rows[i].cells().forEach((member, content) -> cells.put(Long.toString(member), content));
             changes.add(new GameTimetableService.Change(GameTimetableService.ADD_SLOT, "r" + i, null,
                     rows[i].at().toString(), cells, null, null, null, null));
@@ -579,6 +582,64 @@ public abstract class GameTestBase {
 
     protected String reservationStatus(long reservation) throws SQLException {
         return text("SELECT status FROM tc_game_joker_reservations WHERE id = ?", reservation);
+    }
+
+    protected record Discrepancy(Long memberId, String type, String field, long stored, long expected) {
+    }
+
+    /**
+     * Checks that every joker balance equals the sum of its ledger entries (granted = grants − revocations, used =
+     * uses + uses beyond the allocation) and that every use has its consumed reservation. Empty when consistent.
+     */
+    protected List<Discrepancy> reconcile(long session) throws Exception {
+        return transactions.read(transaction -> {
+            record Key(Long memberId, String type) {
+            }
+            Map<Key, long[]> stored = new HashMap<>();
+            transaction.list("SELECT memberid, type, granted, used FROM tc_game_jokers WHERE gamesessionid = ?"
+                    + " UNION ALL SELECT NULL, type, granted, used FROM tc_game_joker_pools WHERE gamesessionid = ?",
+                    rows -> stored.put(new Key(GameTransaction.longOrNull(rows, "memberid"), rows.getString("type")),
+                            new long[] {rows.getLong("granted"), rows.getLong("used")}), session, session);
+            Map<Key, long[]> ledger = new HashMap<>();
+            transaction.list("SELECT memberid, type, kind, SUM(quantity) AS total FROM tc_game_joker_ledger"
+                    + " WHERE gamesessionid = ? GROUP BY memberid, type, kind", rows -> {
+                        long[] sums = ledger.computeIfAbsent(new Key(GameTransaction.longOrNull(rows, "memberid"),
+                                rows.getString("type")), key -> new long[2]);
+                        long total = rows.getLong("total");
+                        switch (rows.getString("kind")) {
+                            case GameJokerRepository.GRANT -> sums[0] += total;
+                            case GameJokerRepository.REVOKE -> sums[0] -= total;
+                            case GameJokerRepository.USE, GameJokerRepository.OVERUSE -> sums[1] += total;
+                            default -> {
+                            }
+                        }
+                        return null;
+                    }, session);
+            Map<Key, Long> consumed = new HashMap<>();
+            transaction.list("SELECT memberid, type, COUNT(*) AS total FROM tc_game_joker_reservations"
+                    + " WHERE gamesessionid = ? AND status = ? GROUP BY memberid, type",
+                    rows -> consumed.put(new Key(GameTransaction.longOrNull(rows, "memberid"), rows.getString("type")),
+                            rows.getLong("total")), session, GameJokerRepository.CONSUMED);
+            Set<Key> keys = new LinkedHashSet<>(stored.keySet());
+            keys.addAll(ledger.keySet());
+            keys.addAll(consumed.keySet());
+            List<Discrepancy> result = new ArrayList<>();
+            for (Key key : keys) {
+                long[] balance = stored.getOrDefault(key, new long[2]);
+                long[] sums = ledger.getOrDefault(key, new long[2]);
+                if (balance[0] != sums[0]) {
+                    result.add(new Discrepancy(key.memberId(), key.type(), "granted", balance[0], sums[0]));
+                }
+                if (balance[1] != sums[1]) {
+                    result.add(new Discrepancy(key.memberId(), key.type(), "used", balance[1], sums[1]));
+                }
+                if (balance[1] != consumed.getOrDefault(key, 0L)) {
+                    result.add(new Discrepancy(key.memberId(), key.type(), "consumed reservations", balance[1],
+                            consumed.getOrDefault(key, 0L)));
+                }
+            }
+            return result;
+        });
     }
 
     /** The coordinate of a device's latest position, or null without one. */

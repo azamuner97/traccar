@@ -28,8 +28,8 @@ import java.util.Set;
  *
  * <ul>
  * <li>Positions go to the cache and WebSocket subscribers like tracker uploads, and their devices show online with
- * a new last-update time, as model 1's effects did.</li>
- * <li>Invalidations keep model 1's WebSocket names ({@code {"invalidate": ["game-status"]}}). They reach the
+ * a new last-update time.</li>
+ * <li>Invalidations name the resource to reload ({@code {"invalidate": ["game-status"]}}). They reach the
  * accounts of the named members, or of every active member of the session, and always the operators
  * (administrators). Proximity circles concern hunters and the spectator only: a session-wide {@code game-proximity}
  * reaches those roles, and players and supporters learn about their own access through {@link #proximityAccess}.</li>

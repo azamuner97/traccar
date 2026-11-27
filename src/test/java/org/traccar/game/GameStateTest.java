@@ -18,21 +18,27 @@ public abstract class GameStateTest extends GameTestBase {
 
     private static final long EPOCH = 7;
 
-    private GameStateService state;
+    private GameStateFixture state;
     private GameJokerService jokers;
 
     @Override
     protected void createServices() {
-        state = new GameStateService(transactions, mapper, publisher);
+        state = new GameStateFixture(transactions, mapper, publisher);
         jokers = new GameJokerService(transactions, publisher);
     }
 
-    private GameStateService.Applied apply(long session, GameOperation... operations) throws Exception {
-        return state.apply(session, EPOCH, List.of(operations));
+    private GameStateFixture.Applied apply(long session, GameOperation... operations) throws Exception {
+        return state.apply(session, List.of(operations));
     }
 
     private long applyId(long session, GameOperation operation) throws Exception {
         return apply(session, operation).results().getFirst().id();
+    }
+
+    /** An operator plans a member's break ({@code POST .../jokers/breaks}); answers the break's ID. */
+    private long planBreak(long session, GameMember member, Instant start, boolean overAllocate) throws Exception {
+        return jokers.planBreak(session, member.id(), start == null ? null : start.toString(), overAllocate,
+                "Operator").plannedBreak().breakId();
     }
 
     /** Applies operations as the server's own execution does (live pings and samples are server-internal). */
@@ -45,7 +51,7 @@ public abstract class GameStateTest extends GameTestBase {
                 applied.apply(i, operations[i]);
             }
             transaction.bumpSession();
-            GameStateService.publish(transaction, publisher, session, applied);
+            GameOperations.publish(transaction, publisher, session, applied);
             return applied.results();
         });
     }
@@ -142,7 +148,7 @@ public abstract class GameStateTest extends GameTestBase {
                 GameState.REAL, true, true, true, null, null, "Operator", false)));
         apply(session, new GameOperation.PingDelivered(ben.id(), 1, GameState.STATIC, GameState.OPERATOR_FAKE, true,
                 false, true, null, null, "Operator", true));
-        assertEquals(List.of(), jokers.reconcile(session));
+        assertEquals(List.of(), reconcile(session));
         var pool = jokers.pool(session).inventories().getFirst();
         assertEquals(1, pool.granted());
         assertEquals(2, pool.used());
@@ -239,7 +245,7 @@ public abstract class GameStateTest extends GameTestBase {
         long revision = memberRevision(anna.id());
         Instant later = clock.instant().plusSeconds(3600);
 
-        long planned = applyId(session, new GameOperation.BreakPlanned(anna.id(), later.toString(), false));
+        long planned = planBreak(session, anna, later, false);
         assertEquals(1, jokers.own(anna).reservations().size());
         breakTick(session);
         assertEquals(GameState.PLANNED, pause(session, planned).state());
@@ -264,8 +270,7 @@ public abstract class GameStateTest extends GameTestBase {
         assertStatus(409, () -> apply(session, new GameOperation.BreakCancelled(planned, null)));
         assertStatus(409, () -> apply(session, ping(anna, 1)));
 
-        long second = applyId(session, new GameOperation.BreakPlanned(anna.id(), later.plusSeconds(3600).toString(),
-                false));
+        long second = planBreak(session, anna, later.plusSeconds(3600), false);
         clock.set(later.plusSeconds(660));
         breakTick(session);
         assertEquals(GameState.ENDED, pause(session, planned).state());
@@ -276,8 +281,7 @@ public abstract class GameStateTest extends GameTestBase {
         startGame(session);
         breakTick(session);
         assertEquals(GameState.MISSED, pause(session, second).state());
-        long third = applyId(session, new GameOperation.BreakPlanned(anna.id(), later.plusSeconds(9000).toString(),
-                false));
+        long third = planBreak(session, anna, later.plusSeconds(9000), false);
         apply(session, new GameOperation.BreakCancelled(third, null));
         assertEquals(revision + 2, memberRevision(anna.id()));
 
@@ -291,10 +295,11 @@ public abstract class GameStateTest extends GameTestBase {
                 .filter(item -> item.type().equals(GameJokerRepository.BREAK)).findFirst().orElseThrow();
         assertEquals(1, inventory.used());
         assertEquals(1, inventory.available());
-        assertEquals(List.of(), jokers.reconcile(session));
+        assertEquals(List.of(), reconcile(session));
         assertStatus(400, () -> apply(session, new GameOperation.BreakStarted(null, null)));
-        // Planned starts, waits, deadline ends and misses are the server's own: the JSON API knows them no more.
-        for (String type : List.of("breakWaiting", "breakEnded", "breakMissed")) {
+        // Plans go through the joker endpoint; planned starts, waits, deadline ends and misses are the server's own:
+        // the effects API knows none of them.
+        for (String type : List.of("breakPlanned", "breakWaiting", "breakEnded", "breakMissed")) {
             assertThrows(Exception.class, () -> mapper.readValue("{\"type\": \"" + type + "\", \"breakId\": "
                     + planned + "}", GameOperation.class));
         }
@@ -312,22 +317,21 @@ public abstract class GameStateTest extends GameTestBase {
     void breaksNeedADurationAndAJokerOrAConfirmedUseBeyondTheAllocation() throws Exception {
         long unset = session();
         GameMember anna = bound(unset, "player");
-        assertStatus(409, () -> apply(unset, new GameOperation.BreakPlanned(anna.id(), null, true)));
+        assertStatus(409, () -> planBreak(unset, anna, null, true));
 
         long session = session("{\"break_duration_minutes\": 0.5}");
         GameMember ben = bound(session, "supporter");
-        assertStatus(409, () -> apply(session, new GameOperation.BreakPlanned(ben.id(), null, false)));
-        applyId(session, new GameOperation.BreakPlanned(ben.id(), null, true));
+        assertStatus(409, () -> planBreak(session, ben, null, false));
+        planBreak(session, ben, null, true);
         // A plan without a start, or with one that has passed, is due now; another break would overlap it.
-        assertStatus(409, () -> apply(session, new GameOperation.BreakPlanned(ben.id(),
-                clock.instant().plusSeconds(10).toString(), true)));
+        assertStatus(409, () -> planBreak(session, ben, clock.instant().plusSeconds(10), true));
         startGame(session);
         breakTick(session);
         var inventory = jokers.own(ben).inventories().stream()
                 .filter(item -> item.type().equals(GameJokerRepository.BREAK)).findFirst().orElseThrow();
         assertEquals(1, inventory.used());
         assertEquals(1, inventory.overAllocated());
-        assertEquals(List.of(), jokers.reconcile(session));
+        assertEquals(List.of(), reconcile(session));
         assertEquals(1, number("SELECT COUNT(*) FROM tc_game_joker_ledger WHERE gamesessionid = ? AND kind = ?",
                 session, GameJokerRepository.OVERUSE));
         // The break lasted 30 seconds: once past its deadline it protects nobody, even before it ends.
@@ -370,17 +374,17 @@ public abstract class GameStateTest extends GameTestBase {
         assertNotNull(state.liveUploads(session).stream().filter(item -> item.id() == relay).findFirst()
                 .orElseThrow().reservationId());
 
-        assertEquals(List.of(new GameStateService.LiveShare(anna.id(), "manual", null, "Too far out"),
-                new GameStateService.LiveShare(ben.id(), "geofence", clock.instant().plusSeconds(300), null)),
+        assertEquals(List.of(new GameStateRepository.LiveShare(anna.id(), "manual", null, "Too far out"),
+                new GameStateRepository.LiveShare(ben.id(), "geofence", clock.instant().plusSeconds(300), null)),
                 state.liveShares(session));
 
         // The server runs live uploads whatever the lease does: a new controller epoch keeps every share.
         lease(session, EPOCH + 1);
         assertEquals(List.of(anna.id(), ben.id()), state.liveShares(session).stream()
-                .map(GameStateService.LiveShare::memberId).toList());
-        state.apply(session, EPOCH + 1, List.of(new GameOperation.Catch(anna.id(), null)));
+                .map(GameStateRepository.LiveShare::memberId).toList());
+        state.apply(session, List.of(new GameOperation.Catch(anna.id(), null)));
         assertEquals(List.of(ben.id()), state.liveShares(session).stream()
-                .map(GameStateService.LiveShare::memberId).toList());
+                .map(GameStateRepository.LiveShare::memberId).toList());
         // The catch ended Anna's live upload with an ended event.
         assertEquals(GameLiveEvents.CAUGHT, state.liveUploads(session).stream().filter(item -> item.id() == manual)
                 .findFirst().orElseThrow().endReason());
@@ -400,7 +404,7 @@ public abstract class GameStateTest extends GameTestBase {
                 null, true, true, true, 30, null, null, null, true, null, null, null)));
         assertStatus(409, () -> apply(session, new GameOperation.LiveUploadStarted(GameState.MANUAL, carla.id(),
                 null, true, true, true, 30, clock.instant().toString(), null, null, null, null, null, null)));
-        assertEquals(List.of(), jokers.reconcile(session));
+        assertEquals(List.of(), reconcile(session));
         assertEquals(Set.of(dora.id()), publisher.topic(GamePublisher.JOKERS).getLast().members());
     }
 
@@ -411,7 +415,7 @@ public abstract class GameStateTest extends GameTestBase {
         assertEquals(1, applied.results().getFirst().id());
         assertStatus(409, () -> apply(session, new GameOperation.Checkpoint("monitoring", 0, 1,
                 json("{\"cursor\": 4}"))));
-        assertStatus(400, () -> state.apply(session, EPOCH, List.of()));
+        assertStatus(400, () -> state.apply(session, List.of()));
     }
 
 }

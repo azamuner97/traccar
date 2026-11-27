@@ -47,15 +47,14 @@
     {
       "input": "x",
       "kind": "invalid",
-      "error": "x is no longer an instruction",
+      "error": "timetable value 'x' is not supported",
       "fakeEligible": false,
-      "hunterFacing": false,
-      "note": "x no longer means no ping; leave the cell blank"
+      "hunterFacing": false
     },
     {
       "input": " X ",
       "kind": "invalid",
-      "error": "x is no longer an instruction",
+      "error": "timetable value 'X' is not supported",
       "fakeEligible": false,
       "hunterFacing": false
     },
@@ -420,7 +419,7 @@
     {
       "input": "47.1,8.5|X",
       "kind": "invalid",
-      "error": "x is no longer an instruction",
+      "error": "target code 'X' is not supported",
       "fakeEligible": false,
       "hunterFacing": false
     },
@@ -441,7 +440,7 @@
     {
       "input": "47.1,8.5|x",
       "kind": "invalid",
-      "error": "x is no longer an instruction",
+      "error": "target code 'x' is not supported",
       "fakeEligible": false,
       "hunterFacing": false
     },

@@ -27,7 +27,7 @@ public abstract class GameLiveUploadRunnerTest extends GameTestBase {
 
     private static final long EPOCH = 31;
 
-    private GameStateService state;
+    private GameStateFixture state;
     private GameJokerService jokers;
     private GameRequestService requests;
     private GameEffectsService effects;
@@ -42,11 +42,11 @@ public abstract class GameLiveUploadRunnerTest extends GameTestBase {
 
     @Override
     protected void createServices() throws Exception {
-        state = new GameStateService(transactions, mapper, publisher);
+        state = new GameStateFixture(transactions, mapper, publisher);
         jokers = new GameJokerService(transactions, publisher);
         requests = new GameRequestService(transactions, mapper, publisher);
         effects = effectsService();
-        execution = new GameExecutionService(transactions, new GameControllerService(source, clock, 30, 5, null,
+        execution = new GameExecutionService(transactions, new GameControllerService(transactions, 30, 5, null,
                 publisher), publisher);
         operator = user();
     }
@@ -202,7 +202,7 @@ public abstract class GameLiveUploadRunnerTest extends GameTestBase {
         assertEquals(46.0, sample.get("position").get("latitude").asDouble());
         // Hunters see the share while the upload is active, whatever the lease does.
         assertEquals(List.of(anna.id()), state.liveShares(game.session()).stream()
-                .map(GameStateService.LiveShare::memberId).toList());
+                .map(GameStateRepository.LiveShare::memberId).toList());
 
         // Ticks follow the interval: 1, 6, 11, 16 s; each sends the current position; an unchanged outcome
         // writes no event.
@@ -216,7 +216,7 @@ public abstract class GameLiveUploadRunnerTest extends GameTestBase {
         // Another Tool takes control (a new epoch): the upload goes on.
         lease(game.session(), EPOCH + 1);
         assertEquals(List.of(anna.id()), state.liveShares(game.session()).stream()
-                .map(GameStateService.LiveShare::memberId).toList());
+                .map(GameStateRepository.LiveShare::memberId).toList());
         advanceTo(T0.plusSeconds(16));
         assertEquals(4, positions(toHunters));
         assertEquals(List.of("started", "sample"), types(upload));
@@ -444,7 +444,7 @@ public abstract class GameLiveUploadRunnerTest extends GameTestBase {
         GameState.LiveUpload ended = upload(game, gone);
         assertEquals(GameLiveEvents.NO_JOKER, ended.endReason());
         assertEquals(2, used(game, sue));
-        assertEquals(List.of(), jokers.reconcile(game.session()));
+        assertEquals(List.of(), reconcile(game.session()));
     }
 
     private int used(Game game, GameMember member) throws Exception {
@@ -530,7 +530,7 @@ public abstract class GameLiveUploadRunnerTest extends GameTestBase {
         // A new speedhunt needs a pool joker, held, available or allowed beyond the allocation.
         assertStatus(409, () -> start(game, new GameOperation.LiveUploadStarted(GameState.SPEEDHUNT_PING, anna.id(),
                 null, true, false, false, 10, null, null, null, null, null, null, null)));
-        assertEquals(List.of(), jokers.reconcile(game.session()));
+        assertEquals(List.of(), reconcile(game.session()));
     }
 
     @Test
@@ -569,7 +569,7 @@ public abstract class GameLiveUploadRunnerTest extends GameTestBase {
         assertEquals(GameLiveEvents.RUN_ENDED, upload(game, next).endReason());
         assertEquals(GameState.TERMINATED, state.runs(game.session()).getFirst().run().outcome());
         assertEquals(run.id(), state.runs(game.session()).getFirst().run().id());
-        assertEquals(List.of(), jokers.reconcile(game.session()));
+        assertEquals(List.of(), reconcile(game.session()));
     }
 
     @Test
@@ -608,7 +608,7 @@ public abstract class GameLiveUploadRunnerTest extends GameTestBase {
             assertOffset(latest(toHunters)[0], 46.5);
             assertArrayEquals(new double[] {47.1, 8.5}, latest(toPlayers));
         }
-        assertEquals(List.of(), jokers.reconcile(game.session()));
+        assertEquals(List.of(), reconcile(game.session()));
     }
 
     @Test

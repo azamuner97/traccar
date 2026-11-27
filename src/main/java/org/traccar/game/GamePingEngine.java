@@ -860,7 +860,7 @@ public class GamePingEngine {
             Outcome outcome = apply(transaction, sessionId, intent, context, fix, applied, collector);
             hooks.completed(transaction, outcome);
             transaction.bumpSession();
-            GameStateService.publish(transaction, publisher, sessionId, applied);
+            GameOperations.publish(transaction, publisher, sessionId, applied);
             collector.publish(transaction, publisher);
             return outcome;
         });

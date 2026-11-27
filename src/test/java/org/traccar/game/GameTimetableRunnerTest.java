@@ -37,7 +37,7 @@ public abstract class GameTimetableRunnerTest extends GameTestBase {
     @Override
     protected void createServices() throws Exception {
         timetables = new GameTimetableService(transactions, mapper, publisher);
-        execution = new GameExecutionService(transactions, new GameControllerService(source, clock, 30, 5, null,
+        execution = new GameExecutionService(transactions, new GameControllerService(transactions, 30, 5, null,
                 publisher), publisher);
         operator = user();
     }

@@ -43,8 +43,7 @@ import java.util.Map;
 /**
  * Game sessions of data model 2 for operators (administrators): sessions and their settings, members and their
  * bindings, resource rows, documents (credentials, geofence plans, the device list) and checkpoints, the timetable,
- * logs, requests, jokers, effects deliveries and the operator snapshot. Model 1's paths are kept where the concept
- * is unchanged.
+ * logs, requests, jokers, effects deliveries and the operator snapshot.
  *
  * <p>{@code GameControllerFilter} fences writes by path: effects, {@code members/*},
  * {@code resources/*}, {@code checkpoints/*}, {@code requests/*} and {@code jokers/*} always, and every write of the
@@ -59,12 +58,8 @@ public class GameSessionResource extends GameApiResource {
     public record Capabilities(int apiVersion) {
     }
 
-    /** {@code settingsSchemaVersion} defaults to {@code schemaVersion}. */
-    public record CreateRequest(String name, Integer schemaVersion, Integer settingsSchemaVersion, JsonNode config) {
-    }
-
-    /** The session name is configuration: it is renamed based on the settings revision. */
-    public record RenameRequest(Long expectedRevision, String name) {
+    /** {@code schemaVersion} versions both the session and its settings. */
+    public record CreateRequest(String name, Integer schemaVersion, JsonNode config) {
     }
 
     public record DocumentUpdate(Long expectedRevision, Integer schemaVersion, JsonNode document) {
@@ -196,9 +191,7 @@ public class GameSessionResource extends GameApiResource {
         if (request == null || request.schemaVersion() == null) {
             throw new BadRequestException("name, schemaVersion and config are required");
         }
-        int settingsSchemaVersion = request.settingsSchemaVersion() == null
-                ? request.schemaVersion() : request.settingsSchemaVersion();
-        return json(sessions.create(request.name(), request.schemaVersion(), settingsSchemaVersion,
+        return json(sessions.create(request.name(), request.schemaVersion(), request.schemaVersion(),
                 request.config()));
     }
 
@@ -218,15 +211,7 @@ public class GameSessionResource extends GameApiResource {
         return Response.noContent().build();
     }
 
-    @PUT
-    @Path("{id}/name")
-    public JsonNode rename(@PathParam("id") long id, RenameRequest request) throws Exception {
-        checkOperator();
-        required(request, "Name required");
-        return json(sessions.rename(id, expected(request.expectedRevision()), request.name()));
-    }
-
-    /** Replaces the settings document (model 1's configuration) based on the settings revision. */
+    /** Replaces the settings document based on the settings revision. */
     @PUT
     @Path("{id}/config")
     public JsonNode updateSettings(@PathParam("id") long id, DocumentUpdate request) throws Exception {
@@ -293,13 +278,6 @@ public class GameSessionResource extends GameApiResource {
         return json(members().plan(id, input.role(), input.number(), input.displayName()));
     }
 
-    @GET
-    @Path("{id}/members/{memberId}")
-    public JsonNode member(@PathParam("id") long id, @PathParam("memberId") long memberId) throws Exception {
-        checkOperator();
-        return json(members().get(id, memberId));
-    }
-
     @PUT
     @Path("{id}/members/{memberId}/name")
     public JsonNode renameMember(@PathParam("id") long id, @PathParam("memberId") long memberId, NameInput input)
@@ -348,16 +326,6 @@ public class GameSessionResource extends GameApiResource {
     public JsonNode retire(@PathParam("id") long id, @PathParam("memberId") long memberId) throws Exception {
         checkOperator();
         return json(members().retire(id, memberId));
-    }
-
-    /** Retires the member and plans a new one with the new role, which takes over its bindings. */
-    @POST
-    @Path("{id}/members/{memberId}/role")
-    public JsonNode changeRole(@PathParam("id") long id, @PathParam("memberId") long memberId, MemberInput input)
-            throws Exception {
-        checkOperator();
-        required(input, "Role required");
-        return json(members().changeRole(id, memberId, input.role(), input.number(), input.displayName()));
     }
 
     // Resource rows -----------------------------------------------------------------------------------------
@@ -632,14 +600,6 @@ public class GameSessionResource extends GameApiResource {
     public JsonNode jokerLedger(@PathParam("id") long id, @QueryParam("limit") int limit) throws Exception {
         checkOperator();
         return json(jokers.ledger(id, limit));
-    }
-
-    /** Balances that differ from their ledger or consumed reservations; empty when consistent. */
-    @GET
-    @Path("{id}/jokers/reconcile")
-    public JsonNode reconcileJokers(@PathParam("id") long id) throws Exception {
-        checkOperator();
-        return json(jokers.reconcile(id));
     }
 
     /** Grants (positive quantity) or revokes (negative) unused jokers of a member, or of the hunters' pool. */

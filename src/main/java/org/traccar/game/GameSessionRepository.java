@@ -106,20 +106,10 @@ public final class GameSessionRepository {
         return id;
     }
 
-    public static void rename(GameTransaction transaction, long id, String name) throws SQLException {
-        transaction.update("UPDATE tc_game_sessions SET name = ? WHERE id = ?", name, id);
-    }
-
     public static void updateSettings(GameTransaction transaction, long id, long revision, int schemaVersion,
                                       String settings) throws SQLException {
         transaction.update("UPDATE tc_game_session_settings SET schemaversion = ?, revision = ?, settings = ?,"
                 + " updatedat = ? WHERE gamesessionid = ?", schemaVersion, revision, settings, transaction.now(), id);
-    }
-
-    /** Advances the settings revision without changing the settings, for configuration kept on the session row. */
-    public static void advanceSettings(GameTransaction transaction, long id, long revision) throws SQLException {
-        transaction.update("UPDATE tc_game_session_settings SET revision = ?, updatedat = ?"
-                + " WHERE gamesessionid = ?", revision, transaction.now(), id);
     }
 
     /** Deletes every row of a locked session, in {@link #DELETE_ORDER}, and then the session. */

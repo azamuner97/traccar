@@ -61,7 +61,7 @@ public class GamePlanInvalidation implements GameBindingHook {
                     new GamePublisher.Invalidation(sessionId, GamePublisher.REQUESTS, null)));
         }
         if (pool) {
-            owners.addAll(GameStateService.hunters(transaction, sessionId));
+            owners.addAll(GameMemberRepository.hunters(transaction, sessionId));
         }
         if (!owners.isEmpty()) {
             Set<Long> recipients = Set.copyOf(owners);

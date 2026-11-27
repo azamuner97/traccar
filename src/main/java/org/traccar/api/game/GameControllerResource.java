@@ -9,15 +9,12 @@ package org.traccar.api.game;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.BadRequestException;
 import jakarta.ws.rs.Consumes;
-import jakarta.ws.rs.ForbiddenException;
 import jakarta.ws.rs.GET;
 import jakarta.ws.rs.HeaderParam;
 import jakarta.ws.rs.POST;
 import jakarta.ws.rs.Path;
 import jakarta.ws.rs.Produces;
-import jakarta.ws.rs.QueryParam;
 import jakarta.ws.rs.core.MediaType;
-import org.traccar.api.BaseResource;
 import org.traccar.game.GameControllerService;
 
 /**
@@ -30,21 +27,13 @@ import org.traccar.game.GameControllerService;
 @Path("game-controller")
 @Produces(MediaType.APPLICATION_JSON)
 @Consumes(MediaType.APPLICATION_JSON)
-public class GameControllerResource extends BaseResource {
+public class GameControllerResource extends GameApiResource {
 
     /** {@code resumeEpoch}: the epoch this instance held when it lost control (acquisition only). */
     public record InstanceRequest(String instanceId, String label, Long resumeEpoch) { }
 
     @Inject
     private GameControllerService controller;
-
-    private void checkOperator() throws Exception {
-        try {
-            permissionsService.checkAdmin(getUserId());
-        } catch (SecurityException error) {
-            throw new ForbiddenException(error.getMessage());
-        }
-    }
 
     private static long epoch(String header) {
         Long value = GameControllerService.parseEpoch(header);
@@ -97,13 +86,5 @@ public class GameControllerResource extends BaseResource {
             throws Exception {
         checkOperator();
         return controller.release(getUserId(), epoch(header));
-    }
-
-    @GET
-    @Path("history")
-    public GameControllerService.HistoryPage history(
-            @QueryParam("before") String before, @QueryParam("limit") int limit) throws Exception {
-        checkOperator();
-        return controller.history(before, limit);
     }
 }

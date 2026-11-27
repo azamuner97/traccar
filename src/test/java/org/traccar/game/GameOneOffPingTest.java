@@ -27,7 +27,7 @@ public abstract class GameOneOffPingTest extends GameTestBase {
     private GameEffectsService effects;
     private GameRequestService requests;
     private GameJokerService jokers;
-    private GameStateService state;
+    private GameStateFixture state;
     private GameSnapshotService snapshots;
 
     @Override
@@ -40,7 +40,7 @@ public abstract class GameOneOffPingTest extends GameTestBase {
         effects = effectsService();
         requests = new GameRequestService(transactions, mapper, publisher);
         jokers = new GameJokerService(transactions, publisher);
-        state = new GameStateService(transactions, mapper, publisher);
+        state = new GameStateFixture(transactions, mapper, publisher);
         snapshots = new GameSnapshotService(transactions, mapper);
     }
 
@@ -391,7 +391,7 @@ public abstract class GameOneOffPingTest extends GameTestBase {
         assertNull(latest(mirror(game, game.sue(), "hunters")));
         deliver(game, staticPing(game.sue(), 1, List.of("hunters"), true));
         assertEquals(2, pool(game).used());
-        assertEquals(List.of(), jokers.reconcile(game.session()));
+        assertEquals(List.of(), reconcile(game.session()));
     }
 
     /** Arms a speedhunt fake of {@code owner} on ping {@code number} of the next speedhunt. */
@@ -535,7 +535,7 @@ public abstract class GameOneOffPingTest extends GameTestBase {
         assertEquals(1, pool(game).used());
         assertEquals(0, pool(game).reserved());
         assertEquals(1, pool(game).available());
-        assertEquals(List.of(), jokers.reconcile(game.session()));
+        assertEquals(List.of(), reconcile(game.session()));
     }
 
     // One-off hunter relays ---------------------------------------------------------------------------------
@@ -607,7 +607,7 @@ public abstract class GameOneOffPingTest extends GameTestBase {
         var third = relays(game).getLast();
         assertEquals(game.ben().id(), third.recipientMemberId());
         assertNull(third.reservationId());
-        assertEquals(List.of(), jokers.reconcile(game.session()));
+        assertEquals(List.of(), reconcile(game.session()));
     }
 
     @Test
@@ -698,7 +698,7 @@ public abstract class GameOneOffPingTest extends GameTestBase {
         assertEquals(reservationOf(game, request.id()),
                 record.reservationId());
         assertEquals(1, publisher.topic(GamePublisher.REQUESTS).size());
-        assertEquals(List.of(), jokers.reconcile(game.session()));
+        assertEquals(List.of(), reconcile(game.session()));
     }
 
     // Reconciling an uncertain delivery ---------------------------------------------------------------------

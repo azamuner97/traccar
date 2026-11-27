@@ -22,7 +22,7 @@ import org.traccar.game.GameMember;
 import org.traccar.game.GameNotificationService;
 
 /**
- * The game notification journal of data model 2, keyed by game session instead of model 1's session device.
+ * The game notification journal of data model 2, keyed by game session.
  * Members read the current generation of their own session (resolved from their membership), filtered by their
  * role and member; operators read and archive any session's journal and reset it. {@code GameControllerFilter}
  * fences every write.
@@ -58,15 +58,6 @@ public class GameNotificationResource extends GameApiResource {
         return json(notifications.list(member.gameSessionId(), generation, after, limit, member));
     }
 
-    /** Operator history of a session across generations. */
-    @GET
-    @Path("history")
-    public JsonNode history(@QueryParam("gameSessionId") long gameSessionId, @QueryParam("after") String after,
-                            @QueryParam("limit") int limit) throws Exception {
-        checkOperator();
-        return json(notifications.history(gameSessionId, after, limit));
-    }
-
     @POST
     public JsonNode create(CreateRequest request) throws Exception {
         checkOperator();
@@ -74,14 +65,6 @@ public class GameNotificationResource extends GameApiResource {
             throw new BadRequestException("gameSessionId and alert are required");
         }
         return json(notifications.create(request.gameSessionId(), request.generation(), request.alert()));
-    }
-
-    /** The stream state of a session (null before its first generation). */
-    @GET
-    @Path("session/{id}")
-    public JsonNode state(@PathParam("id") long id) throws Exception {
-        checkOperator();
-        return json(notifications.state(id));
     }
 
     /** Starts the session's first generation; an initialized session keeps its own. */

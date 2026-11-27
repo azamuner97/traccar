@@ -13,7 +13,7 @@ public class GameOneOffPingMySqlTest extends GameOneOffPingTest {
 
     @Override
     protected DataSource database() throws Exception {
-        return mysql.create(true);
+        return mysql.create();
     }
 
     @AfterAll

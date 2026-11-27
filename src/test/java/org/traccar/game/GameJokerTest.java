@@ -14,7 +14,7 @@ import static org.junit.jupiter.api.Assertions.*;
 
 /**
  * Step 3c of game data model 2: requests, jokers, the speedhunt pool, reservations, the ledger, fake ping plans,
- * planned breaks, the binding hook and mirror-only hunter access. Ports the model-1 rule tests. Runs on H2
+ * planned breaks, the binding hook and mirror-only hunter access. Runs on H2
  * ({@link GameJokerH2Test}) and MySQL ({@link GameJokerMySqlTest}).
  */
 public abstract class GameJokerTest extends GameTestBase {
@@ -25,7 +25,7 @@ public abstract class GameJokerTest extends GameTestBase {
 
     private GameRequestService requests;
     private GameJokerService jokers;
-    private GameStateService state;
+    private GameStateFixture state;
     private GameTimetableService timetables;
 
     @Override
@@ -37,7 +37,7 @@ public abstract class GameJokerTest extends GameTestBase {
     protected void createServices() {
         requests = new GameRequestService(transactions, mapper, publisher);
         jokers = new GameJokerService(transactions, publisher);
-        state = new GameStateService(transactions, mapper, publisher);
+        state = new GameStateFixture(transactions, mapper, publisher);
         timetables = new GameTimetableService(transactions, mapper, publisher);
     }
 
@@ -97,7 +97,7 @@ public abstract class GameJokerTest extends GameTestBase {
                 applied.apply(i, list.get(i));
             }
             transaction.bumpSession();
-            GameStateService.publish(transaction, publisher, session, applied);
+            GameOperations.publish(transaction, publisher, session, applied);
             return applied;
         });
     }
@@ -108,8 +108,8 @@ public abstract class GameJokerTest extends GameTestBase {
                 operations);
     }
 
-    private GameStateService.Applied apply(long session, GameOperation... operations) throws Exception {
-        return state.apply(session, EPOCH, List.of(operations));
+    private GameStateFixture.Applied apply(long session, GameOperation... operations) throws Exception {
+        return state.apply(session, List.of(operations));
     }
 
     private static GameOperation.PingDelivered ping(GameMember target, int number, String source) {
@@ -118,7 +118,7 @@ public abstract class GameJokerTest extends GameTestBase {
     }
 
     private void assertReconciled(long session) throws Exception {
-        assertEquals(List.of(), jokers.reconcile(session));
+        assertEquals(List.of(), reconcile(session));
     }
 
     private String message(org.junit.jupiter.api.function.Executable executable) {

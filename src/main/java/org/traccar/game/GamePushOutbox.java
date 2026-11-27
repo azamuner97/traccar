@@ -24,7 +24,7 @@ import java.util.concurrent.Executors;
 
 /**
  * Sends the pushes that effects deliveries queue (tc_game_push_outbox), after their commit, one attempt per
- * recipient (model 1). A row is marked {@code attempting} before the attempt and {@code sent} or {@code failed}
+ * recipient. A row is marked {@code attempting} before the attempt and {@code sent} or {@code failed}
  * after it. After a restart, rows never attempted are sent; rows whose attempt outcome is unknown become
  * {@code uncertain} and are never retried, because a repeated push could reach the recipient twice. A repeated
  * delivery ID never queues its pushes again ({@link GameEffectsService}).

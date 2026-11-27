@@ -26,8 +26,7 @@ import java.util.regex.Pattern;
  * {@code 2P2S2H}): the real position to the code's audiences;</li>
  * <li>{@code lat,lon} or {@code lat,lon|code}: the coordinate as a fake to the code's audiences (default
  * {@code 2H}; {@code p} names all three), and the real position to the remaining audiences;</li>
- * <li>anything else is invalid, including {@code x} (formerly "no ping"), {@code lat,lon|x} and
- * {@code lat,lon|b}.</li>
+ * <li>anything else is invalid, including {@code lat,lon|b}.</li>
  * </ul>
  * Content is trimmed. Unlike the Tool, the server also accepts lowercase target codes and stores every valid cell
  * in its canonical spelling ({@code P} → {@code p}, {@code 2h} → {@code 2H}, {@code 47.1 , 8.5 | 2p} →
@@ -47,7 +46,6 @@ public record TimetableInstruction(Kind kind, String canonical, List<String> aud
 
     /** The real ping to everyone, and the coordinate target naming everyone. */
     public static final String ALL = "p";
-    static final String X_REMOVED = "x is no longer an instruction; leave the cell blank for no ping";
 
     private static final String SEPARATOR = "|";
     private static final Pattern COMPONENT = Pattern.compile("[+-]?(?:[0-9]+(?:\\.[0-9]*)?|\\.[0-9]+)");
@@ -116,10 +114,6 @@ public record TimetableInstruction(Kind kind, String canonical, List<String> aud
         if (normalized.equalsIgnoreCase(ALL)) {
             return real(ALL, AUDIENCES);
         }
-        if (normalized.equalsIgnoreCase("x")) {
-            return new TimetableInstruction(Kind.INVALID, normalized, List.of(), null, null, List.of(),
-                    "timetable value '" + normalized + "': " + X_REMOVED);
-        }
         if (normalized.equalsIgnoreCase("b")) {
             return real("b", List.of(PLAYERS, SUPPORTERS));
         }
@@ -141,9 +135,6 @@ public record TimetableInstruction(Kind kind, String canonical, List<String> aud
             targetValue = parts[1].strip();
             if (targetValue.isEmpty()) {
                 return invalid(normalized, "the target code after '|' is empty");
-            }
-            if (targetValue.equalsIgnoreCase("x")) {
-                return invalid(normalized, X_REMOVED + " ('x' cannot be used as a coordinate target)");
             }
             if (targetValue.equalsIgnoreCase("b")) {
                 return invalid(normalized, "break mode 'b' cannot be used as a coordinate target");

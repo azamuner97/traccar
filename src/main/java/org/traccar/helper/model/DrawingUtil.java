@@ -80,10 +80,6 @@ public final class DrawingUtil {
                 && Long.valueOf(membership.gameSessionId()).equals(drawing.getGameSessionId());
     }
 
-    public static boolean canView(User user, Membership membership, Drawing drawing) {
-        return canView(user, membership, drawing, null, null);
-    }
-
     public static boolean canView(User user, Membership membership, Drawing drawing,
                                   User owner, Membership ownerMembership) {
         if (user.getAdministrator() || drawing.getOwnerId() == user.getId()) {
@@ -93,18 +89,10 @@ public final class DrawingUtil {
                 || shared(user, membership, drawing, owner, ownerMembership);
     }
 
-    public static boolean canEdit(User user, Membership membership, Drawing drawing) {
-        return canEdit(user, membership, drawing, null, null);
-    }
-
     public static boolean canEdit(User user, Membership membership, Drawing drawing,
                                   User owner, Membership ownerMembership) {
         return canCreateOrEdit(user, membership)
                 && (drawing.getOwnerId() == user.getId() || shared(user, membership, drawing, owner, ownerMembership));
-    }
-
-    public static boolean canDelete(User user, Membership membership, Drawing drawing) {
-        return canDelete(user, membership, drawing, null, null);
     }
 
     public static boolean canDelete(User user, Membership membership, Drawing drawing,

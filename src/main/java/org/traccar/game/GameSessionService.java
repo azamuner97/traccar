@@ -20,18 +20,15 @@ import java.util.Set;
 /**
  * Game sessions of data model 2: identity, the aggregate revision, and versioned settings.
  *
- * <p>The settings revision guards configuration edits, which include the session name. The aggregate revision
- * advances with every committed change of the session and is for operators only (plan §2.4).
+ * <p>The settings revision guards configuration edits; the session name is set at creation and never changes. The
+ * aggregate revision advances with every committed change of the session and is for operators only (plan §2.4).
  */
 @Singleton
 public class GameSessionService {
 
     public static final int MAX_SETTINGS_LENGTH = 8 * 1024 * 1024;
 
-    /**
-     * The game-session API version of data model 2. Model 1 answered 4, so a Tool built for model 1 stops at
-     * connection to this server.
-     */
+    /** The game-session API version; a Tool that expects another version stops at connection to this server. */
     public static final int API_VERSION = 12;
     /** The operators' WebSocket invalidation of the session list. */
     public static final String SESSIONS_INVALIDATION = "game-sessions";
@@ -143,32 +140,6 @@ public class GameSessionService {
             nameFree(transaction, validName, 0);
             long id = GameSessionRepository.insert(transaction, validName, schemaVersion, settingsSchemaVersion,
                     serialized);
-            transaction.afterCommit(() -> publisher.operators(SESSIONS_INVALIDATION));
-            return read(transaction, id);
-        });
-    }
-
-    /**
-     * Renames a session based on the settings revision it was loaded with. A retry of the rename that already
-     * succeeded answers the current state.
-     */
-    public Session rename(long id, long expectedSettingsRevision, String name) throws Exception {
-        String validName = name(name);
-        return transactions.write(transaction -> {
-            transaction.lockSession(id);
-            Session current = read(transaction, id);
-            long revision = current.settings().revision();
-            if (validName.equals(current.name())
-                    && (expectedSettingsRevision == revision || expectedSettingsRevision + 1 == revision)) {
-                return current;
-            }
-            if (expectedSettingsRevision != revision) {
-                throw GameErrors.conflict("Settings revision conflict: current revision is " + revision);
-            }
-            nameFree(transaction, validName, id);
-            GameSessionRepository.rename(transaction, id, validName);
-            GameSessionRepository.advanceSettings(transaction, id, revision + 1);
-            transaction.bumpSession();
             transaction.afterCommit(() -> publisher.operators(SESSIONS_INVALIDATION));
             return read(transaction, id);
         });

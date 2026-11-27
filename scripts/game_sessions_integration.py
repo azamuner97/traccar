@@ -164,7 +164,35 @@ class Game:
         return [entry["kind"] for entry in entries if joker is None or entry["type"] == joker]
 
     def reconcile(self):
-        assert api.request("GET", f"/game-sessions/{self.id}/jokers/reconcile") == [], "Balances differ from ledger"
+        """Every joker balance equals the sum of its ledger entries (granted = grants - revocations, used = uses +
+        uses beyond the allocation), and every use has its consumed reservation."""
+        def rows(statement):
+            return [line.split("\t") for line in api.sql(statement).splitlines() if line]
+
+        session = int(self.id)
+        stored, ledger, consumed = {}, {}, {}
+        for member, joker, granted, used in rows(
+                f"SELECT memberid, type, granted, used FROM tc_game_jokers WHERE gamesessionid = {session}"
+                " UNION ALL SELECT NULL, type, granted, used FROM tc_game_joker_pools"
+                f" WHERE gamesessionid = {session}"):
+            stored[(member, joker)] = (int(granted), int(used))
+        signs = {"grant": (1, 0), "revoke": (-1, 0), "use": (0, 1), "overuse": (0, 1)}
+        for member, joker, kind, total in rows(
+                f"SELECT memberid, type, kind, SUM(quantity) FROM tc_game_joker_ledger WHERE gamesessionid = {session}"
+                " GROUP BY memberid, type, kind"):
+            granted, used = ledger.get((member, joker), (0, 0))
+            grant_sign, use_sign = signs.get(kind, (0, 0))
+            ledger[(member, joker)] = (granted + grant_sign * int(total), used + use_sign * int(total))
+        for member, joker, total in rows(
+                f"SELECT memberid, type, COUNT(*) FROM tc_game_joker_reservations WHERE gamesessionid = {session}"
+                " AND status = 'consumed' GROUP BY memberid, type"):
+            consumed[(member, joker)] = int(total)
+        differences = []
+        for key in {**stored, **ledger, **consumed}:
+            balance = stored.get(key, (0, 0))
+            if balance != ledger.get(key, (0, 0)) or balance[1] != consumed.get(key, 0):
+                differences.append((key, balance, ledger.get(key, (0, 0)), consumed.get(key, 0)))
+        assert differences == [], ("Balances differ from ledger", differences)
 
 
 # Sessions, documents and deletion -------------------------------------------------------------------------------
@@ -349,7 +377,8 @@ def audit_controller(fixtures, user_id, user_credentials):
     api.execute(session_id)
     api.request("PUT", f"/game-sessions/{session_id}/config",
                 {"expectedRevision": 2, "schemaVersion": 5, "document": {"game_settings": {"x": 1}}}, epoch=False, expected=423)
-    api.request("PUT", f"/game-sessions/0{session_id}/name", {"name": api.PREFIX + "-renamed"}, epoch=False,
+    api.request("PUT", f"/game-sessions/0{session_id}/config",
+                {"expectedRevision": 2, "schemaVersion": 5, "document": {"game_settings": {"x": 1}}}, epoch=False,
                 expected=423)
 
     # Standard mutations of game-owned resources need the epoch while a lease is held.
@@ -458,7 +487,7 @@ def audit_controller(fixtures, user_id, user_credentials):
                 epoch=expiring, expected=423)
     # Nobody acquired control since: the expired epoch is resumed without a takeover.
     assert api.acquire_controller(resume=expiring)["lease"]["epoch"] == expiring + 1
-    events = [item["event"] for item in api.request("GET", "/game-controller/history?limit=20")["items"]]
+    events = api.sql("SELECT event FROM tc_game_controller_history ORDER BY id DESC LIMIT 20").split()
     for event in ("expired", "acquired", "takeover", "takenOver", "released", "gameStarted",
                   "gameStopped", "unfencedEdit"):
         assert event in events, (event, events)

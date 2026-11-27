@@ -12,8 +12,8 @@ public class GameSchemaMySqlTest extends GameSchemaTest {
     private final GameMySqlFixture mysql = new GameMySqlFixture();
 
     @Override
-    protected DataSource database(boolean model2) throws Exception {
-        return mysql.create(model2);
+    protected DataSource database() throws Exception {
+        return mysql.create();
     }
 
     @AfterAll

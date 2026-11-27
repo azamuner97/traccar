@@ -14,7 +14,7 @@ import java.sql.SQLException;
 
 /**
  * The game rules the server reads from a session's settings document ({@code tc_game_session_settings}): the
- * Tool's {@code game_settings} object, with the defaults model 1 used.
+ * Tool's {@code game_settings} object, with the Tool's defaults.
  */
 public final class GameSettings {
 

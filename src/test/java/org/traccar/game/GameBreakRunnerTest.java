@@ -27,7 +27,7 @@ public abstract class GameBreakRunnerTest extends GameTestBase {
     private static final long EPOCH = 41;
     private static final String SETTINGS = "{\"break_duration_minutes\": 10, \"pings_per_speedhunt\": 3}";
 
-    private GameStateService state;
+    private GameStateFixture state;
     private GameJokerService jokers;
     private GameRequestService requests;
     private GameEffectsService effects;
@@ -41,11 +41,11 @@ public abstract class GameBreakRunnerTest extends GameTestBase {
 
     @Override
     protected void createServices() throws Exception {
-        state = new GameStateService(transactions, mapper, publisher);
+        state = new GameStateFixture(transactions, mapper, publisher);
         jokers = new GameJokerService(transactions, publisher);
         requests = new GameRequestService(transactions, mapper, publisher);
         effects = effectsService();
-        execution = new GameExecutionService(transactions, new GameControllerService(source, clock, 30, 5, null,
+        execution = new GameExecutionService(transactions, new GameControllerService(transactions, 30, 5, null,
                 publisher), publisher);
         operator = user();
     }
@@ -195,7 +195,7 @@ public abstract class GameBreakRunnerTest extends GameTestBase {
         advance(5);
         assertEquals(1, events(breakId).size(), "ended once");
         assertEquals(1, breakJokers(anna).used());
-        assertEquals(List.of(), jokers.reconcile(game.session()));
+        assertEquals(List.of(), reconcile(game.session()));
     }
 
     @Test
@@ -314,7 +314,7 @@ public abstract class GameBreakRunnerTest extends GameTestBase {
         assertEquals(GameState.ENDED, pause(game, breakId).state());
         assertEquals(List.of(GameBreakEvents.WAITING, GameBreakEvents.STARTED, GameBreakEvents.ENDED),
                 types(breakId));
-        assertEquals(List.of(), jokers.reconcile(game.session()));
+        assertEquals(List.of(), reconcile(game.session()));
     }
 
     @Test
@@ -433,7 +433,7 @@ public abstract class GameBreakRunnerTest extends GameTestBase {
         advanceTo(T0.plusSeconds(1600));
         assertEquals(GameState.MISSED, pause(game, late).state());
         assertEquals(List.of(GameBreakEvents.WAITING, GameBreakEvents.MISSED), types(late));
-        assertEquals(List.of(), jokers.reconcile(game.session()));
+        assertEquals(List.of(), reconcile(game.session()));
     }
 
     @Test

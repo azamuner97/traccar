@@ -19,7 +19,7 @@ import java.util.Optional;
 
 /**
  * Revisioned documents of a session that only operators read: generated credentials (encrypted with the server's
- * key, as in model 1), geofence plans, and component checkpoints.
+ * key), geofence plans, and component checkpoints.
  *
  * <p>Every write names the revision it was based on (0 for a document that does not exist yet). Retrying the write
  * that already succeeded (expected revision + 1, identical content) answers the current revision; any other

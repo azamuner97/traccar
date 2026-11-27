@@ -107,7 +107,7 @@ public abstract class GameScheduleTest extends GameTestBase {
         long session = session();
         logs.append(session, List.of(
                 new GameLogService.LogInput("operation", "2026-05-01T10:00:00Z", "first"),
-                new GameLogService.LogInput(GameLogService.SPEEDHUNT, "2026-05-01T10:00:01.250Z", "second"),
+                new GameLogService.LogInput("speedhunt", "2026-05-01T10:00:01.250Z", "second"),
                 new GameLogService.LogInput("operation", "2026-05-01T10:00:02Z", "third")));
         var page = logs.list(session, null, 2, null, false);
         assertEquals(List.of("first", "second"), page.items().stream().map(GameLogService.LogEntry::message)
@@ -117,7 +117,7 @@ public abstract class GameScheduleTest extends GameTestBase {
         var rest = logs.list(session, page.nextCursor(), 2, null, false);
         assertEquals(List.of("third"), rest.items().stream().map(GameLogService.LogEntry::message).toList());
         assertFalse(rest.hasMore());
-        assertEquals(List.of("second"), logs.list(session, null, 10, GameLogService.SPEEDHUNT, false).items().stream()
+        assertEquals(List.of("second"), logs.list(session, null, 10, "speedhunt", false).items().stream()
                 .map(GameLogService.LogEntry::message).toList());
         assertTrue(logs.list(session(), null, 10, null, false).items().isEmpty());
         assertStatus(400, () -> logs.append(session, List.of(
@@ -311,7 +311,7 @@ public abstract class GameScheduleTest extends GameTestBase {
 
         // Labels are snapshots: renaming a member never rewrites history.
         members.rename(session, anna.id(), "Anna Renamed");
-        var stored = notifications.history(session, null, 100).items().get(5);
+        var stored = notifications.list(session, null, null, 100, null).items().get(5);
         assertEquals("Ben", stored.recipientLabel());
         assertEquals("Anna", stored.sourceLabel());
 
@@ -337,26 +337,27 @@ public abstract class GameScheduleTest extends GameTestBase {
         GameMember foreign = plan(session(), "player");
         assertStatus(400, () -> notifications.create(session, generation,
                 alert("m", "geofenceExit", "user", foreign.id(), foreign.id())));
-        assertEquals(7, notifications.history(session, null, 100).items().size());
+        assertEquals(7, notifications.list(session, null, null, 100, null).items().size());
 
-        // A role change makes a new member, which does not see the old member's personal history.
-        GameMember changed = members.changeRole(session, anna.id(), "supporter", null, "Anna");
+        // Another role is another member, which does not see the old member's personal history.
+        members.retire(session, anna.id());
+        GameMember changed = plan(session, "supporter", "Anna");
         assertEquals(List.of("session", "toOthers"), notifications.list(session, null, null, 100, changed).items()
                 .stream().map(GameNotificationService.Entry::id).toList());
     }
 
     @Test
-    void historyCoversEveryGeneration() throws Exception {
+    void aResetDeletesTheSessionsHistory() throws Exception {
         long session = session();
         var state = notifications.initialize(session);
         notifications.create(session, state.generation(), alert("before"));
         String next = UUID.randomUUID().toString();
         notifications.reset(session, state.generation(), next);
         notifications.create(session, next, alert("after"));
-        // A reset deletes the session's history, as in model 1.
-        assertEquals(List.of("after"), notifications.history(session, null, 10).items().stream()
+        assertEquals(1, number("SELECT COUNT(*) FROM tc_game_notifications WHERE gamesessionid = ?", session));
+        assertEquals(List.of("after"), notifications.list(session, null, null, 10, null).items().stream()
                 .map(GameNotificationService.Entry::id).toList());
-        assertStatus(404, () -> notifications.history(-1, null, 10));
+        assertStatus(404, () -> notifications.list(-1, null, null, 10, null));
     }
 
     // Proximity ---------------------------------------------------------------------------------------------

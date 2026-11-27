@@ -17,7 +17,7 @@ import static org.junit.jupiter.api.Assertions.*;
 
 /**
  * Step 4 of game data model 2: the computed member status (role projections), the speedhunt history query and the
- * operator snapshot. Ports model 1's privacy cases: role projections, identical answers for a speedhunt's target
+ * operator snapshot. Privacy cases: role projections, identical answers for a speedhunt's target
  * and a non-target (also when fakes bind), and no member state revisions or ping sources for players and
  * supporters. Runs on H2 ({@link GameStatusH2Test}) and MySQL ({@link GameStatusMySqlTest}).
  */
@@ -35,7 +35,7 @@ public abstract class GameStatusTest extends GameTestBase {
     private GameSnapshotService snapshots;
     private GameRequestService requests;
     private GameJokerService jokers;
-    private GameStateService state;
+    private GameStateFixture state;
     private GameEffectsService effects;
     private int deliveries;
 
@@ -50,7 +50,7 @@ public abstract class GameStatusTest extends GameTestBase {
         snapshots = new GameSnapshotService(transactions, mapper);
         requests = new GameRequestService(transactions, mapper, publisher);
         jokers = new GameJokerService(transactions, publisher);
-        state = new GameStateService(transactions, mapper, publisher);
+        state = new GameStateFixture(transactions, mapper, publisher);
         effects = effectsService();
     }
 
@@ -78,8 +78,8 @@ public abstract class GameStatusTest extends GameTestBase {
                 null), "Operator");
     }
 
-    private GameStateService.Applied apply(long session, GameOperation... operations) throws Exception {
-        return state.apply(session, EPOCH, List.of(operations));
+    private GameStateFixture.Applied apply(long session, GameOperation... operations) throws Exception {
+        return state.apply(session, List.of(operations));
     }
 
     private GameEffectsService.Outcome deliver(long session, List<GameRequestService.Completion> completions,
@@ -142,8 +142,7 @@ public abstract class GameStatusTest extends GameTestBase {
     }
 
     private long breakFor(long session, GameMember member) throws Exception {
-        long planned = apply(session, new GameOperation.BreakPlanned(member.id(), null, true)).results().getFirst()
-                .id();
+        long planned = jokers.planBreak(session, member.id(), null, true, "Operator").plannedBreak().breakId();
         // The server starts a planned break at its start.
         breakTick(session);
         return planned;
@@ -159,8 +158,8 @@ public abstract class GameStatusTest extends GameTestBase {
         grant(session, game.anna(), GameJokerRepository.FAKE_PING, 2);
         grant(session, game.ben(), GameJokerRepository.FAKE_PING, 1);
         fake(session, game.anna(), 2, 1.5, null);
-        long plannedBreak = apply(session, new GameOperation.BreakPlanned(game.ben().id(),
-                T0.plus(Duration.ofHours(2)).toString(), true)).results().getFirst().id();
+        long plannedBreak = jokers.planBreak(session, game.ben().id(), T0.plus(Duration.ofHours(2)).toString(), true,
+                "Operator").plannedBreak().breakId();
         apply(session, new GameOperation.Catch(game.dora().id(), "Operator"));
         GameMember planned = plan(session, "player");
 
@@ -272,7 +271,7 @@ public abstract class GameStatusTest extends GameTestBase {
         var pings = snapshots.snapshot(session).state().runs().getFirst().pings();
         assertEquals(List.of(GameState.REAL, GameState.JOKER_FAKE, GameState.JOKER_FAKE),
                 pings.stream().map(GameState.Ping::source).toList());
-        assertEquals(List.of(), jokers.reconcile(session));
+        assertEquals(List.of(), reconcile(session));
     }
 
     @Test
@@ -502,7 +501,7 @@ public abstract class GameStatusTest extends GameTestBase {
             CompletableFuture.runAsync(() -> {
                 try {
                     plan(session, "player");
-                    state.apply(session, EPOCH, List.of(new GameOperation.Catch(game.anna().id(), "Operator")));
+                    state.apply(session, List.of(new GameOperation.Catch(game.anna().id(), "Operator")));
                 } catch (Exception error) {
                     throw new IllegalStateException(error);
                 }

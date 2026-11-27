@@ -23,7 +23,7 @@ import java.util.Set;
 import java.util.TreeSet;
 
 /**
- * Mirror-only hunter access (model 1, 4c), on members and resource rows. Break and fake jokers protect a participant
+ * Mirror-only hunter access, on members and resource rows. Break and fake jokers protect a participant
  * only while hunters see them through mirrors, so while a session has break or fake jokers allocated, held or active
  * (granted or used above zero, or a reservation still held, such as a break planned beyond the allocation), no active
  * hunter of the session may access the tracker of an active player or supporter: neither directly nor through a

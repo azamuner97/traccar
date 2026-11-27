@@ -13,7 +13,7 @@ public class GameTimetableMySqlTest extends GameTimetableTest {
 
     @Override
     protected DataSource database() throws Exception {
-        return mysql.create(true);
+        return mysql.create();
     }
 
     @AfterAll

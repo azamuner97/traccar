@@ -91,7 +91,7 @@ public class GameProximityResource extends GameApiResource {
 
     /**
      * The caller's own temporary access to other participants' trackers, for players and supporters. Trackers the
-     * account sees permanently anyway are left out, as in model 1.
+     * account sees permanently anyway are left out.
      */
     @GET
     @Path("access")

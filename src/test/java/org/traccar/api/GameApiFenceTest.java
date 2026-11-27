@@ -112,11 +112,11 @@ public class GameApiFenceTest {
     /** The operator writes of {@code GameSessionResource} of a session. */
     private static List<String> sessionWrites(long id) {
         String base = "game-sessions/" + id;
-        return List.of("DELETE " + base, "PUT " + base + "/name", "PUT " + base + "/config",
+        return List.of("DELETE " + base, "PUT " + base + "/config",
                 "POST " + base + "/members", "PUT " + base + "/members/3/name", "PUT " + base + "/members/3/account",
                 "DELETE " + base + "/members/3/account", "PUT " + base + "/members/3/tracker",
                 "DELETE " + base + "/members/3/tracker", "POST " + base + "/members/3/retire",
-                "POST " + base + "/members/3/role", "POST " + base + "/resources/mirrors",
+                "POST " + base + "/resources/mirrors",
                 "POST " + base + "/resources/groups", "POST " + base + "/resources/geofences",
                 "POST " + base + "/resources/mirrors/2/retire", "POST " + base + "/resources/mirrors/2/reactivate",
                 "PUT " + base + "/resources/mirrors/2", "DELETE " + base + "/resources/mirrors/2",
@@ -141,8 +141,8 @@ public class GameApiFenceTest {
     void executionWritesOfAStoredSessionAreFencedAndConfigurationIsNot() throws Exception {
         // Configuration of a session that is not running needs only its revision check; members, resource rows,
         // checkpoints and the game state are written by the controlling Tool and always fenced.
-        Set<String> configuration = Set.of("DELETE game-sessions/6", "PUT game-sessions/6/name",
-                "PUT game-sessions/6/config", "PUT game-sessions/6/credentials", "PUT game-sessions/6/geofence-plans",
+        Set<String> configuration = Set.of("DELETE game-sessions/6", "PUT game-sessions/6/config",
+                "PUT game-sessions/6/credentials", "PUT game-sessions/6/geofence-plans",
                 "PUT game-sessions/6/device-list", "POST game-sessions/6/timetable/changes",
                 "PUT game-sessions/6/timetable/execution", "POST game-sessions/6/logs");
         for (String write : sessionWrites(STORED)) {
@@ -165,21 +165,21 @@ public class GameApiFenceTest {
             when(controller.status()).thenReturn(new GameControllerService.Lease(3, active ? "active" : "expired",
                     active, null, null, null, null, "2026-05-01T10:00:00Z", 30, 5));
             for (String epoch : new String[] {null, "1"}) {
-                for (String path : List.of("game-sessions/5/state", "game-sessions/6/state", "game-sessions/6/name",
-                        "game-sessions/5/name")) {
+                for (String path : List.of("game-sessions/5/state", "game-sessions/6/state",
+                        "game-sessions/6/config", "game-sessions/5/config")) {
                     var request = request(2, "PUT", path, epoch);
                     filter.filter(request);
                     GameUnfencedWrites.end();
                     var captor = org.mockito.ArgumentCaptor.forClass(jakarta.ws.rs.core.Response.class);
                     verify(request, org.mockito.Mockito.atMost(1)).abortWith(captor.capture());
                     Integer status = captor.getAllValues().isEmpty() ? null : captor.getValue().getStatus();
-                    boolean refusedWithoutEpoch = epoch == null && path.equals("game-sessions/5/name");
+                    boolean refusedWithoutEpoch = epoch == null && path.equals("game-sessions/5/config");
                     assertEquals(epoch != null || refusedWithoutEpoch ? Integer.valueOf(403) : null, status,
                             path + " " + epoch + " " + active);
                 }
             }
         }
-        var operator = request(1, "PUT", "game-sessions/6/name", "1");
+        var operator = request(1, "PUT", "game-sessions/6/config", "1");
         filter.filter(operator);
         verify(operator).abortWith(org.mockito.ArgumentMatchers.argThat(response -> response.getStatus() == 423));
     }

@@ -20,7 +20,8 @@ import java.util.Set;
  * exist, and bound to them later.
  *
  * <ul>
- * <li>A member's role never changes. {@link #changeRole} retires the member and creates a new one.</li>
+ * <li>A member's role never changes: another role is another member, planned and bound after the old one is
+ * retired.</li>
  * <li>Numbers are never reused in a session, also after retirement. The spectator is number 1, so a session has
  * at most one spectator; it has no tracker and is never retired, because it could not be replaced.</li>
  * <li>An account is bound to at most one member of all sessions; a tracker to at most one member per session, and
@@ -39,7 +40,7 @@ public class GameMemberService {
     public static final Set<String> ROLES = Set.of(
             GameMember.PLAYER, GameMember.SUPPORTER, GameMember.HUNTER, GameMember.SPECTATOR);
 
-    /** The game membership of an account: the model-2 counterpart of the model-1 request membership. */
+    /** The game membership of an account. */
     public record Membership(long gameSessionId, long memberId, String role, int number, Long trackerId,
                              String displayName) {
     }
@@ -371,7 +372,7 @@ public class GameMemberService {
             requests = true;
         }
         if (pool) {
-            owners.addAll(GameStateService.hunters(transaction, sessionId));
+            owners.addAll(GameMemberRepository.hunters(transaction, sessionId));
         }
         if (history) {
             transaction.afterCommit(() -> publisher.invalidate(
@@ -394,32 +395,6 @@ public class GameMemberService {
      */
     public GameMember retire(long sessionId, long memberId) throws Exception {
         return transactions.write(transaction -> retire(transaction, lock(transaction, sessionId, memberId)));
-    }
-
-    /**
-     * Changes a role the only way it can change: retires the member and plans a new one with the new role, which
-     * takes over the account and, unless it is the spectator, the tracker. Jokers are not carried over.
-     */
-    public GameMember changeRole(long sessionId, long memberId, String role, Integer number, String displayName)
-            throws Exception {
-        String validRole = role(role);
-        String validName = displayName(displayName);
-        return transactions.write(transaction -> {
-            GameMember member = active(lock(transaction, sessionId, memberId));
-            if (member.role().equals(validRole)) {
-                throw GameErrors.conflict("The " + member.label() + " already has this role");
-            }
-            retire(transaction, member);
-            GameMember created = plan(transaction, sessionId, validRole, number, validName);
-            if (member.userId() != null) {
-                created = bindAccount(transaction, created, member.userId());
-            }
-            if (member.trackerId() != null && !GameMember.SPECTATOR.equals(validRole)) {
-                created = bindTracker(transaction, created, member.trackerId());
-            }
-            transaction.bumpSession();
-            return created;
-        });
     }
 
 }

@@ -52,6 +52,7 @@ public class GameControllerServiceTest {
     private final MutableClock clock = new MutableClock();
     private final GameTestBase.RecordingPublisher publisher = new GameTestBase.RecordingPublisher();
     private DataSource source;
+    private GameTransactions transactions;
     private GameSessionService sessions;
     private GameMemberService members;
     private GameRequestService requests;
@@ -83,12 +84,12 @@ public class GameControllerServiceTest {
         source = GameSchemaFixture.model2();
         alice = insert("INSERT INTO tc_users (name, email) VALUES ('Alice', 'a@x')");
         bob = insert("INSERT INTO tc_users (name, email) VALUES ('', 'b@x')");
-        GameTransactions transactions = new GameTransactions(source, clock);
+        transactions = new GameTransactions(source, clock);
         sessions = new GameSessionService(transactions, new ObjectMapper(), publisher);
         members = new GameMemberService(transactions, Set.of(), publisher);
         requests = new GameRequestService(transactions, new ObjectMapper(), publisher);
         session = sessions.create("Controller test", 5, 5, JsonNodeFactory.instance.objectNode()).id();
-        service = new GameControllerService(source, clock, 30, 5, requests, publisher);
+        service = new GameControllerService(transactions, 30, 5, requests, publisher);
         publisher.clear();
     }
 
@@ -112,8 +113,8 @@ public class GameControllerServiceTest {
     }
 
     private List<String> events() throws Exception {
-        return service.history(null, 0).items().stream().map(GameControllerService.HistoryEntry::event)
-                .toList().reversed();
+        return transactions.read(transaction -> transaction.list(
+                "SELECT event FROM tc_game_controller_history ORDER BY id", rows -> rows.getString("event")));
     }
 
     @Test
@@ -186,7 +187,7 @@ public class GameControllerServiceTest {
     void epochKeepsIncreasingAcrossServerRestarts() throws Exception {
         long epoch = service.acquire(alice, A, "Laptop").lease().epoch();
         // A new service instance reads the persisted row, as after a restart.
-        service = new GameControllerService(source, clock, 30, 5, requests, publisher);
+        service = new GameControllerService(transactions, 30, 5, requests, publisher);
         assertTrue(service.endAfterRestart());
         assertFalse(service.endAfterRestart());
         assertEquals("restarted", service.status().state());
@@ -223,7 +224,7 @@ public class GameControllerServiceTest {
         assertEquals(epoch + 1, resumed.lease().epoch());
 
         // Ended by a server restart: free, so granted too.
-        service = new GameControllerService(source, clock, 30, 5, requests, publisher);
+        service = new GameControllerService(transactions, 30, 5, requests, publisher);
         assertTrue(service.endAfterRestart());
         assertEquals(epoch + 2, service.acquire(alice, A, "Laptop", epoch + 1).lease().epoch());
 

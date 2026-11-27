@@ -15,8 +15,8 @@ import java.util.Optional;
 import java.util.Set;
 
 /**
- * The Traccar resources that game sessions own, derived from member bindings and resource rows: the model-2
- * counterpart of the model-1 {@code GameSessionService.owned()} that the controller fence reads.
+ * The Traccar resources that game sessions own, derived from member bindings and resource rows, as the controller
+ * fence reads them.
  *
  * <p>Owned are the bound accounts and trackers of members, mirror devices, groups and managed geofences of every
  * session, including rows that are retiring, because they stay owned until cleanup removes them.

@@ -13,6 +13,7 @@ import java.sql.SQLException;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -22,8 +23,8 @@ import java.util.TreeSet;
 
 /**
  * Applies typed game operations (plan §3.2) inside one write transaction that holds the session lock, validating
- * each against the current state of its row. It is shared by {@link GameStateService} and the effects delivery,
- * and collects what the transaction must publish after commit.
+ * each against the current state of its row. It is shared by the effects delivery and the server's own execution,
+ * and collects what the transaction must publish after commit ({@link #publish}).
  *
  * <p>Execution needs a running game: {@code pingDelivered} and {@code liveUploadStarted} answer 409
  * ({@value GameExecutionService#NOT_RUNNING}) on a stopped session, while ending and cleanup operations
@@ -158,6 +159,34 @@ public final class GameOperations {
         poolChanged = true;
     }
 
+    /**
+     * Registers what applied operations publish after commit. Status, history and request changes are announced to
+     * every member alike; joker changes only to their owners (and the hunters for their pool).
+     */
+    static void publish(GameTransaction transaction, GamePublisher publisher, long sessionId, GameOperations applied)
+            throws SQLException {
+        List<GamePublisher.Invalidation> invalidations = new ArrayList<>();
+        if (applied.statusChanged()) {
+            invalidations.add(new GamePublisher.Invalidation(sessionId, GamePublisher.STATUS, null));
+        }
+        if (applied.historyChanged()) {
+            invalidations.add(new GamePublisher.Invalidation(sessionId, GamePublisher.SPEEDHUNT_HISTORY, null));
+        }
+        if (applied.requestsChanged()) {
+            invalidations.add(new GamePublisher.Invalidation(sessionId, GamePublisher.REQUESTS, null));
+        }
+        Set<Long> owners = new HashSet<>(applied.jokerMembers());
+        if (applied.poolChanged()) {
+            owners.addAll(GameMemberRepository.hunters(transaction, sessionId));
+        }
+        if (!owners.isEmpty()) {
+            invalidations.add(new GamePublisher.Invalidation(sessionId, GamePublisher.JOKERS, Set.copyOf(owners)));
+        }
+        for (var invalidation : invalidations) {
+            transaction.afterCommit(() -> publisher.invalidate(invalidation));
+        }
+    }
+
     private GameSettings settings() throws SQLException {
         if (settings == null) {
             settings = GameSettings.read(transaction, session);
@@ -205,7 +234,6 @@ public final class GameOperations {
                         item.liveUploadId()).ifPresent(upload -> result.add(upload.memberId()));
                 case GameOperation.LiveUploadEnded item -> GameStateRepository.upload(transaction, session,
                         item.liveUploadId()).ifPresent(upload -> result.add(upload.memberId()));
-                case GameOperation.BreakPlanned item -> result.add(item.memberId());
                 case GameOperation.BreakStarted item -> {
                     if (item.requestId() != null) {
                         GameRequestRepository.find(transaction, session, item.requestId())
@@ -295,7 +323,6 @@ public final class GameOperations {
             case GameOperation.LiveUploadStarted item -> liveUploadStarted(index, item);
             case GameOperation.LiveUploadSample item -> liveUploadSample(index, item);
             case GameOperation.LiveUploadEnded item -> liveUploadEnded(index, item);
-            case GameOperation.BreakPlanned item -> breakPlanned(index, item);
             case GameOperation.BreakStarted item -> breakStarted(index, item);
             case GameOperation.BreakCancelled item -> breakCancelled(index, item);
             case GameOperation.Checkpoint item -> {
@@ -743,14 +770,6 @@ public final class GameOperations {
             throw GameErrors.conflict("Set a positive break duration in the game settings first");
         }
         return GameSettings.breakSeconds(minutes);
-    }
-
-    private void breakPlanned(int index, GameOperation.BreakPlanned item) throws Exception {
-        long id = GameJokerService.planBreak(transaction, session, item.memberId(),
-                GameTime.parseOptional(item.plannedStart(), "break start"), Boolean.TRUE.equals(item.overAllocate()),
-                actor);
-        jokerMembers.add(item.memberId());
-        result(index, item, id, null, null, null, GameState.PLANNED);
     }
 
     /**

@@ -128,7 +128,7 @@ public class GameLiveUploadRunner implements GameExecutionRunner<GameLiveUploadR
             GameOperations ended = new GameOperations(transaction, sessionId, "Server", null, publisher);
             ended.endUpload(upload, reason, detail);
             transaction.bumpSession();
-            GameStateService.publish(transaction, publisher, sessionId, ended);
+            GameOperations.publish(transaction, publisher, sessionId, ended);
             return null;
         });
         nextTicks.remove(uploadId);

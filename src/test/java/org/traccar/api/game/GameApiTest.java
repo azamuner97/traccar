@@ -59,8 +59,8 @@ import static org.mockito.Mockito.when;
 
 /**
  * The REST resources of game data model 2 (step 4), called directly on real services over the model-2 schema:
- * operator endpoints, members resolved from their accounts, ISO-8601 times, and model 1's privacy cases through the
- * JSON that members receive. Runs on H2 ({@link GameApiH2Test}) and MySQL ({@link GameApiMySqlTest}).
+ * operator endpoints, members resolved from their accounts, ISO-8601 times, and the privacy cases through the JSON
+ * that members receive. Runs on H2 ({@link GameApiH2Test}) and MySQL ({@link GameApiMySqlTest}).
  */
 public abstract class GameApiTest extends GameTestBase {
 
@@ -105,7 +105,7 @@ public abstract class GameApiTest extends GameTestBase {
                 new GameDeviceListService(transactions, mapper),
                 effectsService(),
                 new GameNotificationService(transactions, publisher), new GameProximityService(transactions, publisher),
-                new GameExecutionService(transactions, new GameControllerService(source, clock, 30, 5, null,
+                new GameExecutionService(transactions, new GameControllerService(transactions, 30, 5, null,
                         publisher), publisher)));
         sessionsApi = wire(new GameSessionResource() {
             @Override
@@ -266,7 +266,7 @@ public abstract class GameApiTest extends GameTestBase {
         assertEquals(new GameSessionResource.Capabilities(12), sessionsApi.capabilities());
         assertEquals(12, GameSessionService.API_VERSION);
         String name = "api-" + UUID.randomUUID();
-        JsonNode created = sessionsApi.create(new GameSessionResource.CreateRequest(name, 5, null,
+        JsonNode created = sessionsApi.create(new GameSessionResource.CreateRequest(name, 5,
                 json("{\"game_settings\": " + SETTINGS + "}")));
         long session = created.get("id").asLong();
         assertEquals(1, created.get("revision").asLong());
@@ -277,13 +277,13 @@ public abstract class GameApiTest extends GameTestBase {
         assertTrue(sessionsApi.list().findValues("name").stream().anyMatch(value -> value.asText().equals(name)));
 
         clock.advance(Duration.ofMinutes(1));
-        JsonNode renamed = sessionsApi.rename(session, new GameSessionResource.RenameRequest(1L, name + "-b"));
-        assertEquals(2, renamed.path("settings").path("revision").asLong());
         assertCode(409, () -> sessionsApi.updateSettings(session,
-                new GameSessionResource.DocumentUpdate(1L, 5, json("{}"))));
-        assertCode(400, () -> sessionsApi.rename(session, new GameSessionResource.RenameRequest(null, name)));
-        JsonNode updated = sessionsApi.updateSettings(session, new GameSessionResource.DocumentUpdate(2L, 6,
+                new GameSessionResource.DocumentUpdate(0L, 5, json("{}"))));
+        assertCode(400, () -> sessionsApi.updateSettings(session,
+                new GameSessionResource.DocumentUpdate(null, 5, json("{}"))));
+        JsonNode updated = sessionsApi.updateSettings(session, new GameSessionResource.DocumentUpdate(1L, 6,
                 json("{\"game_settings\": {}}")));
+        assertEquals(2, updated.path("settings").path("revision").asLong());
         assertEquals(6, updated.path("settings").path("schemaVersion").asInt());
 
         JsonNode anna = sessionsApi.plan(session, new GameSessionResource.MemberInput("player", null, "Anna"));
@@ -301,8 +301,7 @@ public abstract class GameApiTest extends GameTestBase {
                 new GameSessionResource.NameInput("Anna B")).get("displayName").asText());
         JsonNode hunter = sessionsApi.plan(session, new GameSessionResource.MemberInput("hunter", null, "Hugo"));
         assertEquals(2, sessionsApi.members(session).size());
-        assertEquals(annaId, sessionsApi.member(session, annaId).get("id").asLong());
-        assertCode(404, () -> sessionsApi.member(session, annaId + 1000));
+        assertEquals(annaId, sessionsApi.members(session).get(0).get("id").asLong());
 
         // Resource rows, with their lifecycle.
         long mirrorDevice = device();
@@ -425,11 +424,15 @@ public abstract class GameApiTest extends GameTestBase {
         assertEquals(2, snapshot.get("members").size());
         assertEquals("no-store", sessionsApi.snapshot(session).getHeaderString("Cache-Control"));
 
-        // Role change and retirement.
-        JsonNode supporter = sessionsApi.changeRole(session, annaId, new GameSessionResource.MemberInput(
-                "supporter", null, "Anna S"));
-        assertEquals(annaUser, supporter.get("userId").asLong());
-        assertEquals("retired", sessionsApi.member(session, annaId).get("state").asText());
+        // Retirement: another role is another member, which takes over the account.
+        sessionsApi.retire(session, annaId);
+        JsonNode supporter = sessionsApi.plan(session, new GameSessionResource.MemberInput("supporter", null,
+                "Anna S"));
+        assertEquals(annaUser, sessionsApi.bindAccount(session, supporter.get("id").asLong(),
+                new GameSessionResource.AccountInput((long) annaUser)).get("userId").asLong());
+        JsonNode retired = sessionsApi.members(session).get(0);
+        assertEquals(annaId, retired.get("id").asLong());
+        assertEquals("retired", retired.get("state").asText());
         sessionsApi.retire(session, hunter.get("id").asLong());
         assertEquals(204, sessionsApi.delete(session).getStatus());
         assertCode(404, () -> sessionsApi.get(session));
@@ -447,7 +450,7 @@ public abstract class GameApiTest extends GameTestBase {
                 () -> sessionsApi.credentials(session), () -> sessionsApi.logs(session, null, 0, null, false),
                 () -> grant(session, game.anna(), GameJokerRepository.FAKE_PING, 1),
                 () -> deliver(session, List.of(), ping(game.anna(), 1)),
-                () -> notificationsApi.history(session, null, 0), () -> notificationsApi.initialize(session),
+                () -> notificationsApi.initialize(session),
                 () -> proximityApi.get(session), () -> proximityApi.reset(session));
         for (Executable call : calls) {
             assertCode(403, call);
@@ -513,7 +516,7 @@ public abstract class GameApiTest extends GameTestBase {
         JsonNode overview = sessionsApi.jokerOverview(session);
         assertTrue(overview.get("inventories").size() > 0);
         assertTrue(sessionsApi.jokerLedger(session, 0).size() > 0);
-        assertEquals(0, sessionsApi.reconcileJokers(session).size());
+        assertEquals(List.of(), reconcile(session));
         JsonNode snapshot = (JsonNode) sessionsApi.snapshot(session).getEntity();
         assertEquals(2, snapshot.path("state").path("runs").size());
         assertTrue(snapshot.path("state").path("relays").isArray());
@@ -561,7 +564,7 @@ public abstract class GameApiTest extends GameTestBase {
                 .get("trackerId").asLong());
         assertFalse(spectator.path("status").has("liveShares"));
 
-        // Anonymous progress: members of the executing session and administrators.
+        // Anonymous progress: members of the running session and administrators.
         as(game.anna());
         JsonNode progress = (JsonNode) statusApi.speedhunt().getEntity();
         assertEquals(1, progress.get("pingCount").asInt());
@@ -660,7 +663,7 @@ public abstract class GameApiTest extends GameTestBase {
         long session = game.session();
         long other = session();
         String generation = notificationsApi.initialize(session).get("generation").asText();
-        assertEquals(generation, notificationsApi.state(session).get("generation").asText());
+        assertEquals(generation, notificationsApi.initialize(session).get("generation").asText());
         String time = T0.toString();
         notificationsApi.create(new GameNotificationResource.CreateRequest(session, generation,
                 new GameNotificationService.Alert("caught-1", "playerCaught", "session", time, "Europe/Zurich",
@@ -677,7 +680,6 @@ public abstract class GameApiTest extends GameTestBase {
         assertEquals(List.of("caught-1", "exit-anna"), page.get("items").findValuesAsText("id"));
         assertEquals(time, page.get("items").get(0).get("occurredAt").asText());
         assertCode(403, () -> notificationsApi.list(other, null, null, 0));
-        assertCode(403, () -> notificationsApi.history(session, null, 0));
         as(game.ben());
         assertEquals(List.of("caught-1"), notificationsApi.list(null, null, null, 0).get("items")
                 .findValuesAsText("id"));
@@ -686,7 +688,6 @@ public abstract class GameApiTest extends GameTestBase {
                 .findValuesAsText("id"));
         asOperator();
         assertEquals(3, notificationsApi.list(session, null, null, 0).get("items").size());
-        assertEquals(3, notificationsApi.history(session, null, 0).get("items").size());
         String replacement = UUID.randomUUID().toString();
         assertEquals(replacement, notificationsApi.reset(session, new GameNotificationResource.ResetRequest(
                 generation, replacement)).get("generation").asText());

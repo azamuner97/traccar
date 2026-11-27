@@ -5,15 +5,12 @@ import liquibase.Liquibase;
 import liquibase.database.Database;
 import liquibase.database.DatabaseFactory;
 import liquibase.database.jvm.JdbcConnection;
-import liquibase.resource.CompositeResourceAccessor;
 import liquibase.resource.DirectoryResourceAccessor;
-import liquibase.resource.ResourceAccessor;
 import org.h2.jdbcx.JdbcDataSource;
 
 import javax.sql.DataSource;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Proxy;
-import java.nio.file.Files;
 import java.nio.file.Path;
 import java.sql.Connection;
 import java.util.UUID;
@@ -21,87 +18,27 @@ import java.util.UUID;
 /**
  * Databases built from the real Liquibase changelogs, so service tests exercise the schema that ships instead of
  * hand-written DDL.
- *
- * <p>The master changelog includes game data model 2 ({@link #MODEL_2}) since the switchover. {@link #model1} builds
- * a database as it was before, so tests can follow the migration from model 1.
  */
 public final class GameSchemaFixture {
 
     public static final Path SCHEMA = Path.of("schema");
     public static final String MASTER = "changelog-master.xml";
-    public static final String MODEL_2 = "changelog-game-model-2.xml";
-    public static final String EXECUTION = "changelog-game-execution.xml";
-    private static final String MODEL_1_MASTER = "changelog-master-model-1.xml";
 
     private GameSchemaFixture() {
     }
 
     /** An empty in-memory H2 database that lives until the JVM ends. */
-    public static JdbcDataSource h2() {
+    private static JdbcDataSource h2() {
         JdbcDataSource source = new JdbcDataSource();
         source.setURL("jdbc:h2:mem:game-schema-" + UUID.randomUUID() + ";DB_CLOSE_DELAY=-1");
         return source;
     }
 
-    /** An H2 database with the full model-2 schema. */
+    /** An H2 database with the master changelog applied. */
     public static JdbcDataSource model2() throws Exception {
         JdbcDataSource source = h2();
         apply(source, MASTER);
         return source;
-    }
-
-    /**
-     * Applies the master changelog without model 2 and the changelogs after it: the schema of model 1. Applying
-     * {@link #MASTER} afterwards runs only model 2 and its successors, as the switchover does on an existing
-     * database.
-     */
-    public static void model1(DataSource source) throws Exception {
-        String master = Files.readString(SCHEMA.resolve(MASTER));
-        String include = "<include file=\"" + MODEL_2 + "\" relativeToChangelogFile=\"true\" />";
-        if (!master.contains(include)) {
-            throw new IllegalStateException("The master changelog does not include " + MODEL_2);
-        }
-        // Model 1 is everything before the model-2 include; the changelogs after it build on model 2.
-        String model1 = master.substring(0, master.indexOf(include)) + "</databaseChangeLog>\n";
-        Path directory = Files.createTempDirectory("game-model-1");
-        Files.writeString(directory.resolve(MODEL_1_MASTER), model1);
-        try {
-            apply(source, MODEL_1_MASTER, new CompositeResourceAccessor(
-                    new DirectoryResourceAccessor(directory), new DirectoryResourceAccessor(SCHEMA)));
-        } finally {
-            Files.delete(directory.resolve(MODEL_1_MASTER));
-            Files.delete(directory);
-        }
-    }
-
-    /**
-     * Applies the master changelog with the game-execution changelog cut before its first changeset whose ID starts
-     * with {@code prefix}: the schema as it was before that step. Applying {@link #MASTER} afterwards runs only the
-     * rest, as a server update does on an existing database.
-     */
-    public static void executionBefore(DataSource source, String prefix) throws Exception {
-        String changelog = Files.readString(SCHEMA.resolve(EXECUTION));
-        int cut = changelog.indexOf("<changeSet author=\"traccar-tool\" id=\"" + prefix);
-        if (cut < 0) {
-            throw new IllegalStateException("No changeset " + prefix + "* in " + EXECUTION);
-        }
-        Path directory = Files.createTempDirectory("game-schema");
-        try (var files = Files.list(SCHEMA)) {
-            for (Path file : files.toList()) {
-                Files.copy(file, directory.resolve(file.getFileName()));
-            }
-        }
-        Files.writeString(directory.resolve(EXECUTION), changelog.substring(0, cut) + "</databaseChangeLog>\n");
-        try {
-            apply(source, MASTER, new DirectoryResourceAccessor(directory));
-        } finally {
-            try (var files = Files.list(directory)) {
-                for (Path file : files.toList()) {
-                    Files.delete(file);
-                }
-            }
-            Files.delete(directory);
-        }
     }
 
     /**
@@ -112,10 +49,6 @@ public final class GameSchemaFixture {
      * until the database is reopened. In-memory test databases are never reopened.
      */
     public static void apply(DataSource source, String changelog) throws Exception {
-        apply(source, changelog, new DirectoryResourceAccessor(SCHEMA));
-    }
-
-    private static void apply(DataSource source, String changelog, ResourceAccessor accessor) throws Exception {
         System.setProperty("liquibase.analytics.enabled", "false");
         Connection connection = source.getConnection();
         if (source instanceof JdbcDataSource) {
@@ -134,7 +67,7 @@ public final class GameSchemaFixture {
         }
         Database database = DatabaseFactory.getInstance()
                 .findCorrectDatabaseImplementation(new JdbcConnection(connection));
-        try (Liquibase liquibase = new Liquibase(changelog, accessor, database)) {
+        try (Liquibase liquibase = new Liquibase(changelog, new DirectoryResourceAccessor(SCHEMA), database)) {
             liquibase.update(new Contexts());
         }
     }

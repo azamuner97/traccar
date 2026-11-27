@@ -279,13 +279,13 @@ public abstract class GameTimetableTest extends GameTestBase {
         assertEquals(game.anna().id(), error.errors().get(5 - 1).memberId());
         assertTrue(error.errors().get(4).message().contains("2Q"));
         assertEquals(4, timetables.get(game.session()).slots().size());
-        // x is no longer an instruction (blank is no ping), neither as a cell nor as a coordinate target.
+        // x is no instruction, neither as a cell nor as a coordinate target.
         var removed = assertThrows(GameTimetableService.Rejected.class, () -> apply(game.session(),
                 set(a, null, game.anna(), "x"), add("old", now.plusSeconds(2300), cells(game.anna(), "X")),
                 set(a, null, game.anna(), "47.1,8.5|x")));
         assertEquals(List.of("invalidInstruction", "invalidInstruction", "invalidInstruction"),
                 removed.errors().stream().map(GameTimetableService.ChangeError::code).toList());
-        assertTrue(removed.errors().stream().allMatch(item -> item.message().contains("leave the cell blank")));
+        assertTrue(removed.errors().stream().allMatch(item -> item.message().contains("is not supported")));
         // Shape errors answer 400 before any transaction.
         for (var changeSet : List.of(new GameTimetableService.ChangeSet("short", 0L, List.of()),
                 new GameTimetableService.ChangeSet("change-" + UUID.randomUUID(), null, List.of()),
@@ -374,9 +374,11 @@ public abstract class GameTimetableTest extends GameTestBase {
                 .filter(item -> item.memberId() == game.anna().id()).findFirst().orElseThrow().state());
         assertFalse(publisher.topic(GamePublisher.TIMETABLE).isEmpty());
         assertEquals(List.of("inactiveMember"), rejected(game.session(), set(future, null, game.anna(), "p")));
-        // After a role change (retire + new member) the new member is planned anew.
-        GameMember renewed = members.changeRole(game.session(), game.carla().id(), GameMember.PLAYER, null,
-                "Carla again");
+        // Another role is another member (retire, plan, bind), planned anew.
+        members.retire(game.session(), game.carla().id());
+        GameMember renewed = plan(game.session(), GameMember.PLAYER, "Carla again");
+        members.bindAccount(game.session(), renewed.id(), game.carla().userId());
+        members.bindTracker(game.session(), renewed.id(), game.carla().trackerId());
         apply(game.session(), column(renewed, null), set(future, null, renewed, "2H"));
         assertEquals("2H", entry(timetables, game.session(), future, renewed.id()).content());
     }
@@ -433,7 +435,7 @@ public abstract class GameTimetableTest extends GameTestBase {
         members.retire(game.session(), game.anna().id());
         assertEquals(GameJokerRepository.RELEASED, reservationStatus(retired));
         assertEquals(GameJokerRepository.RELEASED, reservationStatus(fakes.get("eligible")));
-        assertEquals(List.of(), jokers.reconcile(game.session()));
+        assertEquals(List.of(), reconcile(game.session()));
     }
 
     @Test
@@ -453,7 +455,7 @@ public abstract class GameTimetableTest extends GameTestBase {
         // A planned break of 10 minutes starts now: the 5-minute ping falls inside it, the 1-hour one does not.
         jokers.change(game.session(), new GameJokerService.Change(game.anna().id(), GameJokerRepository.BREAK, 1,
                 null), "Operator");
-        deliver(game.session(), new GameOperation.BreakPlanned(game.anna().id(), null, false));
+        jokers.planBreak(game.session(), game.anna().id(), null, false, "Operator");
         breakTick(game.session());
         assertEquals(GameJokerRepository.RELEASED, reservationStatus(inside));
         assertEquals(GameJokerRepository.RESERVED, reservationStatus(after));
@@ -461,7 +463,7 @@ public abstract class GameTimetableTest extends GameTestBase {
         deliver(game.session(), new GameOperation.Catch(game.ben().id(), "Hunter"));
         assertEquals(GameJokerRepository.RELEASED, reservationStatus(benFake));
         assertEquals(GameJokerRepository.RESERVED, reservationStatus(after));
-        assertEquals(List.of(), jokers.reconcile(game.session()));
+        assertEquals(List.of(), reconcile(game.session()));
     }
 
     @Test
@@ -495,10 +497,8 @@ public abstract class GameTimetableTest extends GameTestBase {
                 null), "Operator");
         jokers.change(game.session(), new GameJokerService.Change(game.ben().id(), GameJokerRepository.BREAK, 1,
                 null), "Operator");
-        deliver(game.session(), new GameOperation.BreakPlanned(game.anna().id(), now.plusSeconds(3600).toString(),
-                false));
-        deliver(game.session(), new GameOperation.BreakPlanned(game.ben().id(), now.plusSeconds(1800).toString(),
-                false));
+        jokers.planBreak(game.session(), game.anna().id(), now.plusSeconds(3600).toString(), false, "Operator");
+        jokers.planBreak(game.session(), game.ben().id(), now.plusSeconds(1800).toString(), false, "Operator");
         long annaBreak = number("SELECT id FROM tc_game_breaks WHERE gamesessionid = ? AND memberid = ?",
                 game.session(), game.anna().id());
         long benBreak = number("SELECT id FROM tc_game_breaks WHERE gamesessionid = ? AND memberid = ?",

@@ -134,12 +134,6 @@ services and repositories in `org.traccar.game`, REST resources in
 API in `openapi.yaml` (game-session API version 12). Traccar Tool and the web app
 speak only model 2.
 
-- The model-2 changelog drops the model-1 game tables and their data. Starting a
-  server against a database that still has model-1 game data migrates it at once;
-  decide first how that database's model-1 Traccar resources (hidden state
-  device, generated accounts with model-1 markers, mirrors, groups) are removed.
-  Never do this to the persistent development database without the user's
-  explicit approval.
 - The model-2 suites (`org.traccar.game`, `org.traccar.api.game`) build their
   databases from the real changelogs. They run on H2 in every build, and on
   MySQL when `TRACCAR_TEST_MYSQL_URL` (containing `{database}`),
@@ -164,8 +158,7 @@ speak only model 2.
 ## Deployment
 
 - Deploy the combined server and pinned web build before releasing the matching
-  Tool. Run a single server instance per game database. Apply the model-1
-  migration precautions above before starting the server.
+  Tool. Run a single server instance per game database.
 - Set the Base64-encoded 256-bit `GAME_SESSIONS_CREDENTIAL_KEY` to encrypt
   generated-account passwords. Local Compose reads
   `TRACCAR_GAME_SESSIONS_CREDENTIAL_KEY`. Keep the key stable for the lifetime

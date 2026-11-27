@@ -109,7 +109,7 @@ public class GameBreakRunner implements GameExecutionRunner<GameBreakRunner.Work
     /** Commits what the operations changed: the session revision and the invalidations. */
     private void changed(GameTransaction transaction, long sessionId, GameOperations operations) throws Exception {
         transaction.bumpSession();
-        GameStateService.publish(transaction, publisher, sessionId, operations);
+        GameOperations.publish(transaction, publisher, sessionId, operations);
     }
 
     // Deadlines ---------------------------------------------------------------------------------------------

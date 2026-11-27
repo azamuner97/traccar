@@ -13,7 +13,7 @@ public class GameJokerMySqlTest extends GameJokerTest {
 
     @Override
     protected DataSource database() throws Exception {
-        return mysql.create(true);
+        return mysql.create();
     }
 
     @AfterAll

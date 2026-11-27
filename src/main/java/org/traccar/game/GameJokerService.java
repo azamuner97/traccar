@@ -14,17 +14,15 @@ import java.sql.SQLException;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
-import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 
 /**
- * Jokers of data model 2 (model-1 rules, Stage 4 and changes B–D): players and supporters hold "Get hunter
- * positions", fake ping and break jokers; the hunters share a pool of speedhunt jokers.
+ * Jokers of data model 2: players and supporters hold "Get hunter positions", fake ping and break jokers; the
+ * hunters share a pool of speedhunt jokers.
  *
  * <ul>
  * <li>Operators grant and revoke unused quantities; every change is in the ledger in the same transaction.</li>
@@ -97,9 +95,6 @@ public class GameJokerService {
     }
 
     /** A balance that does not equal the sum of its ledger entries. */
-    public record Discrepancy(Long memberId, String type, String field, long stored, long expected) {
-    }
-
     private final GameTransactions transactions;
     private final GamePublisher publisher;
 
@@ -139,7 +134,7 @@ public class GameJokerService {
             throws SQLException {
         Set<Long> owners = new HashSet<>(members);
         if (pool) {
-            owners.addAll(GameStateService.hunters(transaction, sessionId));
+            owners.addAll(GameMemberRepository.hunters(transaction, sessionId));
         }
         if (!owners.isEmpty()) {
             Set<Long> recipients = Set.copyOf(owners);
@@ -417,7 +412,7 @@ public class GameJokerService {
      *
      * @return the planned break's ID
      */
-    static long planBreak(GameTransaction transaction, long sessionId, long memberId, Instant startsAt,
+    private static long planBreak(GameTransaction transaction, long sessionId, long memberId, Instant startsAt,
                           boolean overAllocate, String actor) throws SQLException {
         GameMember member = holder(transaction, sessionId, memberId);
         Double minutes = GameSettings.read(transaction, sessionId).breakMinutes();
@@ -524,63 +519,6 @@ public class GameJokerService {
             }
         }
         return released;
-    }
-
-    // Reconciliation ----------------------------------------------------------------------------------------
-
-    /**
-     * Checks that every balance equals the sum of its ledger entries (granted = grants − revocations, used = uses
-     * + uses beyond the allocation) and that every use has its consumed reservation. Empty when consistent.
-     */
-    public List<Discrepancy> reconcile(long sessionId) throws Exception {
-        return transactions.read(transaction -> {
-            record Key(Long memberId, String type) {
-            }
-            Map<Key, long[]> stored = new HashMap<>();
-            transaction.list("SELECT memberid, type, granted, used FROM tc_game_jokers WHERE gamesessionid = ?"
-                    + " UNION ALL SELECT NULL, type, granted, used FROM tc_game_joker_pools WHERE gamesessionid = ?",
-                    rows -> stored.put(new Key(GameTransaction.longOrNull(rows, "memberid"), rows.getString("type")),
-                            new long[] {rows.getLong("granted"), rows.getLong("used")}), sessionId, sessionId);
-            Map<Key, long[]> ledger = new HashMap<>();
-            transaction.list("SELECT memberid, type, kind, SUM(quantity) AS total FROM tc_game_joker_ledger"
-                    + " WHERE gamesessionid = ? GROUP BY memberid, type, kind", rows -> {
-                        long[] sums = ledger.computeIfAbsent(new Key(GameTransaction.longOrNull(rows, "memberid"),
-                                rows.getString("type")), key -> new long[2]);
-                        long total = rows.getLong("total");
-                        switch (rows.getString("kind")) {
-                            case GameJokerRepository.GRANT -> sums[0] += total;
-                            case GameJokerRepository.REVOKE -> sums[0] -= total;
-                            case GameJokerRepository.USE, GameJokerRepository.OVERUSE -> sums[1] += total;
-                            default -> {
-                            }
-                        }
-                        return null;
-                    }, sessionId);
-            Map<Key, Long> consumed = new HashMap<>();
-            transaction.list("SELECT memberid, type, COUNT(*) AS total FROM tc_game_joker_reservations"
-                    + " WHERE gamesessionid = ? AND status = ? GROUP BY memberid, type",
-                    rows -> consumed.put(new Key(GameTransaction.longOrNull(rows, "memberid"), rows.getString("type")),
-                            rows.getLong("total")), sessionId, GameJokerRepository.CONSUMED);
-            Set<Key> keys = new LinkedHashSet<>(stored.keySet());
-            keys.addAll(ledger.keySet());
-            keys.addAll(consumed.keySet());
-            List<Discrepancy> result = new ArrayList<>();
-            for (Key key : keys) {
-                long[] balance = stored.getOrDefault(key, new long[2]);
-                long[] sums = ledger.getOrDefault(key, new long[2]);
-                if (balance[0] != sums[0]) {
-                    result.add(new Discrepancy(key.memberId(), key.type(), "granted", balance[0], sums[0]));
-                }
-                if (balance[1] != sums[1]) {
-                    result.add(new Discrepancy(key.memberId(), key.type(), "used", balance[1], sums[1]));
-                }
-                if (balance[1] != consumed.getOrDefault(key, 0L)) {
-                    result.add(new Discrepancy(key.memberId(), key.type(), "consumed reservations", balance[1],
-                            consumed.getOrDefault(key, 0L)));
-                }
-            }
-            return result;
-        });
     }
 
 }

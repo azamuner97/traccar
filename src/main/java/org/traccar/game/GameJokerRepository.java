@@ -26,7 +26,7 @@ import java.util.Optional;
  *
  * <p>Ledger kinds: {@code grant} and {@code revoke} change the granted quantity, {@code use} and {@code overuse}
  * the used quantity, and {@code reserve}, {@code arm} and {@code release} follow reservations. The balance of every
- * inventory equals the sum of its ledger entries ({@link GameJokerService#reconcile}).
+ * inventory equals the sum of its ledger entries.
  */
 public final class GameJokerRepository {
 

@@ -340,13 +340,14 @@ def main(tool_source=None, skip_restart=False):
         api.bind_tracker(session_id, second_member, replacement["id"])
         assert api.request("GET", endpoint)["grants"] == []
         api.bind_tracker(session_id, second_member, second)
-        # A role change retires the member: its grants end, and circles may no longer name it.
+        # Retiring the member ends its grants, and circles may no longer name it; another role is a new member.
         api.request("PUT", endpoint, content(revision()))
-        changed = api.request("POST", f"/game-sessions/{session_id}/members/{second_member}/role",
-                              {"role": "supporter", "displayName": "second"})
+        api.request("POST", f"/game-sessions/{session_id}/members/{second_member}/retire", {})
         assert api.request("GET", endpoint)["grants"] == []
         api.request("PUT", endpoint, content(revision()), expected=400)
-        members["second"] = changed
+        changed = api.plan(session_id, "supporter", "second")
+        api.bind_account(session_id, changed["id"], users["second"]["id"])
+        members["second"] = api.bind_tracker(session_id, changed["id"], second)
         second_member = changed["id"]
         api.request("PUT", endpoint, content(revision()))
         assert first in visible(credentials["second"])
@@ -382,7 +383,7 @@ def main(tool_source=None, skip_restart=False):
         print("MySQL/HTTP proximity audit passed: grants by member with scoped access, anonymous circles, "
               "independent permanent permissions, read-only/non-shareable leases, revision conflicts and "
               "idempotent retries, reciprocal grants between players and supporters, notification isolation, "
-              "expiry and purge, revocation on unbinding, tracker replacement and role change, reset, session "
+              "expiry and purge, revocation on unbinding, tracker replacement and retirement, reset, session "
               "deletion" + ("." if skip_restart else ", and server restart."))
     finally:
         fixtures.remove()

@@ -28,7 +28,7 @@ import java.util.UUID;
  * names the generation it expects, so a reset and an archive never interleave. Alert IDs are opaque, case-sensitive
  * tokens; archiving the same alert again creates nothing, and a different alert under a used ID answers 409.
  *
- * <p>Audiences follow model 1: {@code session} alerts reach every member, {@code hunters}/{@code nonHunters} a role
+ * <p>Audiences: {@code session} alerts reach every member, {@code hunters}/{@code nonHunters} a role
  * group (spectators count as hunters), {@code user} alerts one player, supporter or hunter about their own tracker,
  * and live-recipient alerts one recipient about another participant whose positions they receive.
  */
@@ -62,9 +62,6 @@ public class GameNotificationService {
     }
 
     public record Page(String generation, Instant resetAt, List<Entry> items, String nextCursor, boolean hasMore) {
-    }
-
-    public record HistoryPage(long gameSessionId, List<Entry> items, String nextCursor, boolean hasMore) {
     }
 
     private final GameTransactions transactions;
@@ -343,28 +340,6 @@ public class GameNotificationService {
 
     private static Identified withId(ResultSet rows) throws SQLException {
         return new Identified(rows.getLong("id"), entry(rows));
-    }
-
-    /** Operator history of a session across generations. */
-    public HistoryPage history(long sessionId, String cursor, int requestedLimit) throws Exception {
-        int limit = requestedLimit == 0 ? 100 : requestedLimit;
-        long after = cursor(cursor, limit);
-        return transactions.read(transaction -> {
-            GameDocumentService.sessionExists(transaction, sessionId);
-            List<Identified> rows = transaction.list(ENTRIES + " WHERE gamesessionid = ? AND id > ? ORDER BY id",
-                    limit + 1, GameNotificationService::withId, sessionId, after);
-            boolean more = rows.size() > limit;
-            List<Identified> page = more ? rows.subList(0, limit) : rows;
-            String next = page.isEmpty() ? Long.toString(after) : Long.toString(page.getLast().id());
-            return new HistoryPage(sessionId, page.stream().map(Identified::entry).toList(), next, more);
-        });
-    }
-
-    public State state(long sessionId) throws Exception {
-        return transactions.read(transaction -> {
-            GameDocumentService.sessionExists(transaction, sessionId);
-            return state(transaction, sessionId).orElse(null);
-        });
     }
 
 }

@@ -9,8 +9,13 @@ package org.traccar.game;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 
 /**
  * Rows of the typed game state: tc_game_catches, tc_game_speedhunts, tc_game_speedhunt_pings, tc_game_breaks,
@@ -153,6 +158,10 @@ public final class GameStateRepository {
         transaction.update("UPDATE tc_game_speedhunts SET endedat = ?, outcome = ?, reason = ?, activememberid = NULL"
                 + " WHERE gamesessionid = ? AND id = ?", transaction.now(), outcome,
                 GameJokerRepository.clip(reason, 512), sessionId, runId);
+    }
+
+    /** A run with its delivered pings. */
+    public record RunHistory(GameState.Run run, List<GameState.Ping> pings) {
     }
 
     public static List<GameState.Ping> pings(GameTransaction transaction, long sessionId, long runId)
@@ -367,6 +376,56 @@ public final class GameStateRepository {
                 + " AND activememberid IS NOT NULL", sessionId)
                 || transaction.exists("SELECT 1 FROM tc_game_live_uploads WHERE gamesessionid = ? AND purpose = ?"
                         + " AND state = ?", sessionId, GameState.SPEEDHUNT_PING, GameState.ACTIVE);
+    }
+
+    // Member state revisions and live shares -----------------------------------------------------------------
+
+    /** Member state revisions of the session's players and supporters: operator and hunter data (plan §2.4). */
+    public static Map<Long, Long> revisions(GameTransaction transaction, long sessionId) throws SQLException {
+        Map<Long, Long> result = new LinkedHashMap<>();
+        transaction.list("SELECT memberid, revision FROM tc_game_member_state WHERE gamesessionid = ?"
+                + " ORDER BY memberid", rows -> result.put(rows.getLong(1), rows.getLong(2)), sessionId);
+        return result;
+    }
+
+    /**
+     * A live share hunters see: a member whose positions an active live upload sends to hunters. {@code source} is
+     * {@code manual}, {@code geofence} or {@code speedhunt}; {@code reason} is the operator's text.
+     */
+    public record LiveShare(long memberId, String source, Instant endsAt, String reason) {
+    }
+
+    /**
+     * Hunter live shares, derived from the active live uploads that reach hunters, while the session's game runs.
+     * The server runs live uploads whatever the controller lease does, so a share stays while its upload is active;
+     * members who are caught or protected by a break, and uploads past their deadline, are not shown.
+     */
+    public static List<LiveShare> liveShares(GameTransaction transaction, long sessionId) throws SQLException {
+        List<LiveShare> result = new ArrayList<>();
+        if (!GameExecutionService.running(transaction, sessionId)) {
+            return result;
+        }
+        Instant now = transaction.now();
+        Set<Long> included = new HashSet<>();
+        for (GameState.LiveUpload upload : activeUploads(transaction, sessionId)) {
+            if (!upload.toHunters() || GameState.HUNTER_RELAY.equals(upload.purpose())
+                    || upload.deadline() != null && !upload.deadline().isAfter(now)) {
+                continue;
+            }
+            long member = upload.sourceMemberId();
+            boolean caught = activeCatch(transaction, sessionId, member).isPresent();
+            boolean onBreak = activeBreak(transaction, sessionId, member).map(item -> item.protects(now)).orElse(false);
+            if (caught || onBreak || !included.add(member)) {
+                continue;
+            }
+            String source = switch (upload.purpose()) {
+                case GameState.MANUAL -> "manual";
+                case GameState.GEOFENCE_AUTO -> "geofence";
+                default -> "speedhunt";
+            };
+            result.add(new LiveShare(member, source, upload.deadline(), upload.reason()));
+        }
+        return result;
     }
 
 }

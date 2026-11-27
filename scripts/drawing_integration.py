@@ -71,14 +71,11 @@ def main(tool_source):
         spectator = account("spectator", api.PREFIX + "-spectator@example.invalid")
         members["spectator"] = api.plan(session_id, "spectator", "Spectator")
         api.bind_account(session_id, members["spectator"]["id"], spectator["id"])
-        # Markers on the account grant nothing: only membership rows share drawings.
-        account("other", api.PREFIX + "-other@example.invalid",
-                attributes={"traccarToolUserRole": "hunter", "traccarToolShareGroupDrawings": True})
+        # The sharing switch alone grants nothing: only members of the same session share drawings.
+        account("other", api.PREFIX + "-other@example.invalid", attributes={"traccarToolShareGroupDrawings": True})
         other_member = api.plan(other_id, "hunter", "Other")
         api.bind_account(other_id, other_member["id"], accounts["other"]["id"])
-        account("unrelated", api.PREFIX + "-unrelated@example.invalid",
-                attributes={"traccarToolUserRole": "player", "traccarToolSessionDeviceId": session_id,
-                            "traccarToolShareGroupDrawings": True})
+        account("unrelated", api.PREFIX + "-unrelated@example.invalid", attributes={"traccarToolShareGroupDrawings": True})
 
         def credentials(key):
             return accounts[key]["email"], api.PASSWORD

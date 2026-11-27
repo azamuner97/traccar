@@ -30,7 +30,7 @@ import java.util.Optional;
 import java.util.Set;
 
 /**
- * Self-service game requests of data model 2 (model-1 Stage 3 rules, with members and typed state).
+ * Self-service game requests of data model 2, with members and typed state.
  *
  * <p>Members submit requests while their session's game runs ({@link GameExecutionService}), whether or not a Tool
  * controls it right now. The server authorizes them from membership and validates them against the typed tables: "a
@@ -150,7 +150,7 @@ public class GameRequestService {
                 new GamePublisher.Invalidation(sessionId, GamePublisher.REQUESTS, null)));
         java.util.Set<Long> owners = new java.util.HashSet<>(settled.members());
         if (settled.pool()) {
-            owners.addAll(GameStateService.hunters(transaction, sessionId));
+            owners.addAll(GameMemberRepository.hunters(transaction, sessionId));
         }
         if (!owners.isEmpty()) {
             Set<Long> recipients = Set.copyOf(owners);

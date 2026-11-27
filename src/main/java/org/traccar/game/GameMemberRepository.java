@@ -52,6 +52,12 @@ public final class GameMemberRepository {
                 sessionId);
     }
 
+    /** The active hunters of a session, who share the speedhunt pool. */
+    public static List<Long> hunters(GameTransaction transaction, long sessionId) throws SQLException {
+        return transaction.list("SELECT id FROM tc_game_session_members WHERE gamesessionid = ? AND role = ?"
+                + " AND state = ?", rows -> rows.getLong(1), sessionId, GameMember.HUNTER, GameMember.ACTIVE);
+    }
+
     public static List<Long> memberIds(GameTransaction transaction, long sessionId) throws SQLException {
         return transaction.list("SELECT id FROM tc_game_session_members WHERE gamesessionid = ? ORDER BY id",
                 rows -> rows.getLong(1), sessionId);
@@ -121,6 +127,14 @@ public final class GameMemberRepository {
         transaction.update("UPDATE tc_game_session_members SET state = ?, retiredat = ?, userid = NULL,"
                 + " trackerid = NULL WHERE gamesessionid = ? AND id = ?",
                 GameMember.RETIRED, transaction.now(), sessionId, memberId);
+    }
+
+    /** An account's label in histories and events: its name, or its email when the name is blank. */
+    public static Optional<String> userLabel(GameTransaction transaction, long userId) throws SQLException {
+        return transaction.first("SELECT name, email FROM tc_users WHERE id = ?", rows -> {
+            String name = rows.getString("name");
+            return GameJokerRepository.clip(name == null || name.isBlank() ? rows.getString("email") : name, 128);
+        }, userId);
     }
 
     public static boolean userExists(GameTransaction transaction, long userId) throws SQLException {

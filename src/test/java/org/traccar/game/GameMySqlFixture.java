@@ -41,19 +41,15 @@ public final class GameMySqlFixture {
         return source;
     }
 
-    /** A new, empty database with the master changelog applied, or only its model-1 part when asked. */
-    public DataSource create(boolean model2) throws Exception {
+    /** A new, empty database with the master changelog applied. */
+    public DataSource create() throws Exception {
         String name = "game_schema_" + UUID.randomUUID().toString().replace("-", "").substring(0, 12);
         try (Connection connection = source("").getConnection(); Statement statement = connection.createStatement()) {
             statement.execute("CREATE DATABASE " + name);
         }
         databases.add(name);
         DataSource source = source(name);
-        if (model2) {
-            GameSchemaFixture.apply(source, GameSchemaFixture.MASTER);
-        } else {
-            GameSchemaFixture.model1(source);
-        }
+        GameSchemaFixture.apply(source, GameSchemaFixture.MASTER);
         return source;
     }
 

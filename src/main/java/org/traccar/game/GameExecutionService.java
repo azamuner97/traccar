@@ -55,9 +55,6 @@ public class GameExecutionService {
         }
     }
 
-    private record Holder(long epoch, Long userId, String userLabel, String instanceId, String label) {
-    }
-
     private final GameTransactions transactions;
     private final GameControllerService controller;
     private final GamePublisher publisher;
@@ -141,18 +138,9 @@ public class GameExecutionService {
         }
     }
 
+    /** The account's label ({@link GameMemberRepository#userLabel}), or {@code administrator} without one. */
     static String userLabel(GameTransaction transaction, long userId) throws SQLException {
-        return transaction.first("SELECT name, email FROM tc_users WHERE id = ?", rows -> {
-            String name = rows.getString("name");
-            return GameJokerRepository.clip(name == null || name.isBlank() ? rows.getString("email") : name, 128);
-        }, userId).orElse("administrator");
-    }
-
-    private static Holder holder(GameTransaction transaction) throws SQLException {
-        return transaction.first("SELECT epoch, userid, userlabel, instanceid, label FROM tc_game_controller"
-                + " WHERE id = 1", rows -> new Holder(rows.getLong("epoch"), GameTransaction.longOrNull(rows, "userid"),
-                        rows.getString("userlabel"), rows.getString("instanceid"), rows.getString("label")))
-                .orElseThrow(() -> new IllegalStateException("Game controller row is missing"));
+        return GameMemberRepository.userLabel(transaction, userId).orElse("administrator");
     }
 
     private State apply(long sessionId, String requested, long userId, Long epoch) throws Exception {
@@ -168,7 +156,7 @@ public class GameExecutionService {
             if (cleanup && leftovers.nothing()) {
                 return current;
             }
-            Holder lease = holder(transaction);
+            GameControllerService.Row lease = GameControllerService.row(transaction, false);
             String who = epoch != null && lease.userLabel() != null ? lease.userLabel()
                     : userLabel(transaction, userId);
             String label = epoch != null && lease.label() != null && !lease.label().isBlank()
@@ -238,7 +226,7 @@ public class GameExecutionService {
             }
             Set<Long> owners = new HashSet<>(stopped.jokerMembers());
             if (stopped.pool()) {
-                owners.addAll(GameStateService.hunters(transaction, sessionId));
+                owners.addAll(GameMemberRepository.hunters(transaction, sessionId));
             }
             if (!owners.isEmpty()) {
                 Set<Long> recipients = Set.copyOf(owners);
@@ -279,7 +267,7 @@ public class GameExecutionService {
         for (GameState.LiveUpload upload : uploads) {
             ended.endUpload(upload, GAME_STOPPED);
         }
-        GameStateService.publish(transaction, publisher, sessionId, ended);
+        GameOperations.publish(transaction, publisher, sessionId, ended);
         int requests = 0;
         Set<Long> owners = new HashSet<>();
         boolean pool = false;

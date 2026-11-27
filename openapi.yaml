@@ -4055,32 +4055,6 @@ paths:
           $ref: '#/components/responses/Conflict'
         '423':
           $ref: '#/components/responses/Locked'
-  /game-sessions/{id}/name:
-    parameters:
-      - $ref: '#/components/parameters/GameSessionId'
-    put:
-      operationId: renameGameSession
-      summary: Renames a session based on its settings revision; a retry of the same rename answers the session
-      tags: [Game Sessions]
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/GameSessionRename'
-      responses:
-        '200':
-          $ref: '#/components/responses/Session'
-        '400':
-          $ref: '#/components/responses/BadRequest'
-        '403':
-          $ref: '#/components/responses/Forbidden'
-        '404':
-          $ref: '#/components/responses/NotFound'
-        '409':
-          $ref: '#/components/responses/Conflict'
-        '423':
-          $ref: '#/components/responses/Locked'
   /game-sessions/{id}/config:
     parameters:
       - $ref: '#/components/parameters/GameSessionId'
@@ -4173,21 +4147,6 @@ paths:
           $ref: '#/components/responses/Conflict'
         '423':
           $ref: '#/components/responses/Locked'
-  /game-sessions/{id}/members/{memberId}:
-    parameters:
-      - $ref: '#/components/parameters/GameSessionId'
-      - $ref: '#/components/parameters/GameMemberId'
-    get:
-      operationId: getGameMember
-      summary: One member
-      tags: [Game Sessions]
-      responses:
-        '200':
-          $ref: '#/components/responses/Member'
-        '403':
-          $ref: '#/components/responses/Forbidden'
-        '404':
-          $ref: '#/components/responses/NotFound'
   /game-sessions/{id}/members/{memberId}/name:
     parameters:
       - $ref: '#/components/parameters/GameSessionId'
@@ -4323,34 +4282,6 @@ paths:
       responses:
         '200':
           $ref: '#/components/responses/Member'
-        '403':
-          $ref: '#/components/responses/Forbidden'
-        '404':
-          $ref: '#/components/responses/NotFound'
-        '409':
-          $ref: '#/components/responses/Conflict'
-        '423':
-          $ref: '#/components/responses/Locked'
-  /game-sessions/{id}/members/{memberId}/role:
-    parameters:
-      - $ref: '#/components/parameters/GameSessionId'
-      - $ref: '#/components/parameters/GameMemberId'
-    post:
-      operationId: changeGameMemberRole
-      summary: Retires the member and plans a new one with the new role, which takes over its bindings
-      description: A member's role never changes; jokers are not carried over. The response is the new member.
-      tags: [Game Sessions]
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/GameMemberInput'
-      responses:
-        '200':
-          $ref: '#/components/responses/Member'
-        '400':
-          $ref: '#/components/responses/BadRequest'
         '403':
           $ref: '#/components/responses/Forbidden'
         '404':
@@ -5058,26 +4989,6 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
-  /game-sessions/{id}/jokers/reconcile:
-    parameters:
-      - $ref: '#/components/parameters/GameSessionId'
-    get:
-      operationId: reconcileGameJokers
-      summary: Balances that differ from their ledger or consumed reservations; empty when consistent
-      tags: [Game Effects]
-      responses:
-        '200':
-          description: OK
-          content:
-            application/json:
-              schema:
-                type: array
-                items:
-                  $ref: '#/components/schemas/GameJokerDiscrepancy'
-        '403':
-          $ref: '#/components/responses/Forbidden'
-        '404':
-          $ref: '#/components/responses/NotFound'
   /game-sessions/{id}/jokers/change:
     parameters:
       - $ref: '#/components/parameters/GameSessionId'
@@ -5533,53 +5444,9 @@ paths:
           $ref: '#/components/responses/Conflict'
         '423':
           $ref: '#/components/responses/Locked'
-  /game-notifications/history:
-    get:
-      operationId: getGameNotificationHistory
-      summary: Operator history of a session across generations
-      tags: [Game Notifications]
-      parameters:
-        - name: gameSessionId
-          in: query
-          required: true
-          schema:
-            type: integer
-            format: int64
-        - $ref: '#/components/parameters/After'
-        - $ref: '#/components/parameters/NotificationLimit'
-      responses:
-        '200':
-          description: OK
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/GameNotificationHistoryPage'
-        '400':
-          $ref: '#/components/responses/BadRequest'
-        '403':
-          $ref: '#/components/responses/Forbidden'
-        '404':
-          $ref: '#/components/responses/NotFound'
   /game-notifications/session/{id}:
     parameters:
       - $ref: '#/components/parameters/GameSessionId'
-    get:
-      operationId: getGameNotificationState
-      summary: The stream state of a session (null before its first generation)
-      tags: [Game Notifications]
-      responses:
-        '200':
-          description: OK
-          content:
-            application/json:
-              schema:
-                oneOf:
-                  - $ref: '#/components/schemas/GameNotificationState'
-                  - type: 'null'
-        '403':
-          $ref: '#/components/responses/Forbidden'
-        '404':
-          $ref: '#/components/responses/NotFound'
     post:
       operationId: initializeGameNotifications
       summary: Starts the session's first generation; an initialized session keeps its own (fenced)
@@ -5828,35 +5695,6 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/GameControllerLease'
-  /game-controller/history:
-    get:
-      operationId: getGameControllerHistory
-      summary: Acquisitions, releases, expiries, takeovers, restarts, game starts and stops, and unfenced edits
-      tags:
-        - Game Controller
-      parameters:
-        - name: before
-          in: query
-          description: Cursor returned as nextCursor by the previous page (newest first)
-          schema:
-            type: string
-        - name: limit
-          in: query
-          schema:
-            type: integer
-            minimum: 1
-            maximum: 500
-      responses:
-        '400':
-          $ref: '#/components/responses/BadRequest'
-        '403':
-          $ref: '#/components/responses/Forbidden'
-        '200':
-          description: OK
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/GameControllerHistoryPage'
 components:
   responses:
     BadRequest:
@@ -6891,18 +6729,6 @@ components:
             Administrator edits of game-owned resources, and games stopped without control, while no lease was held
           items:
             $ref: '#/components/schemas/GameControllerHistoryEntry'
-    GameControllerHistoryPage:
-      type: object
-      required: [items, nextCursor, hasMore]
-      properties:
-        items:
-          type: array
-          items:
-            $ref: '#/components/schemas/GameControllerHistoryEntry'
-        nextCursor:
-          type: [string, 'null']
-        hasMore:
-          type: boolean
     GameControllerInstance:
       type: object
       required: [instanceId]
@@ -7157,23 +6983,10 @@ components:
         schemaVersion:
           type: integer
           minimum: 1
-        settingsSchemaVersion:
-          type: integer
-          minimum: 1
-          description: Defaults to schemaVersion
+          description: Also the settings document's schema version
         config:
           type: object
           description: The settings document
-    GameSessionRename:
-      type: object
-      required: [expectedRevision, name]
-      properties:
-        expectedRevision:
-          type: integer
-          minimum: 0
-          description: The settings revision
-        name:
-          type: string
     GameDocumentUpdate:
       type: object
       required: [expectedRevision, document]
@@ -7995,19 +7808,6 @@ components:
           type: [string, 'null']
         occurredAt:
           $ref: '#/components/schemas/Time'
-    GameJokerDiscrepancy:
-      type: object
-      properties:
-        memberId:
-          $ref: '#/components/schemas/NullableId'
-        type:
-          type: string
-        field:
-          type: string
-        stored:
-          type: integer
-        expected:
-          type: integer
     GameJokerChange:
       type: object
       required: [type, quantity]
@@ -8056,15 +7856,15 @@ components:
         audiences) neither fails the live ping nor completes its run. A catch ends the member's uploads and the
         relays to them, runEnded ends the target's live ping (runEnded). breakStarted (requestId, optional
         deadline) starts the immediate break of a jokerBreak request that succeeds in the same delivery; an active
-        break of the member past its deadline ends first. breakPlanned (memberId, plannedStart, overAllocate) and
-        breakCancelled (breakId, detail) plan and cancel a planned break. Planned breaks start, wait and are missed
+        break of the member past its deadline ends first. breakCancelled (breakId, detail) cancels a planned break;
+        operators plan breaks with POST /game-sessions/{id}/jokers/breaks. Planned breaks start, wait and are missed
         on the server, and active breaks end at their deadline on the server, while the game runs (execution events
         of category break); there is no operation for them.
       properties:
         type:
           type: string
           enum: [catch, release, pingDelivered, pingFailed, runEnded, liveUploadStarted, liveUploadEnded,
-                 breakPlanned, breakStarted, breakCancelled, checkpoint]
+                 breakStarted, breakCancelled, checkpoint]
       additionalProperties: true
     GameEffectsDelivery:
       type: object
@@ -8890,19 +8690,6 @@ components:
           type: [string, 'null']
         resetAt:
           $ref: '#/components/schemas/NullableTime'
-        items:
-          type: array
-          items:
-            $ref: '#/components/schemas/GameNotificationEntry'
-        nextCursor:
-          type: string
-        hasMore:
-          type: boolean
-    GameNotificationHistoryPage:
-      type: object
-      properties:
-        gameSessionId:
-          $ref: '#/components/schemas/Id'
         items:
           type: array
           items:

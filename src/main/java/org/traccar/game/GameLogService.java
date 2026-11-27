@@ -18,8 +18,8 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * The append-only session log (tc_game_session_logs), read by operators. It also holds what model 1 kept as
- * {@code speedhunt_events} in the Tool runtime: those entries use the category {@link #SPEEDHUNT}.
+ * The append-only session log (tc_game_session_logs), read by operators. The Tool's speedhunt log uses the category
+ * {@code speedhunt}.
  *
  * <p>Rows with {@code data} are execution events ({@link GameEvent}): the server writes them for its own execution
  * steps and pushes them to administrators after commit. Lines the Tool appends never carry data.
@@ -27,7 +27,6 @@ import java.util.List;
 @Singleton
 public class GameLogService {
 
-    public static final String SPEEDHUNT = "speedhunt";
     public static final int MAX_BATCH = 500;
     public static final int MAX_MESSAGE = 16384;
 

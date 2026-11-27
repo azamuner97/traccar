@@ -130,10 +130,11 @@ public class GameControllerFilterTest {
         // "07" names session 7 for the resource, so it is the running session's write.
         when(execution.runningSessionId()).thenReturn(7L);
         when(controller.check(anyLong(), any())).thenThrow(GameControllerService.locked("lease required"));
-        for (String path : new String[] {"game-sessions/07/name", "game-sessions/+7/name", "game-sessions/7/name"}) {
-            var rename = request(1, "PUT", path);
-            filter.filter(rename);
-            assertEquals(423, abortStatus(rename), path);
+        for (String path : new String[] {"game-sessions/07/config", "game-sessions/+7/config",
+                "game-sessions/7/config"}) {
+            var write = request(1, "PUT", path);
+            filter.filter(write);
+            assertEquals(423, abortStatus(write), path);
         }
         var owned = request(1, "PUT", "devices/0201");
         filter.filter(owned);

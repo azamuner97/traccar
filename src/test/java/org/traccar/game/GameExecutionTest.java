@@ -1,5 +1,6 @@
 package org.traccar.game;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -22,7 +23,7 @@ public abstract class GameExecutionTest extends GameTestBase {
     private GameRequestService requests;
     private GameControllerService controller;
     private GameExecutionService execution;
-    private GameStateService state;
+    private GameStateFixture state;
     private GameJokerService jokers;
     private GameLogService logs;
     private GameEffectsService effects;
@@ -32,9 +33,9 @@ public abstract class GameExecutionTest extends GameTestBase {
     @Override
     protected void createServices() throws Exception {
         requests = new GameRequestService(transactions, mapper, publisher);
-        controller = new GameControllerService(source, clock, 30, 5, requests, publisher);
+        controller = new GameControllerService(transactions, 30, 5, requests, publisher);
         execution = new GameExecutionService(transactions, controller, publisher);
-        state = new GameStateService(transactions, mapper, publisher);
+        state = new GameStateFixture(transactions, mapper, publisher);
         jokers = new GameJokerService(transactions, publisher);
         logs = new GameLogService(transactions);
         effects = effectsService();
@@ -73,6 +74,36 @@ public abstract class GameExecutionTest extends GameTestBase {
     }
 
     // Game state --------------------------------------------------------------------------------------------
+
+    /** The lease's times are UTC wall clocks whatever the JVM zone (Pacific/Kiritimati here), as game times are. */
+    @Test
+    void leaseTimesAreStoredAsUtcWallClocks() throws Exception {
+        java.time.Instant at = T0.plusMillis(250);
+        clock.set(at);
+        long epoch = acquire(alice, A);
+        for (String column : List.of("acquiredat", "renewedat", "expiresat")) {
+            String table = "tc_game_controller WHERE id = 1";
+            assertEquals(15, number("SELECT EXTRACT(DAY FROM " + column + ") FROM " + table), column);
+            assertEquals(12, number("SELECT EXTRACT(HOUR FROM " + column + ") FROM " + table), column);
+        }
+        String acquired = "tc_game_controller_history WHERE epoch = " + epoch + " AND event = 'acquired'";
+        assertEquals(15, number("SELECT EXTRACT(DAY FROM occurredat) FROM " + acquired));
+        assertEquals(12, number("SELECT EXTRACT(HOUR FROM occurredat) FROM " + acquired));
+        // Game code reads them as game times, and the lease reads them back unchanged.
+        try (var connection = source.getConnection();
+             var rows = connection.createStatement().executeQuery(
+                     "SELECT acquiredat, expiresat FROM tc_game_controller WHERE id = 1")) {
+            assertTrue(rows.next());
+            assertEquals(at, GameTime.get(rows, "acquiredat"));
+            assertEquals(at.plusSeconds(30), GameTime.get(rows, "expiresat"));
+        }
+        try (var connection = source.getConnection();
+             var rows = connection.createStatement().executeQuery("SELECT occurredat FROM " + acquired)) {
+            assertTrue(rows.next());
+            assertEquals(at, GameTime.get(rows, "occurredat"));
+        }
+        assertEquals(at.toString(), controller.status().acquiredAt());
+    }
 
     @Test
     void startStopAndOneRunningGamePerServer() throws Exception {
@@ -134,7 +165,7 @@ public abstract class GameExecutionTest extends GameTestBase {
         long other = controller.takeover(bob, B, "Desk").lease().epoch();
         assertTrue(execution.get(session).running());
 
-        controller = new GameControllerService(source, clock, 30, 5, requests, publisher);
+        controller = new GameControllerService(transactions, 30, 5, requests, publisher);
         execution = new GameExecutionService(transactions, controller, publisher);
         assertTrue(controller.endAfterRestart());
         assertTrue(execution.get(session).running());
@@ -165,7 +196,7 @@ public abstract class GameExecutionTest extends GameTestBase {
                 ben.id(), memberRevision(ben.id()), null));
         epoch = acquire(alice, A);
         requests.claim(session, ping.id(), epoch);
-        long upload = state.apply(session, epoch, List.of(new GameOperation.LiveUploadStarted(GameState.MANUAL,
+        long upload = state.apply(session, List.of(new GameOperation.LiveUploadStarted(GameState.MANUAL,
                 anna.id(), null, true, true, true, 30, null, "Operator", null, null, null, null, null))).results()
                 .getFirst().id();
         long annaRevision = memberRevision(anna.id());
@@ -231,7 +262,7 @@ public abstract class GameExecutionTest extends GameTestBase {
 
         // Under the session lock, nothing starts uploads, records pings or writes mirror positions any more.
         String stopped = GameExecutionService.NOT_RUNNING;
-        assertEquals(409, conflictOf(() -> state.apply(session, epoch, List.of(manualLive(anna))), stopped));
+        assertEquals(409, conflictOf(() -> state.apply(session, List.of(manualLive(anna))), stopped));
         assertEquals(409, conflictOf(() -> deliver(session, epoch, "after-the-stop-1", List.of(manualLive(anna)),
                 null), stopped));
         assertEquals(409, conflictOf(() -> deliver(session, epoch, "after-the-stop-2", List.of(
@@ -259,7 +290,7 @@ public abstract class GameExecutionTest extends GameTestBase {
         GameMember anna = bound(session, "player");
         long epoch = acquire(alice, A);
         start(session, epoch);
-        long upload = state.apply(session, epoch, List.of(manualLive(anna))).results().getFirst().id();
+        long upload = state.apply(session, List.of(manualLive(anna))).results().getFirst().id();
         jokers.change(session, new GameJokerService.Change(anna.id(), GameJokerRepository.HUNTER_POSITIONS, 1,
                 null), "Operator");
         GameRequest joker = requests.submit(anna, new GameRequestService.Submission(GameRequest.HUNTER_POSITIONS,
@@ -290,7 +321,7 @@ public abstract class GameExecutionTest extends GameTestBase {
 
         // The administrator's stop without control cleans up too.
         start(session, epoch);
-        state.apply(session, epoch, List.of(manualLive(anna)));
+        state.apply(session, List.of(manualLive(anna)));
         stopGame(session);
         clock.advance(Duration.ofSeconds(31));
         stop(session, null, bob);
@@ -456,20 +487,27 @@ public abstract class GameExecutionTest extends GameTestBase {
         // Review SC-7: the filter let the write through without the lease because the game was stopped; the game
         // starts before the write locks the session, so the write is checked again under the lock.
         long session = session();
+        int version = sessions.get(session).settings().schemaVersion();
         GameUnfencedWrites.begin(session);
         try {
             long revision = sessions.get(session).settings().revision();
-            sessions.rename(session, revision, "Before the start");
+            sessions.updateSettings(session, revision, version, note("Before the start"));
             startGame(session);
             long current = sessions.get(session).settings().revision();
-            assertEquals(GameControllerService.LOCKED, status(() -> sessions.rename(session, current, "Too late")));
-            assertEquals("Before the start", sessions.get(session).name());
+            assertEquals(GameControllerService.LOCKED,
+                    status(() -> sessions.updateSettings(session, current, version, note("Too late"))));
+            assertEquals(note("Before the start"), sessions.get(session).settings().settings());
         } finally {
             GameUnfencedWrites.end();
         }
         // The same write fenced (or the server's own) is not marked and goes through.
         long current = sessions.get(session).settings().revision();
-        assertEquals("Fenced", sessions.rename(session, current, "Fenced").name());
+        assertEquals(note("Fenced"), sessions.updateSettings(session, current, version, note("Fenced")).settings()
+                .settings());
+    }
+
+    private JsonNode note(String text) {
+        return mapper.createObjectNode().put("note", text);
     }
 
     @Test

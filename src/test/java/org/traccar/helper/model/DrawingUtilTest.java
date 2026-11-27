@@ -117,38 +117,36 @@ public class DrawingUtilTest {
 
         User owner = user(10, true);
         var hunter = member("hunter", 100);
-        assertTrue(DrawingUtil.canView(owner, hunter, drawing));
-        assertTrue(DrawingUtil.canEdit(owner, hunter, drawing));
-        assertTrue(DrawingUtil.canDelete(owner, hunter, drawing));
+        assertTrue(DrawingUtil.canView(owner, hunter, drawing, null, null));
+        assertTrue(DrawingUtil.canEdit(owner, hunter, drawing, null, null));
+        assertTrue(DrawingUtil.canDelete(owner, hunter, drawing, null, null));
 
         User disabledOwner = user(10, false);
-        assertTrue(DrawingUtil.canView(disabledOwner, hunter, drawing));
-        assertFalse(DrawingUtil.canEdit(disabledOwner, hunter, drawing));
-        assertFalse(DrawingUtil.canDelete(disabledOwner, hunter, drawing));
+        assertTrue(DrawingUtil.canView(disabledOwner, hunter, drawing, null, null));
+        assertFalse(DrawingUtil.canEdit(disabledOwner, hunter, drawing, null, null));
+        assertFalse(DrawingUtil.canDelete(disabledOwner, hunter, drawing, null, null));
 
         User unrelated = user(11, true);
-        assertFalse(DrawingUtil.canView(unrelated, member("player", 100), drawing));
-        assertFalse(DrawingUtil.canEdit(unrelated, member("player", 100), drawing));
+        assertFalse(DrawingUtil.canView(unrelated, member("player", 100), drawing, null, null));
+        assertFalse(DrawingUtil.canEdit(unrelated, member("player", 100), drawing, null, null));
 
         User spectator = user(12, false);
         var watching = member("spectator", 100);
-        assertTrue(DrawingUtil.canView(spectator, watching, drawing));
+        assertTrue(DrawingUtil.canView(spectator, watching, drawing, null, null));
         assertFalse(DrawingUtil.canCreateOrEdit(spectator, watching));
-        assertFalse(DrawingUtil.canEdit(spectator, watching, drawing));
-        assertFalse(DrawingUtil.canView(user(13, false), member("spectator", 101), drawing));
-        // An account without membership is no spectator, whatever its attributes say.
-        User marked = user(14, true);
-        marked.getAttributes().put("traccarToolUserRole", "spectator");
-        marked.getAttributes().put("traccarToolSessionDeviceId", 100);
-        assertFalse(DrawingUtil.canView(marked, null, drawing));
-        assertTrue(DrawingUtil.canCreateOrEdit(marked, null));
+        assertFalse(DrawingUtil.canEdit(spectator, watching, drawing, null, null));
+        assertFalse(DrawingUtil.canView(user(13, false), member("spectator", 101), drawing, null, null));
+        // An account without membership is no spectator.
+        User outsider = user(14, true);
+        assertFalse(DrawingUtil.canView(outsider, null, drawing, null, null));
+        assertTrue(DrawingUtil.canCreateOrEdit(outsider, null));
 
         User administrator = user(15, false);
         administrator.setAdministrator(true);
-        assertTrue(DrawingUtil.canView(administrator, null, drawing));
+        assertTrue(DrawingUtil.canView(administrator, null, drawing, null, null));
         assertTrue(DrawingUtil.canCreateOrEdit(administrator, null));
-        assertFalse(DrawingUtil.canEdit(administrator, null, drawing));
-        assertTrue(DrawingUtil.canDelete(administrator, null, drawing));
+        assertFalse(DrawingUtil.canEdit(administrator, null, drawing, null, null));
+        assertTrue(DrawingUtil.canDelete(administrator, null, drawing, null, null));
     }
 
     @Test
@@ -167,7 +165,7 @@ public class DrawingUtilTest {
             assertTrue(DrawingUtil.canView(peer, peerMember, drawing, owner, ownerMember));
             assertTrue(DrawingUtil.canEdit(peer, peerMember, drawing, owner, ownerMember));
             assertTrue(DrawingUtil.canDelete(peer, peerMember, drawing, owner, ownerMember));
-            assertFalse(DrawingUtil.canEdit(peer, peerMember, drawing));
+            assertFalse(DrawingUtil.canEdit(peer, peerMember, drawing, null, null));
             assertFalse(DrawingUtil.canView(peer, peerMember, drawing, owner, null));
             owner.getAttributes().put(DrawingUtil.ATTRIBUTE_SHARE_GROUP_DRAWINGS, false);
             assertFalse(DrawingUtil.canView(peer, peerMember, drawing, owner, ownerMember));

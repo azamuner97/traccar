@@ -33,7 +33,7 @@ public class GameSnapshotService {
      * upload, every one-off hunter relay that delivered, the member state revisions and the per-member speedhunt
      * statistics.
      */
-    public record State(List<GameState.Catch> catches, List<GameStateService.RunHistory> runs,
+    public record State(List<GameState.Catch> catches, List<GameStateRepository.RunHistory> runs,
                         List<GameState.Break> breaks, List<GameState.LiveUpload> liveUploads,
                         List<GameState.Relay> relays, Map<Long, Long> memberRevisions,
                         List<GameStateRepository.Statistics> statistics) {
@@ -65,16 +65,16 @@ public class GameSnapshotService {
     public Snapshot snapshot(long sessionId) throws Exception {
         return transactions.snapshot(transaction -> {
             GameSessionService.Session session = GameSessionService.read(transaction, objectMapper, sessionId);
-            List<GameStateService.RunHistory> runs = new ArrayList<>();
+            List<GameStateRepository.RunHistory> runs = new ArrayList<>();
             for (GameState.Run run : GameStateRepository.runs(transaction, sessionId, false)) {
-                runs.add(new GameStateService.RunHistory(run, GameStateRepository.pings(transaction, sessionId,
+                runs.add(new GameStateRepository.RunHistory(run, GameStateRepository.pings(transaction, sessionId,
                         run.id())));
             }
             State state = new State(GameStateRepository.catches(transaction, sessionId, false), runs,
                     GameStateRepository.breaks(transaction, sessionId),
                     GameStateRepository.uploads(transaction, sessionId),
                     GameStateRepository.relays(transaction, sessionId),
-                    GameStateService.revisions(transaction, sessionId),
+                    GameStateRepository.revisions(transaction, sessionId),
                     GameStateRepository.statistics(transaction, sessionId));
             Resources resources = new Resources(GameResourceRepository.mirrors(transaction, sessionId),
                     GameResourceRepository.groups(transaction, sessionId),

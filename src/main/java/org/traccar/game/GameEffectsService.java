@@ -45,7 +45,7 @@ import java.util.Set;
  * delivery ID with the same content returns the recorded outcome, with the current push states, and applies
  * nothing; the same ID with other content answers 409.
  *
- * <p>Privacy, as in model 1: fake and real positions use one payload, the target's own speedhunt fake is applied
+ * <p>Privacy: fake and real positions use one payload, the target's own speedhunt fake is applied
  * by the engine so hunter-visible data never marks it, joker invalidations reach only the owners concerned (and the
  * hunters for their pool), and nothing names a speedhunt target to players and supporters.
  */
@@ -320,7 +320,7 @@ public class GameEffectsService {
         }
 
         long revision = transaction.bumpSession();
-        GameStateService.publish(transaction, publisher, sessionId, applied);
+        GameOperations.publish(transaction, publisher, sessionId, applied);
         collector.publish(transaction, publisher);
         if (sessionAlert || !recipients.isEmpty()) {
             Set<Long> members = sessionAlert ? null : Set.copyOf(recipients);

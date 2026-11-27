@@ -45,8 +45,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * <li>Game endpoints that change execution state require the current {@code controllerEpoch}: effects, members,
  * resource rows, checkpoints, requests and jokers of any session, every write of the running session (its game
  * state, {@code running}, its timetable changes and execution toggle), and every write of game notifications and
- * proximity. Configuration edits of a stored session that is not running (name, settings, credentials, geofence
- * plans, the device list, timetable changes and toggle, logs) and session creation need only their revision check;
+ * proximity. Configuration edits of a stored session that is not running (settings, credentials, geofence plans,
+ * the device list, timetable changes and toggle, logs) and session creation need only their revision check;
  * the game state is checked again under the session lock ({@link GameUnfencedWrites}), so an edit that meets a game
  * started meanwhile answers 423. Without a controller nobody changes a running session, while the server's own
  * execution goes on.</li>
